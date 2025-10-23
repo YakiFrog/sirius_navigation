@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'cancel_navigation = sirius_navigation.cancel_navigation:main',
         ],
     },
 )

@@ -7,11 +7,14 @@
   <maintainer email="Frog7352@icloud.com">kotantu-desktop</maintainer>
   <license>TODO: License declaration</license>
 
+  <!-- 依存関係にあるパッケージはここに記述 -->
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>nav2_simple_commander</depend>
+  <depend>nav2_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
