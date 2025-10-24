@@ -105,7 +105,7 @@ class SiriusAssistedTeleop(Node):
             time_allowance = self.get_parameter('time_allowance').value
         
         # 初期ポーズを設定
-        self.set_initial_pose()
+        # self.set_initial_pose()
         
         self.get_logger().info("'assisted_teleop' アクションサーバーを待機中...")
         
