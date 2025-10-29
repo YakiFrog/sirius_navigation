@@ -21,16 +21,25 @@ def generate_launch_description():
         'ekf_fusion.yaml'
     )
     
-    # EKFノード
+    # EKFノード（詳細ログとQoS互換性の設定）
     ekf_node = Node(
         package='robot_localization',
         executable='ekf_node',
         name='ekf_filter_node',
         output='screen',
-        parameters=[params_file],
+        parameters=[
+            params_file,
+            {
+                # QoS設定の追加パラメータ
+                'debug': False,
+                'debug_out_file': '/tmp/ekf_debug.txt'
+            }
+        ],
         remappings=[
             ('/odometry/filtered', '/odom/filtered')
-        ]
+        ],
+        # ログレベルを詳細に設定
+        arguments=['--ros-args', '--log-level', 'info']
     )
     
     return LaunchDescription([

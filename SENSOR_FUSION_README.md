@@ -157,6 +157,52 @@ frequency: 10.0
 
 ## トラブルシューティング
 
+### 自己位置がぐちゃぐちゃになる
+
+**症状**: パーティクルが乱れる、ロボットの位置が不安定
+
+**原因と対処**:
+
+1. **EKFの更新レートが高すぎる**
+   ```yaml
+   # 修正前（高すぎる）
+   frequency: 30.0
+   
+   # 修正後（シミュレータに適切）
+   frequency: 10.0
+   ```
+
+2. **センサータイムアウトが短すぎる**
+   ```yaml
+   # 修正前（短すぎる）
+   sensor_timeout: 0.1
+   
+   # 修正後（余裕を持たせる）
+   sensor_timeout: 0.5
+   ```
+
+3. **IMUの角速度・加速度がノイジー**
+   ```yaml
+   # yawのみを使用（roll, pitch, 角速度, 加速度をオフ）
+   imu0_config: [false, false, false,  # x, y, z
+                 false, false, true,   # roll, pitch, yaw（yawのみ）
+                 false, false, false,  # vx, vy, vz
+                 false, false, false,  # 角速度オフ
+                 false, false, false]  # 加速度オフ
+   ```
+
+4. **TF配信の競合**
+   ```yaml
+   # EKFのTF配信をオフにする
+   publish_tf: false
+   ```
+
+5. **2D/3Dモードの問題**
+   ```yaml
+   # シミュレータでは2Dモードが安定
+   two_d_mode: true
+   ```
+
 ### EKFが起動しない
 ```bash
 # robot_localizationがインストールされているか確認
