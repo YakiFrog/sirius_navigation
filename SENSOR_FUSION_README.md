@@ -8,6 +8,19 @@
 - **高精度な速度推定**: ホイールエンコーダーとIMUの角速度を組み合わせ
 - **ロバストな自己位置推定**: 片方のセンサーが不安定でも補完可能
 
+## 対応IMUセンサー
+
+### Witmotion HWT905（実機推奨）
+- **高精度AHRS**: 静止時0.05°の姿勢精度
+- **内蔵Kalmanフィルタ**: 姿勢計算済みで高品質
+- **高速更新**: 最大200Hz
+- **詳細情報**: [README_HWT905.md](./README_HWT905.md)
+- **クイックスタート**: [QUICKSTART_HWT905.md](./QUICKSTART_HWT905.md)
+
+### シミュレーション用IMU
+- Gazeboの仮想IMUセンサー
+- シミュレーション環境でのテスト用
+
 ## 設定ファイル
 
 ### `/params/ekf_fusion.yaml`
@@ -19,7 +32,7 @@ EKFの設定ファイル。以下を定義：
 
 ## 起動方法
 
-### 方法1: 個別起動（デバッグ用）
+### 方法1: シミュレーション環境
 
 ```bash
 # ターミナル1: シミュレーション
@@ -27,46 +40,48 @@ cd ~/sirius_jazzy_ws
 source install/setup.bash
 ros2 launch sirius_description sim.launch.py
 
-# ターミナル2: センサフュージョン
+# ターミナル2: センサフュージョン（シミュレーションIMU使用）
 cd ~/sirius_jazzy_ws
 source install/setup.bash
 ros2 launch sirius_navigation sensor_fusion.launch.py
-
-# ターミナル3: Nav2
-cd ~/sirius_jazzy_ws
-source install/setup.bash
-ros2 launch nav2_bringup navigation_launch.py \
-    params_file:=$HOME/sirius_jazzy_ws/params/nav2_params.yaml \
-    use_sim_time:=true
-
-# ターミナル4: Localization
-cd ~/sirius_jazzy_ws
-source install/setup.bash
-ros2 launch nav2_bringup localization_launch.py \
-    map:=$HOME/sirius_jazzy_ws/maps_waypoints/map.yaml \
-    use_sim_time:=true \
-    params_file:=$HOME/sirius_jazzy_ws/params/nav2_params.yaml
 ```
 
-### 方法2: 統合起動（推奨）
+### 方法2: 実機環境（HWT905使用）
 
 ```bash
-# ターミナル1: シミュレーション
-cd ~/sirius_jazzy_ws
-source install/setup.bash
-ros2 launch sirius_description sim.launch.py
+# HWT905を自動起動してセンサフュージョン
+ros2 launch sirius_navigation sensor_fusion.launch.py start_hwt905:=true
 
-# ターミナル2: センサフュージョン + Nav2
-cd ~/sirius_jazzy_ws
-source install/setup.bash
-ros2 launch sirius_navigation navigation_with_fusion.launch.py
+# カスタムポート指定
+ros2 launch sirius_navigation sensor_fusion.launch.py \
+  start_hwt905:=true \
+  hwt905_port:=/dev/ttyUSB0 \
+  hwt905_baud:=115200
+```
+
+### 方法3: HWT905単体テスト
+
+```bash
+# HWT905のみを起動してデータ確認
+ros2 launch sirius_navigation witmotion_hwt905.launch.py
+
+# データを確認
+ros2 topic echo /imu
+```
+
+### 方法4: 完全なナビゲーションスタック（実機）
+
+```bash
+# ターミナル1: センサフュージョン + HWT905
+ros2 launch sirius_navigation sensor_fusion.launch.py start_hwt905:=true
+
+# ターミナル2: Nav2
+ros2 launch nav2_bringup navigation_launch.py \
+    params_file:=$HOME/sirius_jazzy_ws/params/nav2_params.yaml
 
 # ターミナル3: Localization
-cd ~/sirius_jazzy_ws
-source install/setup.bash
 ros2 launch nav2_bringup localization_launch.py \
     map:=$HOME/sirius_jazzy_ws/maps_waypoints/map.yaml \
-    use_sim_time:=true \
     params_file:=$HOME/sirius_jazzy_ws/params/nav2_params.yaml
 ```
 
@@ -238,3 +253,5 @@ sensor_timeout: 0.5  # 0.1 → 0.5
 - [robot_localization公式ドキュメント](http://docs.ros.org/en/jazzy/p/robot_localization/)
 - [EKFパラメータ説明](https://docs.nav2.org/tutorials/docs/using_collision_monitor.html)
 - [Nav2との統合](https://navigation.ros.org/)
+- **HWT905セットアップ**: [README_HWT905.md](./README_HWT905.md)
+- **HWT905クイックスタート**: [QUICKSTART_HWT905.md](./QUICKSTART_HWT905.md)
