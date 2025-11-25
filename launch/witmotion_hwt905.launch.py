@@ -15,20 +15,14 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, LogInfo
 from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
-    # ========================================
-    # Launch引数の定義
-    # ========================================
-    
-    # デフォルトのconfig パスを取得
-    # ワークスペースのparamsディレクトリを優先的に使用
-    default_config = '/home/kotantu-desktop/sirius_jazzy_ws/params/wt905.yaml'
-    
-    # もしワークスペースのファイルがなければ、パッケージのデフォルトを試す
+    # Expand home so os.path.exists works
+    default_config = os.path.expanduser('~/sirius_jazzy_ws/params/wt905.yaml')
+
     if not os.path.exists(default_config):
         try:
             default_config = os.path.join(
@@ -36,37 +30,28 @@ def generate_launch_description():
                 'config',
                 'wt905.yml'
             )
-        except:
+        except Exception:
             default_config = ''
 
-    # 設定ファイルパスの引数
     config_file_arg = DeclareLaunchArgument(
         'config_file',
         default_value=default_config,
         description='Witmotion ROSノードの設定ファイルへのパス'
     )
 
-    # ========================================
-    # Witmotion ROSノード
-    # ========================================
-    
+    # ログで実際に使われる設定ファイルを出力する
+    config_log = LogInfo(msg=['Using witmotion config: ', LaunchConfiguration('config_file')])
+
     witmotion_node = Node(
         package='witmotion_ros',
         executable='witmotion_ros_node',
-        name='witmotion',  # yamlファイルの名前空間と一致させる
+        name='witmotion',
         output='screen',
         parameters=[LaunchConfiguration('config_file')],
-        # remappings=[
-        #     # 必要に応じてトピックをリマップ
-        #     # ('/imu', '/sensors/imu'),
-        # ]
     )
 
-    # ========================================
-    # LaunchDescriptionの構築
-    # ========================================
-    
     return LaunchDescription([
         config_file_arg,
+        config_log,
         witmotion_node,
     ])
