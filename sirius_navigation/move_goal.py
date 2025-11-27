@@ -15,6 +15,8 @@ import argparse
 from dataclasses import dataclass
 from typing import List
 from math import sin, cos, pi
+import os
+from pathlib import Path
 
 @dataclass
 class Waypoint:
@@ -40,7 +42,10 @@ class Nav2GoalClient(Node):
         self.tfBuffer = Buffer()
         self.listener = TransformListener(self.tfBuffer, self)
         
-        file_path = "~/sirius_jazzy_ws/maps_waypoints/waypoints/waypoints.yaml"
+        # Allow overriding the waypoint file via env var SIRIUS_WAYPOINTS for flexibility
+        file_path = os.environ.get(
+            'SIRIUS_WAYPOINTS', "~/sirius_jazzy_ws/maps_waypoints/waypoints/waypoints.yaml"
+        )
         self.waypoints = self.load_waypoints(file_path)
         self.count = count - 1
         self.loop_count = 0
@@ -49,7 +54,24 @@ class Nav2GoalClient(Node):
         self.timer = self.create_timer(1.0, self.get_position)
         
     def load_waypoints(self, file_path: str) -> List[Waypoint]:
-        with open(file_path, 'r') as f:
+        # Expand ~ and resolve absolute path
+        expanded = os.path.expanduser(file_path)
+        path = Path(expanded).resolve()
+
+        # If file not found, try typical workspace-relative location (cwd) as a fallback
+        if not path.exists():
+            fallback = Path.cwd() / 'maps_waypoints' / 'waypoints' / 'waypoints.yaml'
+            if fallback.exists():
+                path = fallback.resolve()
+            else:
+                # Provide a helpful error message with attempted locations
+                tried = [str(path), str(fallback)]
+                raise FileNotFoundError(
+                    f"Waypoint file not found. Tried the following locations: {tried}.\n"
+                    "Set the SIRIUS_WAYPOINTS environment variable or create the file at one of these paths."
+                )
+
+        with open(path, 'r') as f:
             data = yaml.safe_load(f)
         return [Waypoint(
             number = wp['number'],
@@ -120,6 +142,7 @@ class Nav2GoalClient(Node):
         )
         
         self.odom_publisher.publish(odom_msg)
+        self.get_logger().info(f"Published odometry for goal {wp.number}.")
         
     def goal_response_callback(self, future):
         if future.result().accepted:
@@ -140,10 +163,10 @@ class Nav2GoalClient(Node):
     def get_position(self):
         try:
             # 最新のtransformを取得
-            when = self.tfBuffer.get_latest_common_time('map', 'base_footprint')
+            when = self.tfBuffer.get_latest_common_time('map', 'sirius3/base_footprint')
             transform = self.tfBuffer.lookup_transform(
                 'map',
-                'base_footprint',
+                'sirius3/base_footprint',
                 when
             )
             translation = transform.transform.translation
