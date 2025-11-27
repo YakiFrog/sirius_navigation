@@ -83,6 +83,8 @@ class GetPose(Node):
 
         except tf2.ExtrapolationException:
             self.get_logger().warning('Extrapolation error')
+        except tf2.ConnectivityException:
+            self.get_logger().warning("Could not find a connection between 'map' and 'sirius3/base_link'")
         
 
 def main(args=None):
