@@ -12,7 +12,7 @@ import math
 import sys
 import os
 
-file_path = os.path.expanduser("~/sirius_jazzy_ws/maps_waypoints/waypoints/new_waypoints.yaml")
+file_path = os.path.expanduser("~/sirius_jazzy_ws/maps_waypoints/waypoints/raw_waypoints.yaml")
 
 class GetPose(Node):
     def __init__(self):
