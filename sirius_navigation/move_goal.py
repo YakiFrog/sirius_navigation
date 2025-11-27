@@ -116,6 +116,11 @@ class Nav2GoalClient(Node):
         
         self.get_logger().info(f"Sending goal {wp.number}...")
         self._action_client.send_goal_async(goal_msg).add_done_callback(self.goal_response_callback)
+        # Also publish odometry for the target when sending a goal so the first waypoint odom is not missed
+        try:
+            self.send_odom()
+        except Exception as e:
+            self.get_logger().warn(f"Failed to publish odom for goal {wp.number}: {str(e)}")
         
     def send_odom(self):
         if self.count >= len(self.waypoints):
@@ -199,7 +204,6 @@ class Nav2GoalClient(Node):
                             
                     self.count += 1
                     self.send_goal()
-                    self.send_odom()
                 
                 # 定期的にゴールを再送信
                 elif self.loop_count % 5 == 0:
