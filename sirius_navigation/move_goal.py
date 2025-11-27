@@ -96,7 +96,7 @@ class Nav2GoalClient(Node):
         
     def send_goal(self):
         if self.count >= len(self.waypoints):
-            self.get_logger().info(f"All {len(self.waypoints)} waypoints have been completed. No more goals to send.")
+            self.get_logger().info(f"All {len(self.waypoints)} waypoints completed.")
             return
         
         wp = self.waypoints[self.count]
@@ -118,7 +118,7 @@ class Nav2GoalClient(Node):
         # capture and store the current goal index for callbacks and logging
         self.current_goal_index = self.count
         self.get_logger().info(
-            f"[Waypoint:{wp.number}] Sending goal {self.count + 1}/{len(self.waypoints)} -> x={float(wp.x):.2f}, y={float(wp.y):.2f}, yaw={float(wp.angle_radians):.2f} rad"
+            f"[WP:{wp.number}] {self.count + 1}/{len(self.waypoints)} -> pos=({float(wp.x):.2f},{float(wp.y):.2f}) yaw={float(wp.angle_radians):.2f}"
         )
         # Pass the goal index through a lambda so the callback can log the specific waypoint
         self._action_client.send_goal_async(goal_msg).add_done_callback(
@@ -132,7 +132,7 @@ class Nav2GoalClient(Node):
         
     def send_odom(self):
         if self.count >= len(self.waypoints):
-            self.get_logger().info(f"All {len(self.waypoints)} waypoints have been completed. No more odometry to publish.")
+            self.get_logger().info(f"All {len(self.waypoints)} waypoints completed.")
             return
         
         wp = self.waypoints[self.count]
@@ -156,7 +156,7 @@ class Nav2GoalClient(Node):
         
         self.odom_publisher.publish(odom_msg)
         self.get_logger().info(
-            f"[Waypoint:{wp.number}] Published target odometry for goal {self.count + 1}/{len(self.waypoints)} at x={odom_msg.pose.pose.position.x:.2f}, y={odom_msg.pose.pose.position.y:.2f}"
+            f"[WP:{wp.number}] odom pos=({odom_msg.pose.pose.position.x:.2f},{odom_msg.pose.pose.position.y:.2f})"
         )
         
     def goal_response_callback(self, future, goal_index = None):
@@ -171,7 +171,7 @@ class Nav2GoalClient(Node):
         if goal_index is not None and goal_index < len(self.waypoints):
             wp = self.waypoints[goal_index]
 
-        name = f"[Waypoint:{wp.number}] " if wp else "[Waypoint:?] "
+        name = f"[WP:{wp.number}] " if wp else "[WP:?] "
         if goal_handle.accepted:
             self.get_logger().info(name + "Goal accepted by action server.")
             self.distance = float('inf')  # reset distance for new goal
@@ -185,11 +185,11 @@ class Nav2GoalClient(Node):
         wp = None
         if goal_index is not None and goal_index < len(self.waypoints):
             wp = self.waypoints[goal_index]
-        prefix = f"[Waypoint:{wp.number}] " if wp else "[Waypoint:?] "
+        prefix = f"[WP:{wp.number}] " if wp else "[WP:?] "
         if should_stop:
-            self.get_logger().info(prefix + "Published STOP command.")
+            self.get_logger().info(prefix + "STOP sent")
         else:
-            self.get_logger().info(prefix + "Published RESUME command.")
+            self.get_logger().info(prefix + "RESUME sent")
             
     def get_position(self):
         try:
@@ -212,18 +212,18 @@ class Nav2GoalClient(Node):
                 y_distance = y_goal - self.position[1]
                 self.distance = math.sqrt(x_distance**2 + y_distance**2)
                 # Log the current distance to the active goal with formatting
-                current_wp_info = f"[Waypoint:{current_wp.number}] ({self.count + 1}/{len(self.waypoints)})"
-                self.get_logger().info(f"{current_wp_info} Current distance to goal: {self.distance:.2f} m")
+                current_wp_info = f"[WP:{current_wp.number}] ({self.count + 1}/{len(self.waypoints)})"
+                self.get_logger().info(f"{current_wp_info} dist={self.distance:.2f}m")
                 
                 # stopコマンドによって判定距離を変更
                 if hasattr(current_wp, 'stop') and current_wp.stop:
-                    threshold_distance = 0.5  # stopがTrueの場合は0.7m
+                    threshold_distance = 0.5  # stopがTrueの場合は0.5m
                 else:
-                    threshold_distance = 1.5  # stopがFalseまたは未設定の場合は2.5m
-                
+                    threshold_distance = 1.5  # stopがFalseまたは未設定の場合は1.5m
+
                 if self.distance < threshold_distance:
                     self.get_logger().info(
-                        f"{current_wp_info} Reached goal threshold ({threshold_distance:.2f} m). Current distance: {self.distance:.2f} m"
+                        f"{current_wp_info} reached (thr={threshold_distance:.2f}m) dist={self.distance:.2f}m"
                     )
                     
                     if hasattr(current_wp, 'stop') and current_wp.stop is not None: # stop属性が存在する場合
@@ -238,7 +238,7 @@ class Nav2GoalClient(Node):
                 
                 # 定期的にゴールを再送信
                 elif self.loop_count % 5 == 0:
-                    self.get_logger().info(f"{current_wp_info} Resending goal to ensure it's active.")
+                    self.get_logger().info(f"{current_wp_info} Resending...")
                     self.send_goal()
                 
                 self.loop_count += 1
