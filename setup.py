@@ -27,7 +27,9 @@ setup(
             'cancel_navigation = sirius_navigation.cancel_navigation:main',
             'assisted_teleop = sirius_navigation.assisted_teleop:main',
             'ekf_pose_initializer = sirius_navigation.ekf_pose_initializer:main',
-            'move_goal = sirius_navigation.move_goal:main'
+            'move_goal = sirius_navigation.move_goal:main',
+            'get_position_distance = sirius_navigation.get_position_distance:main',
+            'get_position_enter = sirius_navigation.get_position_enter:main',
         ],
     },
 )
