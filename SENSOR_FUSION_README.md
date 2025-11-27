@@ -57,6 +57,15 @@ ros2 launch sirius_navigation sensor_fusion.launch.py \
   start_hwt905:=true \
   hwt905_port:=/dev/ttyUSB0 \
   hwt905_baud:=115200
+
+### 実機で system 時間を使う
+
+実機で実行する場合はシミュレーション時間(use_sim_time) を無効にします。例:
+
+```bash
+# 実機で use_sim_time=false を指定して起動
+ros2 launch sirius_navigation sensor_fusion.launch.py start_hwt905:=true use_sim_time:=false
+```
 ```
 
 ### 方法3: HWT905単体テスト

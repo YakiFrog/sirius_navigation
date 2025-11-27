@@ -6,6 +6,7 @@ RViz2の/initialposeをEKFに転送するノードも起動
 
 オプション:
 - start_hwt905: HWT905 IMUを自動起動（デフォルト: false）
+- use_sim_time: シミュレーションの時間を使用するか（true）実機のシステム時間を使用するか（false）を切り替え（デフォルト: true）
 """
 
 from launch import LaunchDescription
@@ -51,6 +52,14 @@ def generate_launch_description():
     
     # Launch設定の取得
     start_hwt905 = LaunchConfiguration('start_hwt905')
+    # use_sim_time を外部から切り替えられるようにする
+    # (デフォルトは true — シミュレーション向け)
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='true',
+        description='Use simulated time (true) or system time (false)'
+    )
+    use_sim_time = LaunchConfiguration('use_sim_time')
     hwt905_port = LaunchConfiguration('hwt905_port')
     hwt905_baud = LaunchConfiguration('hwt905_baud')
     
@@ -80,7 +89,9 @@ def generate_launch_description():
             {
                 # QoS設定の追加パラメータ
                 'debug': False,
-                'debug_out_file': '/tmp/ekf_debug.txt'
+                'debug_out_file': '/tmp/ekf_debug.txt',
+                # 上書き可能な use_sim_time（launch 引数から受け取る）
+                'use_sim_time': use_sim_time,
             }
         ],
         remappings=[
@@ -137,6 +148,7 @@ def generate_launch_description():
     return LaunchDescription([
         # Launch引数
         start_hwt905_arg,
+        use_sim_time_arg,
         hwt905_port_arg,
         hwt905_baud_arg,
         
@@ -145,3 +157,4 @@ def generate_launch_description():
         ekf_node,
         ekf_pose_initializer
     ])
+
