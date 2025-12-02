@@ -17,6 +17,7 @@ from typing import List
 from math import sin, cos, pi
 import os
 from pathlib import Path
+import subprocess
 
 @dataclass
 class Waypoint:
@@ -26,6 +27,7 @@ class Waypoint:
     angle_radians: float
     rotate: float = 0.0
     stop: bool = False
+    change_map: str = ""  # 地図変更用のフィールド（地図名を指定）
     
 class Nav2GoalClient(Node):
     def __init__(self, count = 1):
@@ -80,7 +82,8 @@ class Nav2GoalClient(Node):
             y = wp['y'],
             angle_radians = wp['angle_radians'],
             rotate = wp.get('rotate', 0.0),  # キーが存在しない場合は0.0を返す
-            stop = wp.get('stop', False)  # キーが存在しない場合はFalseを返す
+            stop = wp.get('stop', False),  # キーが存在しない場合はFalseを返す
+            change_map = wp.get('change_map', "")  # キーが存在しない場合は空文字を返す
         ) for wp in data['waypoints']]
         
     def euler_to_quaternion(self, yaw):
@@ -190,6 +193,38 @@ class Nav2GoalClient(Node):
             self.get_logger().info(prefix + "STOP sent")
         else:
             self.get_logger().info(prefix + "RESUME sent")
+    
+    def change_map_command(self, map_name: str, goal_index: int = None):
+        """地図を切り替えるコマンドを実行"""
+        wp = None
+        if goal_index is not None and goal_index < len(self.waypoints):
+            wp = self.waypoints[goal_index]
+        prefix = f"[WP:{wp.number}] " if wp else "[WP:?] "
+        
+        if not map_name:
+            return
+        
+        self.get_logger().info(prefix + f"Changing map to: {map_name}")
+        
+        # シェルスクリプトを呼び出して地図を切り替え
+        script_path = os.path.expanduser("~/sirius_jazzy_ws/bash/startup_bash/change_map_simple.sh")
+        
+        try:
+            result = subprocess.run(
+                ['bash', script_path, map_name],
+                capture_output=True,
+                text=True,
+                timeout=30  # 30秒でタイムアウト
+            )
+            
+            if result.returncode == 0:
+                self.get_logger().info(prefix + f"Map changed successfully to: {map_name}")
+            else:
+                self.get_logger().error(prefix + f"Failed to change map: {result.stdout} {result.stderr}")
+        except subprocess.TimeoutExpired:
+            self.get_logger().error(prefix + f"Map change timed out for: {map_name}")
+        except Exception as e:
+            self.get_logger().error(prefix + f"Error changing map: {str(e)}")
             
     def get_position(self):
         try:
@@ -215,22 +250,28 @@ class Nav2GoalClient(Node):
                 current_wp_info = f"[WP:{current_wp.number}] ({self.count + 1}/{len(self.waypoints)})"
                 self.get_logger().info(f"{current_wp_info} dist={self.distance:.2f}m")
                 
-                # stopコマンドによって判定距離を変更
-                if hasattr(current_wp, 'stop') and current_wp.stop:
-                    threshold_distance = 0.5  # stopがTrueの場合は0.5m
+                # stopコマンドまたはchange_mapによって判定距離を変更
+                if (hasattr(current_wp, 'stop') and current_wp.stop) or \
+                   (hasattr(current_wp, 'change_map') and current_wp.change_map):
+                    threshold_distance = 0.5  # stopがTrueまたはchange_mapが設定されている場合は0.5m
                 else:
-                    threshold_distance = 1.5  # stopがFalseまたは未設定の場合は1.5m
+                    threshold_distance = 1.5  # それ以外の場合は1.5m
 
                 if self.distance < threshold_distance:
                     self.get_logger().info(
                         f"{current_wp_info} reached (thr={threshold_distance:.2f}m) dist={self.distance:.2f}m"
                     )
                     
-                    if hasattr(current_wp, 'stop') and current_wp.stop is not None: # stop属性が存在する場合
+                    # stop属性の処理
+                    if hasattr(current_wp, 'stop') and current_wp.stop is not None:
                         if current_wp.stop:  # stopがTrueの場合
                             self.publish_stop_command(True, self.count)  # 停止コマンドを送信
                         else:
                             self.publish_stop_command(False, self.count)  # 再開コマンドを送信
+                    
+                    # change_map属性の処理（地図切り替え）
+                    if hasattr(current_wp, 'change_map') and current_wp.change_map:
+                        self.change_map_command(current_wp.change_map, self.count)
                             
                     self.count += 1
                     # Send the next goal (if any) and log it from send_goal
