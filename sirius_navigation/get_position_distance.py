@@ -20,10 +20,11 @@ class GetPose(Node):
         self.listener = TransformListener(self.tfBuffer, self)
         self.timer = self.create_timer(1.0, self.timer_callback)
         self.positions_list = []
-        self.check_position = [0, 0]
+        self.check_position = None  # 初回は現在位置で初期化するためNone
         self.position = []
         self.waypoint_number = 1
         self.last_written_number = 0
+        self.is_first_position = True  # 初回フラグ
         # distance threshold as a ROS parameter, default 3.0 meters
         self.declare_parameter('distance_threshold', 3.0)
         self.distance_threshold = float(self.get_parameter('distance_threshold').value)
@@ -39,6 +40,14 @@ class GetPose(Node):
             translation = transform.transform.translation
             rotation = transform.transform.rotation
             self.position = [translation.x, translation.y, translation.z, rotation.x, rotation.y, rotation.z, rotation.w]
+            
+            # 初回は現在位置をcheck_positionに設定（ウェイポイントは記録しない）
+            if self.is_first_position or self.check_position is None:
+                self.check_position = [translation.x, translation.y]
+                self.is_first_position = False
+                self.get_logger().info(f'初期位置を設定: ({translation.x:.3f}, {translation.y:.3f})')
+                return
+            
             x_distance = self.check_position[0] - translation.x
             y_distance = self.check_position[1] - translation.y
             distance = math.sqrt(x_distance ** 2 + y_distance ** 2)
