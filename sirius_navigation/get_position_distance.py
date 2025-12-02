@@ -25,8 +25,8 @@ class GetPose(Node):
         self.waypoint_number = 1
         self.last_written_number = 0
         self.is_first_position = True  # 初回フラグ
-        # distance threshold as a ROS parameter, default 3.0 meters
-        self.declare_parameter('distance_threshold', 3.0)
+        # distance threshold as a ROS parameter, default 5.0 meters
+        self.declare_parameter('distance_threshold', 5.0)
         self.distance_threshold = float(self.get_parameter('distance_threshold').value)
 
     def timer_callback(self):
