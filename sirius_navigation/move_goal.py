@@ -194,15 +194,20 @@ class Nav2GoalClient(Node):
         else:
             self.get_logger().info(prefix + "RESUME sent")
     
-    def change_map_command(self, map_name: str, goal_index: int = None):
-        """地図を切り替えるコマンドを実行"""
+    def change_map_command(self, map_name: str, goal_index: int = None) -> bool:
+        """
+        地図を切り替えるコマンドを実行し、対応するウェイポイントファイルも読み込む
+        
+        Returns:
+            bool: 地図切り替えが成功した場合はTrue
+        """
         wp = None
         if goal_index is not None and goal_index < len(self.waypoints):
             wp = self.waypoints[goal_index]
         prefix = f"[WP:{wp.number}] " if wp else "[WP:?] "
         
         if not map_name:
-            return
+            return False
         
         self.get_logger().info(prefix + f"Changing map to: {map_name}")
         
@@ -219,12 +224,36 @@ class Nav2GoalClient(Node):
             
             if result.returncode == 0:
                 self.get_logger().info(prefix + f"Map changed successfully to: {map_name}")
+                
+                # 地図名と同じ名前のウェイポイントファイルを読み込む
+                waypoints_path = f"~/sirius_jazzy_ws/maps_waypoints/waypoints/{map_name}.yaml"
+                try:
+                    new_waypoints = self.load_waypoints(waypoints_path)
+                    self.waypoints = new_waypoints
+                    self.count = 0  # ウェイポイントのインデックスをリセット
+                    self.loop_count = 0
+                    self.distance = float('inf')
+                    self.get_logger().info(
+                        prefix + f"Loaded new waypoints from {map_name}.yaml ({len(new_waypoints)} waypoints)"
+                    )
+                    return True
+                except FileNotFoundError:
+                    self.get_logger().warn(
+                        prefix + f"Waypoints file not found: {waypoints_path}. Continuing with current waypoints."
+                    )
+                    return True
+                except Exception as e:
+                    self.get_logger().error(prefix + f"Failed to load waypoints: {str(e)}")
+                    return True
             else:
                 self.get_logger().error(prefix + f"Failed to change map: {result.stdout} {result.stderr}")
+                return False
         except subprocess.TimeoutExpired:
             self.get_logger().error(prefix + f"Map change timed out for: {map_name}")
+            return False
         except Exception as e:
             self.get_logger().error(prefix + f"Error changing map: {str(e)}")
+            return False
             
     def get_position(self):
         try:
@@ -269,11 +298,16 @@ class Nav2GoalClient(Node):
                         else:
                             self.publish_stop_command(False, self.count)  # 再開コマンドを送信
                     
-                    # change_map属性の処理（地図切り替え）
+                    # change_map属性の処理（地図切り替え + ウェイポイント切り替え）
+                    map_changed = False
                     if hasattr(current_wp, 'change_map') and current_wp.change_map:
-                        self.change_map_command(current_wp.change_map, self.count)
-                            
-                    self.count += 1
+                        map_changed = self.change_map_command(current_wp.change_map, self.count)
+                    
+                    # 地図が切り替わった場合は count は change_map_command 内でリセット済み
+                    # 切り替わらなかった場合のみ count を増やす
+                    if not map_changed:
+                        self.count += 1
+                    
                     # Send the next goal (if any) and log it from send_goal
                     self.send_goal()
                 
@@ -293,13 +327,40 @@ class Nav2GoalClient(Node):
         self.timer.timer_period_ns = 2000000000  # 2秒
             
 def main(args = None):
-    parser = argparse.ArgumentParser(description='Set the starting waypoint index.')
-    parser.add_argument('--count', type = int, default = 1, help = 'Starting waypoint index (default: 1)')
+    parser = argparse.ArgumentParser(description='Nav2 waypoint follower with map switching support.')
+    parser.add_argument('--count', type=int, default=1, 
+                        help='Starting waypoint index (default: 1)')
+    parser.add_argument('--waypoints', '-w', type=str, default=None,
+                        help='Waypoints file path or name (e.g., "waypoints.yaml" or "atc_1F")')
     parsed_args = parser.parse_args()
     
-    rclpy.init(args = args)
-    node = Nav2GoalClient(count = parsed_args.count)
-    node.get_logger().info(f"Starting Nav2GoalClient: {len(node.waypoints)} waypoints, starting from index {parsed_args.count}")
+    # ウェイポイントファイルのパスを決定
+    # 優先順位: 1. コマンドライン引数 2. 環境変数 3. デフォルト
+    if parsed_args.waypoints:
+        waypoints_input = parsed_args.waypoints
+        # .yaml が含まれていなければ追加
+        if not waypoints_input.endswith('.yaml'):
+            waypoints_input = waypoints_input + '.yaml'
+        # 絶対パスでなければ waypoints ディレクトリからの相対パスとして扱う
+        if not waypoints_input.startswith('/') and not waypoints_input.startswith('~'):
+            waypoints_file = f"~/sirius_jazzy_ws/maps_waypoints/waypoints/{waypoints_input}"
+        else:
+            waypoints_file = waypoints_input
+    else:
+        waypoints_file = os.environ.get(
+            'SIRIUS_WAYPOINTS', 
+            "~/sirius_jazzy_ws/maps_waypoints/waypoints/waypoints.yaml"
+        )
+    
+    # 環境変数に設定（Nav2GoalClientで使用）
+    os.environ['SIRIUS_WAYPOINTS'] = os.path.expanduser(waypoints_file)
+    
+    rclpy.init(args=args)
+    node = Nav2GoalClient(count=parsed_args.count)
+    node.get_logger().info(
+        f"Starting Nav2GoalClient: {len(node.waypoints)} waypoints from '{waypoints_file}', "
+        f"starting from index {parsed_args.count}"
+    )
     node.send_goal()
     rclpy.spin(node)
     node.destroy_node()
