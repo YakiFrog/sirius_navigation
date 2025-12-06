@@ -6,11 +6,12 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from tf2_ros import Buffer, TransformListener, LookupException
 from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import PoseStamped, Quaternion
+from geometry_msgs.msg import PoseStamped, Quaternion, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 import yaml
 import math
+import time
 import argparse
 from dataclasses import dataclass
 from typing import List
@@ -37,6 +38,9 @@ class Nav2GoalClient(Node):
         
         self.stop_publisher = self.create_publisher(Bool, '/stop', 10)
         self.odom_publisher = self.create_publisher(Odometry, 'target_odom', 10)
+        self.initial_pose_publisher = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10
+        )
         
         while not self._action_client.wait_for_server(timeout_sec = 1.0):
             self.get_logger().info("Waiting for action server...")
@@ -194,6 +198,42 @@ class Nav2GoalClient(Node):
         else:
             self.get_logger().info(prefix + "RESUME sent")
     
+    def publish_initial_pose(self, x: float, y: float, yaw: float, prefix: str = ""):
+        """
+        指定座標にイニシャルポーズを発行する
+        
+        Args:
+            x: x座標 [m]
+            y: y座標 [m]
+            yaw: ヨー角 [rad]
+            prefix: ログ用のプレフィックス
+        """
+        initial_pose_msg = PoseWithCovarianceStamped()
+        initial_pose_msg.header.stamp = self.get_clock().now().to_msg()
+        initial_pose_msg.header.frame_id = "map"
+        
+        initial_pose_msg.pose.pose.position.x = x
+        initial_pose_msg.pose.pose.position.y = y
+        initial_pose_msg.pose.pose.position.z = 0.0
+        
+        # 四元数の計算
+        quat = self.euler_to_quaternion(yaw)
+        initial_pose_msg.pose.pose.orientation.x = quat[0]
+        initial_pose_msg.pose.pose.orientation.y = quat[1]
+        initial_pose_msg.pose.pose.orientation.z = quat[2]
+        initial_pose_msg.pose.pose.orientation.w = quat[3]
+        
+        # 共分散を設定（初期位置の不確かさ）
+        # 対角成分: [x, y, z, roll, pitch, yaw] の分散
+        initial_pose_msg.pose.covariance[0] = 0.25   # x の分散 (0.5m)^2
+        initial_pose_msg.pose.covariance[7] = 0.25   # y の分散 (0.5m)^2
+        initial_pose_msg.pose.covariance[35] = 0.07  # yaw の分散 (~0.26rad ≈ 15度)^2
+        
+        self.initial_pose_publisher.publish(initial_pose_msg)
+        self.get_logger().info(
+            prefix + f"Initial pose published: pos=({x:.2f}, {y:.2f}) yaw={yaw:.2f}rad"
+        )
+    
     def change_map_command(self, map_name: str, goal_index: int = None) -> bool:
         """
         地図を切り替えるコマンドを実行し、対応するウェイポイントファイルも読み込む
@@ -219,7 +259,7 @@ class Nav2GoalClient(Node):
                 ['bash', script_path, map_name],
                 capture_output=True,
                 text=True,
-                timeout=30  # 30秒でタイムアウト
+                timeout=60  # 60秒でタイムアウト
             )
             
             if result.returncode == 0:
@@ -236,6 +276,19 @@ class Nav2GoalClient(Node):
                     self.get_logger().info(
                         prefix + f"Loaded new waypoints from {map_name}.yaml ({len(new_waypoints)} waypoints)"
                     )
+                    
+                    # 最初のウェイポイントの座標でイニシャルポーズを発行
+                    if len(new_waypoints) > 0:
+                        first_wp = new_waypoints[0]
+                        # 少し待ってから発行（地図サーバーの準備完了を待つ）
+                        time.sleep(1.0)
+                        self.publish_initial_pose(
+                            first_wp.x, 
+                            first_wp.y, 
+                            first_wp.angle_radians,
+                            prefix + "[InitialPose] "
+                        )
+                    
                     return True
                 except FileNotFoundError:
                     self.get_logger().warn(
