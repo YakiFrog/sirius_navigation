@@ -341,7 +341,7 @@ class Nav2GoalClient(Node):
                    (hasattr(current_wp, 'change_map') and current_wp.change_map):
                     threshold_distance = 0.5  # stopがTrueまたはchange_mapが設定されている場合は0.5m
                 else:
-                    threshold_distance = 1.5  # それ以外の場合は1.5m
+                    threshold_distance = 2.0  # それ以外の場合は1.5m
 
                 if self.distance < threshold_distance:
                     self.get_logger().info(
