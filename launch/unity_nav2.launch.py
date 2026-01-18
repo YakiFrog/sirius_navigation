@@ -30,6 +30,14 @@ def generate_launch_description():
         }.items()
     )
 
+    # Declare 'slam' argument (default: False)
+    declare_slam = DeclareLaunchArgument(
+        'slam',
+        default_value='False',
+        description='Whether to run SLAM (True) or AMCL (False)'
+    )
+    slam = LaunchConfiguration('slam')
+
     # 2. Nav2 Bringup
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
     nav2_bringup = IncludeLaunchDescription(
@@ -40,7 +48,8 @@ def generate_launch_description():
             'use_sim_time': 'true',
             'params_file': params_file,
             'autostart': 'true',
-            'map': os.path.join('/home/kotantu-nuc/sirius_jazzy_ws', 'maps_waypoints', 'map.yaml') # Placeholder map
+            'map': os.path.join('/home/kotantu-nuc/sirius_jazzy_ws', 'maps_waypoints', 'map.yaml'),
+            'slam': slam
         }.items()
     )
 
