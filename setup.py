@@ -30,6 +30,7 @@ setup(
             'move_goal = sirius_navigation.move_goal:main',
             'get_position_distance = sirius_navigation.get_position_distance:main',
             'get_position_enter = sirius_navigation.get_position_enter:main',
+            'sam3_ros_bridge = sirius_navigation.sam3_ros_bridge:main',
         ],
     },
 )
