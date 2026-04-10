@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 import json
@@ -8,6 +8,7 @@ import websocket
 import threading
 import numpy as np
 import time
+import struct
 
 class SAM3ROSBridge(Node):
     def __init__(self):
@@ -77,25 +78,45 @@ class SAM3ROSBridge(Node):
             if len(masked_points) == 0:
                 return
 
-            # Convert from ZED (RIGHT_HANDED_Y_UP: X-Right, Y-Up, Z-Back) 
-            # to ROS (X-Forward, Y-Left, Z-Up)
             # ROS_X = -ZED_Z (Forward)
             # ROS_Y = -ZED_X (Left)
             # ROS_Z =  ZED_Y (Up)
-            converted_points = np.zeros((len(masked_points), 3), dtype=np.float32)
-            converted_points[:, 0] = -masked_points[:, 2] # X = -Z
-            converted_points[:, 1] = -masked_points[:, 0] # Y = -X
-            converted_points[:, 2] =  masked_points[:, 1] # Z =  Y
             
-            xyz_points = converted_points.tolist()
+            # Prepare points with color: [x, y, z, rgb_packed]
+            points_with_color = []
+            for i in range(len(masked_points)):
+                x = -masked_points[i, 2]
+                y = -masked_points[i, 0]
+                z =  masked_points[i, 1]
+                
+                # RGB floats (0.0-1.0) to uint8 (0-255)
+                r = int(masked_points[i, 3] * 255)
+                g = int(masked_points[i, 4] * 255)
+                b = int(masked_points[i, 5] * 255)
+                
+                # Pack RGB into a single float (ROS standard)
+                # Format: 00RR GGBB
+                rgb = (r << 16) | (g << 8) | b
+                # Pack as unsigned int, then unpack as float
+                rgb_packed = struct.unpack('f', struct.pack('I', rgb))[0]
+                
+                points_with_color.append([x, y, z, rgb_packed])
             
             # Prepare PointCloud2 Header
             header = Header()
             header.stamp = self.get_clock().now().to_msg()
             header.frame_id = self.frame_id
             
+            # Define fields
+            fields = [
+                PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+                PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+                PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+                PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
+            ]
+            
             # Create ROS message
-            cloud_msg = pc2.create_cloud_xyz32(header, xyz_points)
+            cloud_msg = pc2.create_cloud(header, fields, points_with_color)
             self.pub.publish(cloud_msg)
             
         except Exception as e:
