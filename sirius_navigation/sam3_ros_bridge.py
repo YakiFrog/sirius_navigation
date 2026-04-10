@@ -23,8 +23,9 @@ class SAM3ROSBridge(Node):
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.mask_threshold = self.get_parameter('mask_threshold').get_parameter_value().double_value
         
-        # Publisher
-        self.pub = self.create_publisher(PointCloud2, '/sam3/obstacles', 10)
+        # Publishers
+        self.pub_obstacles = self.create_publisher(PointCloud2, '/sam3/obstacles', 10)
+        self.pub_background = self.create_publisher(PointCloud2, '/sam3/background', 10)
         
         # WebSocket setup
         self.running = True
@@ -71,36 +72,10 @@ class SAM3ROSBridge(Node):
                 
             data = raw_data.reshape(-1, 7)
             
-            # Filter for masked points (segmented objects)
-            mask = data[:, 6] > self.mask_threshold
-            masked_points = data[mask]
-            
-            if len(masked_points) == 0:
-                return
-
-            # ROS_X = -ZED_Z (Forward)
-            # ROS_Y = -ZED_X (Left)
-            # ROS_Z =  ZED_Y (Up)
-            
-            # Prepare points with color: [x, y, z, rgb_packed]
-            points_with_color = []
-            for i in range(len(masked_points)):
-                x = -masked_points[i, 2]
-                y = -masked_points[i, 0]
-                z =  masked_points[i, 1]
-                
-                # RGB floats (0.0-1.0) to uint8 (0-255)
-                r = int(masked_points[i, 3] * 255)
-                g = int(masked_points[i, 4] * 255)
-                b = int(masked_points[i, 5] * 255)
-                
-                # Pack RGB into a single float (ROS standard)
-                # Format: 00RR GGBB
-                rgb = (r << 16) | (g << 8) | b
-                # Pack as unsigned int, then unpack as float
-                rgb_packed = struct.unpack('f', struct.pack('I', rgb))[0]
-                
-                points_with_color.append([x, y, z, rgb_packed])
+            # Filter for masked points (segmented objects) vs background
+            is_masked = data[:, 6] > self.mask_threshold
+            masked_data = data[is_masked]
+            background_data = data[~is_masked]
             
             # Prepare PointCloud2 Header
             header = Header()
@@ -115,9 +90,46 @@ class SAM3ROSBridge(Node):
                 PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
             ]
             
-            # Create ROS message
-            cloud_msg = pc2.create_cloud(header, fields, points_with_color)
-            self.pub.publish(cloud_msg)
+            # Vectorized packing function using Numpy structured arrays
+            def pack_cloud_data_fast(points):
+                if len(points) == 0:
+                    return None
+                
+                N = len(points)
+                # Define structured array dtype matching PointField offsets
+                # x:f4(4), y:f4(4), z:f4(4), rgb:f4(4) = 16 bytes
+                cloud_arr = np.empty(N, dtype=[
+                    ('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('rgb', 'f4')
+                ])
+                
+                # Vectorized axis conversion: X=-Z, Y=-X, Z=Y
+                cloud_arr['x'] = -points[:, 2]
+                cloud_arr['y'] = -points[:, 0]
+                cloud_arr['z'] =  points[:, 1]
+                
+                # Vectorized color packing
+                r = (points[:, 3] * 255).astype(np.uint32)
+                g = (points[:, 4] * 255).astype(np.uint32)
+                b = (points[:, 5] * 255).astype(np.uint32)
+                
+                # Pack into 00RRGGBB.
+                # In ROS, the rgb field is often a float32 but interpreted as a packed uint32.
+                rgb = (r << 16) | (g << 8) | b
+                cloud_arr['rgb'] = rgb.view(np.float32)
+                
+                return cloud_arr
+
+            # Publish Obstacles
+            masked_arr = pack_cloud_data_fast(masked_data)
+            if masked_arr is not None:
+                cloud_msg = pc2.create_cloud(header, fields, masked_arr.tolist())
+                self.pub_obstacles.publish(cloud_msg)
+                
+            # Publish Background
+            background_arr = pack_cloud_data_fast(background_data)
+            if background_arr is not None:
+                cloud_msg = pc2.create_cloud(header, fields, background_arr.tolist())
+                self.pub_background.publish(cloud_msg)
             
         except Exception as e:
             self.get_logger().error(f'Error processing point cloud: {e}')
