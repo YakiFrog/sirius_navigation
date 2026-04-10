@@ -18,10 +18,12 @@ class SAM3ROSBridge(Node):
         self.declare_parameter('server_url', 'ws://localhost:8080/ws_3d')
         self.declare_parameter('frame_id', 'sirius3/zed_camera_link')
         self.declare_parameter('mask_threshold', 0.5)
+        self.declare_parameter('downsample_factor', 4)
         
         self.url = self.get_parameter('server_url').get_parameter_value().string_value
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.mask_threshold = self.get_parameter('mask_threshold').get_parameter_value().double_value
+        self.downsample_factor = self.get_parameter('downsample_factor').get_parameter_value().integer_value
         
         # Publishers
         self.pub_obstacles = self.create_publisher(PointCloud2, '/sam3/obstacles', 10)
@@ -90,6 +92,30 @@ class SAM3ROSBridge(Node):
                 PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
             ]
             
+            # Filter for masked points (segmented objects) vs background
+            is_masked = data[:, 6] > self.mask_threshold
+            masked_data = data[is_masked]
+            background_data = data[~is_masked]
+            
+            # --- Optimization: Downsample background ---
+            # Most of the lag comes from the density of the background.
+            # Use the factor from parameters (default: 4)
+            if self.downsample_factor > 1:
+                background_data = background_data[::self.downsample_factor]
+            
+            # Prepare PointCloud2 Header
+            header = Header()
+            header.stamp = self.get_clock().now().to_msg()
+            header.frame_id = self.frame_id
+            
+            # Define fields
+            fields = [
+                PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+                PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+                PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+                PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
+            ]
+            
             # Vectorized packing function using Numpy structured arrays
             def pack_cloud_data_fast(points):
                 if len(points) == 0:
@@ -113,23 +139,37 @@ class SAM3ROSBridge(Node):
                 b = (points[:, 5] * 255).astype(np.uint32)
                 
                 # Pack into 00RRGGBB.
-                # In ROS, the rgb field is often a float32 but interpreted as a packed uint32.
                 rgb = (r << 16) | (g << 8) | b
                 cloud_arr['rgb'] = rgb.view(np.float32)
                 
                 return cloud_arr
 
+            def create_cloud_from_arr(header, fields, arr):
+                if arr is None or len(arr) == 0:
+                    return pc2.create_cloud(header, fields, [])
+                
+                # Direct buffer to PointCloud2 message for performance
+                msg = PointCloud2()
+                msg.header = header
+                msg.height = 1
+                msg.width = len(arr)
+                msg.fields = fields
+                msg.is_bigendian = False
+                msg.point_step = 16 # 4 * 4
+                msg.row_step = msg.point_step * msg.width
+                msg.is_dense = False
+                msg.data = arr.tobytes()
+                return msg
+
             # Publish Obstacles
             masked_arr = pack_cloud_data_fast(masked_data)
-            if masked_arr is not None:
-                cloud_msg = pc2.create_cloud(header, fields, masked_arr.tolist())
-                self.pub_obstacles.publish(cloud_msg)
+            cloud_msg_obs = create_cloud_from_arr(header, fields, masked_arr)
+            self.pub_obstacles.publish(cloud_msg_obs)
                 
             # Publish Background
             background_arr = pack_cloud_data_fast(background_data)
-            if background_arr is not None:
-                cloud_msg = pc2.create_cloud(header, fields, background_arr.tolist())
-                self.pub_background.publish(cloud_msg)
+            cloud_msg_bg = create_cloud_from_arr(header, fields, background_arr)
+            self.pub_background.publish(cloud_msg_bg)
             
         except Exception as e:
             self.get_logger().error(f'Error processing point cloud: {e}')

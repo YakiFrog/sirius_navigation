@@ -1,0 +1,12 @@
+# SAM3 ROS 2 Bridge Parameters
+sam3_ros_bridge:
+  ros__parameters:
+    server_url: "ws://localhost:8080/ws_3d"
+    frame_id: "sirius3/zed_camera_link"
+    mask_threshold: 0.5
+    
+    # 背景点群の間引き量 (Downsample Factor)
+    # 1: 全ての点を表示
+    # 4: 4点に1点のみ表示（軽量）
+    # 10: 10点に1点のみ表示（超軽量）
+    downsample_factor: 2
