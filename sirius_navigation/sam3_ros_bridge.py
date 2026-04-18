@@ -25,6 +25,9 @@ class SAM3ROSBridge(Node):
         self.mask_threshold = self.get_parameter('mask_threshold').get_parameter_value().double_value
         self.downsample_factor = self.get_parameter('downsample_factor').get_parameter_value().integer_value
         
+        # Simulation Time State
+        self.latest_sim_time = None
+        
         # Publishers
         self.pub_obstacles = self.create_publisher(PointCloud2, '/sam3/obstacles', 10)
         self.pub_background = self.create_publisher(PointCloud2, '/sam3/background', 10)
@@ -59,10 +62,11 @@ class SAM3ROSBridge(Node):
         # Stats message is JSON (str), Point Cloud is binary (bytes)
         if isinstance(message, str):
             try:
-                # Optional: parse stats like FPS
-                # stats = json.loads(message)
-                pass
-            except: pass
+                stats = json.loads(message)
+                if 'sim_time' in stats:
+                    self.latest_sim_time = stats['sim_time']
+            except Exception as e:
+                self.get_logger().error(f"Error parsing JSON message: {e}")
             return
         
         # Binary data decoding
@@ -78,35 +82,21 @@ class SAM3ROSBridge(Node):
             is_masked = data[:, 6] > self.mask_threshold
             masked_data = data[is_masked]
             background_data = data[~is_masked]
-            
-            # Prepare PointCloud2 Header
-            header = Header()
-            header.stamp = self.get_clock().now().to_msg()
-            header.frame_id = self.frame_id
-            
-            # Define fields
-            fields = [
-                PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-                PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-                PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-                PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
-            ]
-            
-            # Filter for masked points (segmented objects) vs background
-            is_masked = data[:, 6] > self.mask_threshold
-            masked_data = data[is_masked]
-            background_data = data[~is_masked]
-            
+
             # --- Optimization: Downsample background ---
-            # Most of the lag comes from the density of the background.
-            # Use the factor from parameters (default: 4)
             if self.downsample_factor > 1:
                 background_data = background_data[::self.downsample_factor]
             
-            # Prepare PointCloud2 Header
+            # --- Prepare PointCloud2 Header ---
             header = Header()
-            header.stamp = self.get_clock().now().to_msg()
             header.frame_id = self.frame_id
+            
+            # Use sim_time if available and use_sim_time is True
+            use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
+            if use_sim_time and self.latest_sim_time is not None:
+                header.stamp = self._float_to_time(self.latest_sim_time)
+            else:
+                header.stamp = self.get_clock().now().to_msg()
             
             # Define fields
             fields = [
@@ -179,6 +169,13 @@ class SAM3ROSBridge(Node):
 
     def _on_close(self, ws, close_status_code, close_msg):
         self.get_logger().warn(f'WebSocket connection closed: {close_status_code} - {close_msg}')
+
+    def _float_to_time(self, t_float):
+        from builtin_interfaces.msg import Time
+        t = Time()
+        t.sec = int(t_float)
+        t.nanosec = int((t_float - t.sec) * 1e9)
+        return t
 
 def main(args=None):
     rclpy.init(args=args)

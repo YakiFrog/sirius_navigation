@@ -10,3 +10,6 @@ sam3_ros_bridge:
     # 4: 4点に1点のみ表示（軽量）
     # 10: 10点に1点のみ表示（超軽量）
     downsample_factor: 2
+    
+    # Unity シミュレーション時間を使用するかどうか
+    use_sim_time: true
