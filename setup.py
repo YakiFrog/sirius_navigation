@@ -31,6 +31,8 @@ setup(
             'get_position_distance = sirius_navigation.get_position_distance:main',
             'get_position_enter = sirius_navigation.get_position_enter:main',
             'sam3_ros_bridge = sirius_navigation.sam3_ros_bridge:main',
+            'sam3_indexed_map_node = sirius_navigation.sam3_indexed_map_node:main',
+            'sam3_colored_map_loader = sirius_navigation.sam3_colored_map_loader:main',
         ],
     },
 )

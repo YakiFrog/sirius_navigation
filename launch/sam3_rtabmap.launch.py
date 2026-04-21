@@ -61,7 +61,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'wait_for_transform': 0.2,
             'publish_tf': False,
-            'odom_frame_id': 'map', # SlamToolboxの補正済み座標を基準にする
+            'odom_frame_id': 'map', # SlamToolboxの補正済み座標を基準にする(map)
             # RTAB-Map parameters
             'Rtabmap/PublishTf': 'false',
             'Mem/IncrementalMemory': 'true',
@@ -92,6 +92,18 @@ def generate_launch_description():
         arguments=['--delete_db_on_start']
     )
 
+    # Indexed Color Map Node (New from scratch)
+    sam3_indexed_map_node = Node(
+        package='sirius_navigation',
+        executable='sam3_indexed_map_node',
+        name='sam3_indexed_map_node',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'grid_resolution': 0.05,
+        }]
+    )
+
     # RTAB-Map Viz (Optional, if you want a separate window)
     # rtabmap_viz_node = Node(
     #     package='rtabmap_viz',
@@ -105,5 +117,6 @@ def generate_launch_description():
         DeclareLaunchArgument('slam_toolbox_params_file', default_value=selected_params),
         sam3_bridge_node,
         # slam_toolbox_node,  # 手動で起動するため、ここでは自動起動させない
-        rtabmap_node
+        rtabmap_node,
+        sam3_indexed_map_node
     ])
