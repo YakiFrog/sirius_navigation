@@ -7,8 +7,8 @@
 `sam3_rtabmap.launch.py` は、以下の3つのコンポーネントを統合して高品質な 3D カラーマップを作成します。
 
 1.  **SAM3 (Segmentation and Mapping)**: ZEDカメラ等から取得した点群データを ROS 2 に配信します。
-2.  **SlamToolbox**: 2D レーザースキャンデータから堅牢な自己位置推定（オドメトリ）を提供します。
-3.  **RTAB-Map (Real-Time Appearance-Based Mapping)**: グラフベースの SLAM で、3D データの蓄積、ループクロージャ検出（以前訪れた場所の認識）、そして最終的な 3D マップの生成を担います。
+2.  **SlamToolbox**: 2D レーザースキャンデータから堅牢な自己位置推定（オドメトリ）を提供し、メインの `/map` トピックを担当します。
+3.  **RTAB-Map (Real-Time Appearance-Based Mapping)**: SlamToolboxの自己位置推定を利用して 3D データの蓄積、ループクロージャ検出（以前訪れた場所の認識）、そして `/rtabmap/grid_map` への 3D 投影マップの配信を担います。
 
 ## 主な特徴
 
@@ -34,14 +34,14 @@ RTAB-Map ノードは以下のトピックを購読・配信します。
 
 ### 購読トピック (Subscribed Topics)
 
--   `/sam3/obstacles` (sensor_msgs/PointCloud2): SAM3 から配信される 3D 点群データ。
--   `tf`: ロボットの座標系情報。
+- `/sam3/obstacles` (sensor_msgs/PointCloud2): SAM3 から配信される 3D 点群データ。
+- `/tf`, `/tf_static`: SlamToolbox等からのロボットの座標系情報（`map` -> `odom` -> `base_link`）。
 
 ### 配信トピック (Published Topics)
 
--   `/rtabmap/mapData`: 作成されたマップのグラフ構造とデータ。
--   `/rtabmap/cloud_map`: 蓄積された 3D 点群マップ。
--   `/rtabmap/grid_map`: RTAB-Map が生成した 2D 占有格子地図。
+- `/rtabmap/mapData`: 作成されたマップのグラフ構造とデータ。
+- `/rtabmap/cloud_map`: 蓄積された 3D 点群マップ。
+- `/rtabmap/grid_map`: RTAB-Map が生成した 2D 占有格子地図（3Dセンサーで見えている障害物を基にした地図）。
 
 ## 設定の詳細
 

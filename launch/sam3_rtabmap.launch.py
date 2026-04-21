@@ -2,7 +2,7 @@ import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -14,6 +14,17 @@ def generate_launch_description():
     # Arguments
     use_sim_time = LaunchConfiguration('use_sim_time')
     
+    # SlamToolbox Parameter Selection
+    params_dir = os.path.join(os.path.expanduser('~'), 'sirius_jazzy_ws', 'params')
+    sim_params = os.path.join(params_dir, 'mapper_params_online_async_sim.yaml')
+    real_params = os.path.join(params_dir, 'mapper_params_online_async.yaml')
+    
+    selected_params = PythonExpression([
+        "'", sim_params, "' if '", use_sim_time, "' == 'true' else '", real_params, "'"
+    ])
+    
+    slam_toolbox_params = LaunchConfiguration('slam_toolbox_params_file')
+    
     # SAM3 ROS Bridge Node
     sam3_bridge_node = Node(
         package='sirius_navigation',
@@ -23,7 +34,7 @@ def generate_launch_description():
     )
 
     # SLAM Toolbox Node (2D Mapping)
-    slam_toolbox_params = os.path.join(pkg_sirius_nav, 'config', 'slam_toolbox_params.yaml')
+    # slam_toolbox_params = os.path.join(pkg_sirius_nav, 'config', 'slam_toolbox_params.yaml')
     slam_toolbox_node = Node(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
@@ -49,6 +60,7 @@ def generate_launch_description():
             'approx_sync': True,
             'use_sim_time': use_sim_time,
             'wait_for_transform': 0.2,
+            'publish_tf': False,
             # RTAB-Map parameters
             'Rtabmap/PublishTf': 'false',
             'Mem/IncrementalMemory': 'true',
@@ -78,7 +90,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('slam_toolbox_params_file', default_value=selected_params),
         sam3_bridge_node,
-        slam_toolbox_node,
+        # slam_toolbox_node,  # 手動で起動するため、ここでは自動起動させない
         rtabmap_node
     ])
