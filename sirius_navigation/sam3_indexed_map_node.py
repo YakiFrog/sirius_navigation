@@ -20,7 +20,8 @@ class SAM3IndexedMapNode(Node):
         self.declare_parameter('palette_size', 256)
         self.declare_parameter('grid_resolution', 0.05)
         self.declare_parameter('map_frame', 'map')
-        self.declare_parameter('use_sim_time', True)
+        if not self.has_parameter('use_sim_time'):
+            self.declare_parameter('use_sim_time', True)
         
         self.res = self.get_parameter('grid_resolution').get_parameter_value().double_value
         self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
@@ -73,19 +74,45 @@ class SAM3IndexedMapNode(Node):
             self.width != new_width or self.height != new_height or 
             not np.allclose(self.origin, new_origin, atol=1e-3)):
             
+            old_grid = self.grid
+            old_width, old_height = self.width, self.height
+            old_origin = self.origin
+            
             self.width, self.height = new_width, new_height
             self.origin = new_origin
             self.res = msg.info.resolution
             self.grid = np.zeros((self.height, self.width), dtype=np.uint8)
-            self.get_logger().info(f'Canvas updated: {self.width}x{self.height} @ {self.origin}')
+            
+            # Blit old data into new grid
+            if old_grid is not None:
+                dx = int(round((old_origin[0] - self.origin[0]) / self.res))
+                dy = int(round((old_origin[1] - self.origin[1]) / self.res))
+                
+                # Copy overlap
+                src_x0, src_y0 = max(0, -dx), max(0, -dy)
+                src_x1, src_y1 = min(old_width, self.width - dx), min(old_height, self.height - dy)
+                dst_x0, dst_y0 = max(0, dx), max(0, dy)
+                dst_x1, dst_y1 = min(self.width, old_width + dx), min(self.height, old_height + dy)
+                
+                if src_x1 > src_x0 and src_y1 > src_y0:
+                    self.grid[dst_y0:dst_y1, dst_x0:dst_x1] = old_grid[src_y0:src_y1, src_x0:src_x1]
+            
+            self.get_logger().info(f'Canvas adjusted: {self.width}x{self.height} @ {self.origin}')
 
         # Store structural data
         self.struct_grid = np.array(msg.data, dtype=np.int8).reshape((self.height, self.width))
         
         # Baseline sync: Map structural cells to base indices
-        # 0: Unknown, 1: Wall, 2: Floor
-        self.grid[self.struct_grid == 100] = 1
-        self.grid[self.struct_grid == 0] = 2
+        # index 1: Wall (Priority), 2: Floor (Only if no color)
+        
+        # 1. Update walls (Structural priority)
+        wall_mask = (self.struct_grid == 100)
+        self.grid[wall_mask] = 1
+        
+        # 2. Update floor only if it doesn't already have a semantic color (index >= 3)
+        # This prevents flickering and preserves cloud-based colors
+        floor_update_mask = (self.struct_grid == 0) & (self.grid < 3)
+        self.grid[floor_update_mask] = 2
         
         self.latest_stamp = msg.header.stamp
         self.dirty = True

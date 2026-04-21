@@ -34,46 +34,55 @@ class SAM3GridVisualizer(Node):
     def _generate_default_palette(self):
         reserved = [[127, 127, 127], [0, 0, 0], [255, 255, 255]]
         colors = []
-        steps = [0, 51, 102, 153, 204, 255]
+        steps = [0, 128, 255] # Match the node's palette
         for r in steps:
             for g in steps:
                 for b in steps:
                     c = [r, g, b]
                     if c not in reserved: colors.append(c)
-        colors = colors[:253]
         while len(colors) < 253: colors.append([128, 128, 128])
-        colors.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
         return np.array(reserved + colors, dtype=np.uint8)
 
     def grid_callback(self, msg):
-        """Convert indexed grid to PointCloud2."""
+        """Convert indexed grid to PointCloud2 (Optimized)."""
         width = msg.info.width
         height = msg.info.height
         res = msg.info.resolution
-        origin = [msg.info.origin.position.x, msg.info.origin.position.y]
+        ox, oy = msg.info.origin.position.x, msg.info.origin.position.y
         
-        # Prepare grid data
         grid_data = np.array(msg.data, dtype=np.uint8).reshape((height, width))
         
-        # Find known cells (indices > 0)
+        # Identify non-unknown cells
         rows, cols = np.where(grid_data > 0)
         if len(rows) == 0: return
 
-        # Map indices to RGB
+        num_points = len(rows)
         indices = grid_data[rows, cols]
-        rgb_list = self.palette[indices]
         
-        # Map indices to coordinates
-        x_coords = cols * res + origin[0]
-        y_coords = rows * res + origin[1]
+        # Build coordinates
+        x = cols * res + ox
+        y = rows * res + oy
+        z = np.zeros(num_points)
+
+        # Get colors from palette
+        colors = self.palette[indices] # [N, 3] (R, G, B)
         
-        points = []
-        for i in range(len(rows)):
-            r, g, b = rgb_list[i]
-            # Pack RGB into a single float
-            rgb_packed = struct.unpack('f', struct.pack('I', (r << 16) | (g << 8) | b))[0]
-            points.append([float(x_coords[i]), float(y_coords[i]), 0.0, rgb_packed])
+        # Pack RGB into float32 (Big-Endian equivalent for PointCloud2)
+        # PointCloud2 expects 4 bytes for RGB: [B, G, R, A] or [A, R, G, B] depending on system
+        # Here we pack it similar to how RTAB-Map does it.
+        rgb_packed = np.zeros(num_points, dtype=np.uint32)
+        rgb_packed |= colors[:, 0].astype(np.uint32) << 16 # R
+        rgb_packed |= colors[:, 1].astype(np.uint32) << 8  # G
+        rgb_packed |= colors[:, 2].astype(np.uint32)       # B
         
+        # Prepare structured array for PointCloud2
+        datatype = [('x', np.float32), ('y', np.float32), ('z', np.float32), ('rgb', np.float32)]
+        cloud_arr = np.empty(num_points, dtype=datatype)
+        cloud_arr['x'] = x
+        cloud_arr['y'] = y
+        cloud_arr['z'] = z
+        cloud_arr['rgb'] = rgb_packed.view(np.float32)
+
         # Create cloud
         cloud_msg = pc2.create_cloud(
             header=Header(stamp=msg.header.stamp, frame_id=msg.header.frame_id),
@@ -83,7 +92,7 @@ class SAM3GridVisualizer(Node):
                 pc2.PointField(name='z', offset=8, datatype=pc2.PointField.FLOAT32, count=1),
                 pc2.PointField(name='rgb', offset=12, datatype=pc2.PointField.FLOAT32, count=1),
             ],
-            points=points
+            points=cloud_arr
         )
         self.pub_cloud.publish(cloud_msg)
 
