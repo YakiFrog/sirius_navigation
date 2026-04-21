@@ -115,6 +115,13 @@ def main():
 
         # Assign indices to grid
         # index 0: Unknown, 1: Wall, 2: Floor, 3+: Semantic
+        visual_color_grid = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        # Fill visual map with defaults
+        visual_color_grid[grid == 205] = [127, 127, 127] # Unknown (Gray)
+        visual_color_grid[grid == 0] = [0, 0, 0]         # Wall (Black)
+        visual_color_grid[grid == 255] = [255, 255, 255] # Floor (White)
+
         for (px, py), color in pixel_colors.items():
             if colored_grid[py, px] == 1: continue # Walls (priority)
             
@@ -122,14 +129,22 @@ def main():
             dist = np.sum((palette[3:] - color)**2, axis=1)
             idx = np.argmin(dist) + 3
             colored_grid[py, px] = idx
+            
+            # Set color in visual map (BGR for OpenCV)
+            visual_color_grid[py, px] = [color[2], color[1], color[0]]
 
         # Save result
         out_pgm = base + ".colored.pgm"
         out_json = base + ".colored.json"
+        out_visual = base + ".color.png"
         
         # We save PGM flipped as we read it? 
         # map_saver wrote it, cv2.imread read it. We just write it back.
         cv2.imwrite(out_pgm, colored_grid)
+        cv2.imwrite(out_visual, visual_color_grid)
+        
+        print(f"SUCCESS: Saved semantic map to {out_pgm}")
+        print(f"SUCCESS: Saved visual map to {out_visual}")
         
         meta_out = {
             "resolution": resolution,
