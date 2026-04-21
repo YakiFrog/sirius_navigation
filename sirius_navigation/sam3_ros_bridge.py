@@ -19,6 +19,7 @@ class SAM3ROSBridge(Node):
         self.declare_parameter('frame_id', 'sirius3/zed_camera_link')
         self.declare_parameter('mask_threshold', 0.5)
         self.declare_parameter('downsample_factor', 4)
+        self.declare_parameter('publish_full_cloud', False)
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', True)
         
@@ -26,6 +27,7 @@ class SAM3ROSBridge(Node):
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.mask_threshold = self.get_parameter('mask_threshold').get_parameter_value().double_value
         self.downsample_factor = self.get_parameter('downsample_factor').get_parameter_value().integer_value
+        self.publish_full_cloud = self.get_parameter('publish_full_cloud').get_parameter_value().bool_value
         self.use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
         
         # Simulation Time State
@@ -35,6 +37,7 @@ class SAM3ROSBridge(Node):
         # Publishers
         self.pub_obstacles = self.create_publisher(PointCloud2, '/sam3/obstacles', 10)
         self.pub_background = self.create_publisher(PointCloud2, '/sam3/background', 10)
+        self.pub_full_cloud = self.create_publisher(PointCloud2, '/sam3/full_cloud', 10)
         
         # WebSocket setup
         self.running = True
@@ -169,6 +172,12 @@ class SAM3ROSBridge(Node):
             background_arr = pack_cloud_data_fast(background_data)
             cloud_msg_bg = create_cloud_from_arr(header, fields, background_arr)
             self.pub_background.publish(cloud_msg_bg)
+            
+            # Publish Full Cloud (Combined) if requested
+            if self.publish_full_cloud:
+                full_arr = pack_cloud_data_fast(data)
+                cloud_msg_full = create_cloud_from_arr(header, fields, full_arr)
+                self.pub_full_cloud.publish(cloud_msg_full)
             
         except Exception as e:
             self.get_logger().error(f'Error processing point cloud: {e}')

@@ -13,6 +13,7 @@ def generate_launch_description():
     
     # Arguments
     use_sim_time = LaunchConfiguration('use_sim_time')
+    include_background = LaunchConfiguration('include_background')
     
     # SlamToolbox Parameter Selection
     params_dir = os.path.join(os.path.expanduser('~'), 'sirius_jazzy_ws', 'params')
@@ -30,7 +31,10 @@ def generate_launch_description():
         package='sirius_navigation',
         executable='sam3_ros_bridge',
         name='sam3_ros_bridge',
-        parameters=[{'use_sim_time': use_sim_time}]
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'publish_full_cloud': PythonExpression(["'", include_background, "' == 'true'"]),
+        }]
     )
 
     # SLAM Toolbox Node (2D Mapping)
@@ -67,12 +71,14 @@ def generate_launch_description():
             'Mem/IncrementalMemory': 'true',
             'Mem/InitWMWithAllNodes': 'false',
             'RGBD/ProximityBySpace': 'true',
-            'RGBD/AngularUpdate': '0.01',
-            'RGBD/LinearUpdate': '0.01',
+            'RGBD/AngularUpdate': '0.05',
+            'RGBD/LinearUpdate': '0.05',
             'RGBD/OptimizeFromGraphEnd': 'false',
             'Grid/FromDepth': 'true',
             'Reg/Strategy': '0', # 0=オドメトリ(SLAM Toolbox)を信頼, ICP補正なし
             'Reg/Force3DoF': 'true',
+            # --- 負荷軽減のための設定 ---
+            'Mem/MaxSize': '2000',           # メモリ内の最大ノード数。超えると古いノードをDBへ退避
             # --- 点群の間引き設定 ---
             'Grid/VoxelSize': '0.05',        # 2Dグリッドマップ作成時の間引き
             'Optimizer/Strategy': '1',       # 1=g2o (TOROの警告を回避するため)
@@ -86,7 +92,7 @@ def generate_launch_description():
             'Grid/CellSize': '0.05',         # 地図の解像度をVoxelSize(5cm)と同期
         }],
         remappings=[
-            ('scan_cloud', '/sam3/obstacles'),
+            ('scan_cloud', PythonExpression(["'/sam3/full_cloud' if '", include_background, "' == 'true' else '/sam3/obstacles'"])),
             ('map', '/rtabmap/grid_map'),
         ],
         arguments=['--delete_db_on_start']
@@ -126,6 +132,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('include_background', default_value='false'),
         DeclareLaunchArgument('slam_toolbox_params_file', default_value=selected_params),
         sam3_bridge_node,
         # slam_toolbox_node,  # 手動で起動するため、ここでは自動起動させない
