@@ -61,6 +61,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'wait_for_transform': 0.2,
             'publish_tf': False,
+            'odom_frame_id': 'map', # SlamToolboxの補正済み座標を基準にする
             # RTAB-Map parameters
             'Rtabmap/PublishTf': 'false',
             'Mem/IncrementalMemory': 'true',
@@ -77,8 +78,12 @@ def generate_launch_description():
             'Optimizer/Strategy': '1',       # 1=g2o (TOROの警告を回避するため)
             # --- ノイズ除去と精度向上のための設定 ---
             'Grid/RangeMax': '5.0',          # 5m以上先の不安定な点群は無視
+            'Grid/RangeMin': '0.8',          # 0.8m以内の近すぎる点（ロボット自身など）を無視
             'Grid/NoiseFilteringRadius': '0.1', # 10cm以内に点がない孤立点を除去
             'Grid/NoiseFilteringMinNeighbors': '5', # 周囲に5点以上ない場合はノイズとして除去
+            # --- 密度制限の強化 ---
+            # 'scan_cloud_decimation': 2,      # 入力点群をあらかじめ1/2に間引く
+            'Grid/CellSize': '0.05',         # 地図の解像度をVoxelSize(5cm)と同期
         }],
         remappings=[
             ('scan_cloud', '/sam3/obstacles'),
