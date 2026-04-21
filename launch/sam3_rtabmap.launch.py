@@ -132,7 +132,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true'),
-        DeclareLaunchArgument('include_background', default_value='false'),
+        DeclareLaunchArgument('include_background', default_value='true'),
         DeclareLaunchArgument('slam_toolbox_params_file', default_value=selected_params),
         sam3_bridge_node,
         # slam_toolbox_node,  # 手動で起動するため、ここでは自動起動させない

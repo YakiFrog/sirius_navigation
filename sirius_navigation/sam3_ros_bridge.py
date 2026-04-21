@@ -19,7 +19,7 @@ class SAM3ROSBridge(Node):
         self.declare_parameter('frame_id', 'sirius3/zed_camera_link')
         self.declare_parameter('mask_threshold', 0.5)
         self.declare_parameter('downsample_factor', 4)
-        self.declare_parameter('publish_full_cloud', False)
+        self.declare_parameter('publish_full_cloud', True)
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', True)
         
