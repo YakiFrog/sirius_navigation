@@ -75,6 +75,10 @@ def generate_launch_description():
             # --- 点群の間引き設定 ---
             'Grid/VoxelSize': '0.05',        # 2Dグリッドマップ作成時の間引き
             'Optimizer/Strategy': '1',       # 1=g2o (TOROの警告を回避するため)
+            # --- ノイズ除去と精度向上のための設定 ---
+            'Grid/RangeMax': '5.0',          # 5m以上先の不安定な点群は無視
+            'Grid/NoiseFilteringRadius': '0.1', # 10cm以内に点がない孤立点を除去
+            'Grid/NoiseFilteringMinNeighbors': '5', # 周囲に5点以上ない場合はノイズとして除去
         }],
         remappings=[
             ('scan_cloud', '/sam3/obstacles'),
