@@ -19,14 +19,18 @@ class SAM3ROSBridge(Node):
         self.declare_parameter('frame_id', 'sirius3/zed_camera_link')
         self.declare_parameter('mask_threshold', 0.5)
         self.declare_parameter('downsample_factor', 4)
+        if not self.has_parameter('use_sim_time'):
+            self.declare_parameter('use_sim_time', True)
         
         self.url = self.get_parameter('server_url').get_parameter_value().string_value
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.mask_threshold = self.get_parameter('mask_threshold').get_parameter_value().double_value
         self.downsample_factor = self.get_parameter('downsample_factor').get_parameter_value().integer_value
+        self.use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
         
         # Simulation Time State
         self.latest_sim_time = None
+        self.last_published_sim_time = -1.0
         
         # Publishers
         self.pub_obstacles = self.create_publisher(PointCloud2, '/sam3/obstacles', 10)
@@ -59,6 +63,7 @@ class SAM3ROSBridge(Node):
                 time.sleep(3)
 
     def _on_message(self, ws, message):
+        # self.get_logger().debug("Received message from server")
         # Stats message is JSON (str), Point Cloud is binary (bytes)
         if isinstance(message, str):
             try:
@@ -92,9 +97,13 @@ class SAM3ROSBridge(Node):
             header.frame_id = self.frame_id
             
             # Use sim_time if available and use_sim_time is True
-            use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
-            if use_sim_time and self.latest_sim_time is not None:
+            if self.use_sim_time and self.latest_sim_time is not None:
+                if self.latest_sim_time <= self.last_published_sim_time:
+                    # self.get_logger().warn(f"Skipping duplicate/old timestamp: {self.latest_sim_time}")
+                    return
                 header.stamp = self._float_to_time(self.latest_sim_time)
+                self.last_published_sim_time = self.latest_sim_time
+                self.get_logger().info(f"Bridge Sync: Published cloud at sim_time {self.latest_sim_time:.3f}", once=False)
             else:
                 header.stamp = self.get_clock().now().to_msg()
             
@@ -187,11 +196,13 @@ def main(args=None):
     except Exception as e:
         print(f'Runtime error: {e}')
     finally:
-        node.running = False
-        if node.ws:
-            node.ws.close()
-        node.destroy_node()
-        rclpy.shutdown()
+        if 'node' in locals():
+            node.running = False
+            if hasattr(node, 'ws') and node.ws:
+                node.ws.close()
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
