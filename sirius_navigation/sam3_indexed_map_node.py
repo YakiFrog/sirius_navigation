@@ -60,7 +60,6 @@ class SAM3IndexedMapNode(Node):
         
         # Publisher
         self.pub_indexed_grid = self.create_publisher(OccupancyGrid, '/sam3/indexed_grid', 10)
-        self.pub_colored_cloud = self.create_publisher(PointCloud2, '/sam3/colored_map_cloud', 10)
         
         # Timer for publishing grid (Rate limit: 1Hz for efficiency)
         self.timer = self.create_timer(1.0, self._timer_callback)
@@ -151,48 +150,8 @@ class SAM3IndexedMapNode(Node):
     def _timer_callback(self):
         if self.grid is not None and self.dirty:
             self._publish_indexed_grid(self.latest_stamp)
-            self._publish_colored_cloud(self.latest_stamp)
             self.dirty = False
 
-    def _publish_colored_cloud(self, stamp):
-        """Convert indexed grid to PointCloud2 for RViz2 visualization."""
-        if self.grid is None: return
-        
-        # Get occupied cells (non-zero)
-        # 0 is usually 'unknown' (gray in our palette)
-        # We only publish known cells to keep it efficient
-        rows, cols = np.where(self.grid > 0)
-        if len(rows) == 0: return
-
-        # Get indices and map to RGB
-        indices = self.grid[rows, cols]
-        rgb_list = self.palette[indices]
-        
-        # Map indices to coordinates
-        # gx = (vx + t.x - self.origin[0]) * inv_res  => inverse of _cloud_callback logic
-        # vx = gx * res + self.origin[0]
-        x_coords = cols * self.res + self.origin[0]
-        y_coords = rows * self.res + self.origin[1]
-        
-        points = []
-        for i in range(len(rows)):
-            r, g, b = rgb_list[i]
-            # Pack RGB into a single float
-            rgb_packed = struct.unpack('f', struct.pack('I', (r << 16) | (g << 8) | b))[0]
-            points.append([float(x_coords[i]), float(y_coords[i]), 0.0, rgb_packed])
-        
-        # Create cloud
-        msg = pc2.create_cloud(
-            header=Header(stamp=stamp, frame_id=self.map_frame),
-            fields=[
-                pc2.PointField(name='x', offset=0, datatype=pc2.PointField.FLOAT32, count=1),
-                pc2.PointField(name='y', offset=4, datatype=pc2.PointField.FLOAT32, count=1),
-                pc2.PointField(name='z', offset=8, datatype=pc2.PointField.FLOAT32, count=1),
-                pc2.PointField(name='rgb', offset=12, datatype=pc2.PointField.FLOAT32, count=1),
-            ],
-            points=points
-        )
-        self.pub_colored_cloud.publish(msg)
 
     def _publish_indexed_grid(self, stamp):
         msg = OccupancyGrid()

@@ -104,6 +104,18 @@ def generate_launch_description():
         }]
     )
 
+    # Real-time Grid Visualizer (New separate node)
+    sam3_grid_visualizer_node = Node(
+        package='sirius_navigation',
+        executable='sam3_grid_visualizer',
+        name='sam3_grid_visualizer',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'map_frame': 'map',
+        }]
+    )
+
     # RTAB-Map Viz (Optional, if you want a separate window)
     # rtabmap_viz_node = Node(
     #     package='rtabmap_viz',
@@ -118,5 +130,6 @@ def generate_launch_description():
         sam3_bridge_node,
         # slam_toolbox_node,  # 手動で起動するため、ここでは自動起動させない
         rtabmap_node,
-        sam3_indexed_map_node
+        sam3_indexed_map_node,
+        sam3_grid_visualizer_node
     ])
