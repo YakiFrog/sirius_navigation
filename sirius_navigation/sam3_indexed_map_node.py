@@ -86,13 +86,54 @@ class SAM3IndexedMapNode(Node):
         return np.argmin(dist)
 
     def _grid_callback(self, msg):
-        """Update structure."""
-        if self.width != msg.info.width or self.height != msg.info.height:
-            self.width, self.height = msg.info.width, msg.info.height
-            self.origin = [msg.info.origin.position.x, msg.info.origin.position.y]
-            self.res = msg.info.resolution
+        """Update structure and handle origin/size shifts."""
+        new_width = msg.info.width
+        new_height = msg.info.height
+        new_origin = [msg.info.origin.position.x, msg.info.origin.position.y]
+        new_res = msg.info.resolution
+        
+        if self.grid is None:
+            # First initialization
+            self.width, self.height = new_width, new_height
+            self.origin = new_origin
+            self.res = new_res
             self.grid = np.zeros((self.height, self.width), dtype=np.uint8)
             self.get_logger().info(f'Initialized grid: {self.width}x{self.height}')
+        elif (self.width != new_width or self.height != new_height or 
+              not np.allclose(self.origin, new_origin, atol=1e-3)):
+            
+            self.get_logger().info(f'Map shifted: {self.width}x{self.height} @ {self.origin} -> {new_width}x{new_height} @ {new_origin}')
+            
+            # Create new grid
+            new_grid = np.zeros((new_height, new_width), dtype=np.uint8)
+            
+            # Calculate pixel offset
+            # dx = (old_x - new_x) / res
+            # e.g. old_x=0, new_x=-1 => dx = (0 - (-1)) / 0.05 = 20 pixels shift
+            dx = int(round((self.origin[0] - new_origin[0]) / new_res))
+            dy = int(round((self.origin[1] - new_origin[1]) / new_res))
+            
+            # Copy old grid data to new grid where they overlap
+            # Source (old) range
+            src_x0 = max(0, -dx)
+            src_y0 = max(0, -dy)
+            src_x1 = min(self.width, new_width - dx)
+            src_y1 = min(self.height, new_height - dy)
+            
+            # Destination (new) range
+            dst_x0 = max(0, dx)
+            dst_y0 = max(0, dy)
+            dst_x1 = min(new_width, self.width + dx)
+            dst_y1 = min(new_height, self.height + dy)
+            
+            if src_x1 > src_x0 and src_y1 > src_y0:
+                new_grid[dst_y0:dst_y1, dst_x0:dst_x1] = self.grid[src_y0:src_y1, src_x0:src_x1]
+            
+            self.grid = new_grid
+            self.width, self.height = new_width, new_height
+            self.origin = new_origin
+            self.res = new_res
+            self.dirty = True
 
         occ = np.array(msg.data, dtype=np.int8).reshape((self.height, self.width))
         wall_mask = (occ == 100)
