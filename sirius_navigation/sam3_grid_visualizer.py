@@ -23,7 +23,7 @@ class SAM3GridVisualizer(Node):
         # Subscriber
         self.sub_grid = self.create_subscription(
             OccupancyGrid, 
-            '/sam3/indexed_grid', 
+            '/sam3/colored_map_grid', 
             self.grid_callback, 
             10
         )
@@ -46,10 +46,6 @@ class SAM3GridVisualizer(Node):
                     c = [r, g, b]
                     if c not in reserved: colors.append(c)
         
-        # Fill exactly up to 256 to ensure array shape stability
-        while len(reserved + colors) < 256:
-            colors.append([128, 128, 128])
-            
         return np.array(reserved + colors, dtype=np.uint8)
 
     def grid_callback(self, msg):
@@ -61,8 +57,10 @@ class SAM3GridVisualizer(Node):
         
         grid_data = np.array(msg.data, dtype=np.uint8).reshape((height, width))
         
-        # Identify non-unknown cells
-        rows, cols = np.where(grid_data > 0)
+        # Identify valid semantic cells (1=Wall, 2=Floor, 3+=Colors)
+        # Avoid index 0 (Unknown/Gray) and index 255 (was -1 Unknown) to prevent out-of-range crashes
+        mask = (grid_data > 0) & (grid_data < len(self.palette))
+        rows, cols = np.where(mask)
         if len(rows) == 0: return
 
         num_points = len(rows)

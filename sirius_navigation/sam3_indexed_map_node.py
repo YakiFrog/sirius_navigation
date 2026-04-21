@@ -10,7 +10,7 @@ import struct
 import json
 import os
 import cv2
-from sklearn.cluster import KMeans
+import cv2
 
 class SAM3IndexedMapNode(Node):
     def __init__(self):
@@ -52,7 +52,7 @@ class SAM3IndexedMapNode(Node):
         self.sub_save = self.create_subscription(String, '/sam3/save_indexed_map', self._save_callback, 10)
         
         # Publishers
-        self.pub_indexed_grid = self.create_publisher(OccupancyGrid, '/sam3/indexed_grid', 10)
+        self.pub_indexed_grid = self.create_publisher(OccupancyGrid, '/sam3/colored_map_grid', 10)
         
         # Timer for publishing
         self.timer = self.create_timer(2.0, self._timer_callback)
@@ -104,58 +104,89 @@ class SAM3IndexedMapNode(Node):
         self.dirty = True
 
     def _cloud_callback(self, msg):
-        """Handle optimized global cloud with proven stable logic."""
+        """Handle optimized global cloud with robust, high-speed NumPy vectorization."""
         if self.grid is None: return
         now = self.get_clock().now().nanoseconds / 1e9
         if now - self.last_cloud_time < self.min_cloud_interval: return 
         self.last_cloud_time = now
 
         try:
-            fields = {f.name: f for f in msg.fields}
-            color_field = "rgb" if "rgb" in fields else ("rgba" if "rgba" in fields else None)
-            read_fields = ["x", "y"]
-            if color_field: read_fields.append(color_field)
+            if not hasattr(self, 'color_lut'): 
+                self.get_logger().info("Initializing Palette and Color LUT...")
+                self.palette = self._generate_default_palette()
             
-            points = pc2.read_points(msg, field_names=read_fields, skip_nans=True)
+            # 1. Access raw bytes for zero-loss bit manipulation
+            field_offsets = {f.name: f.offset for f in msg.fields}
             
-            inv_res = 1.0 / self.res
-            ox, oy = self.origin[0], self.origin[1]
-            h, w = self.height, self.width
-            if not hasattr(self, 'palette'): self.palette = self._generate_default_palette()
-            palette = self.palette
+            x_off = field_offsets.get('x')
+            y_off = field_offsets.get('y')
+            color_off = field_offsets.get('rgb') or field_offsets.get('rgba')
+            
+            if x_off is None or y_off is None:
+                self.get_logger().warn(f"Required fields (x,y) not found. Got: {list(field_offsets.keys())}")
+                return
+            
+            # Efficiently reshape data buffer
+            data = np.frombuffer(msg.data, dtype=np.uint8).reshape(-1, msg.point_step)
+            
+            # 2. Extract X, Y as float32
+            # Use data slicing to avoid non-contiguous view issues
+            x = data[:, x_off:x_off+4].copy().view(np.float32).flatten()
+            y = data[:, y_off:y_off+4].copy().view(np.float32).flatten()
+            
+            # Filter NaNs and handle grid projection
+            mask = np.isfinite(x) & np.isfinite(y)
+            x, y, data = x[mask], y[mask], data[mask]
+            
+            if len(x) == 0:
+                self.get_logger().debug("No finite points in cloud.")
+                return
+            
+            gx = ((x - self.origin[0]) / self.res).astype(np.int32)
+            gy = ((y - self.origin[1]) / self.res).astype(np.int32)
+            
+            # Bounds checking
+            in_bounds = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
+            gx, gy, data = gx[in_bounds], gy[in_bounds], data[in_bounds]
+            
+            if len(gx) == 0:
+                self.get_logger().debug(f"Points outside grid bounds. Origin: {self.origin}, Res: {self.res}")
+                return
 
-            # Proven reliable iterative loop
-            count = 0
-            for p in points:
-                gx = int((p[0] - ox) * inv_res)
-                gy = int((p[1] - oy) * inv_res)
+            # 3. Robust Color Extraction & Quantization
+            if color_off is not None:
+                # Directly extract bytes to avoid alignment errors from .view(np.uint32)
+                # To match iterative logic: (packed >> 16) is byte 2, (>> 8) is byte 1, mask is byte 0
+                r = data[:, color_off + 2].astype(np.float32)
+                g = data[:, color_off + 1].astype(np.float32)
+                b = data[:, color_off + 0].astype(np.float32)
                 
-                if 0 <= gx < w and 0 <= gy < h:
-                    if self.grid[gy, gx] == 1: continue 
-
-                    if color_field:
-                        val = p[2]
-                        try:
-                            # Direct byte reinterpretation (most stable)
-                            packed = struct.unpack('I', struct.pack('f', val))[0]
-                            rgb = ((packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF)
-                            dist = np.sum((palette[3:] - rgb)**2, axis=1)
-                            idx = np.argmin(dist) + 3
-                            self.grid[gy, gx] = idx
-                            count += 1
-                        except: pass
+                # Correct quantization to nearest step (0,1,2,3,4) with rounding
+                ri = np.clip(np.round(r / 63.75).astype(np.int32), 0, 4)
+                gi = np.clip(np.round(g / 63.75).astype(np.int32), 0, 4)
+                bi = np.clip(np.round(b / 63.75).astype(np.int32), 0, 4)
+                
+                # Use pre-computed LUT for perfect index matching
+                indices = self.color_lut[ri, gi, bi]
+                
+                # 4. Persistent Masking (Protect Walls)
+                current_pixel_values = self.grid[gy, gx]
+                not_wall = (current_pixel_values != 1)
+                
+                # Batch update only non-wall pixels
+                self.grid[gy[not_wall], gx[not_wall]] = indices[not_wall]
+                
+                if len(indices[not_wall]) > 0:
+                    self.get_logger().info(f'Painted {len(indices[not_wall])} colored points onto grid.')
             
-            self.get_logger().info(f'Painted {count} points from cloud map.')
             self.dirty = True
         except Exception as e:
-            self.get_logger().error(f"Cloud projection error: {e}")
+            self.get_logger().error(f"Vectorized cloud projection error: {e}")
 
     def _generate_default_palette(self):
         # Index 0: Unknown (Gray), Index 1: Wall (Black), Index 2: Floor (White)
         reserved = [[127, 127, 127], [0, 0, 0], [255, 255, 255]]
         colors = []
-        # 5 steps for 5x5x5 = 125 colors (R,G,B 0,64,128,192,255)
-        # Total index stays <= 127, safe for int8 occupancy grid.
         steps = [0, 64, 128, 192, 255]
         for r in steps:
             for g in steps:
@@ -163,11 +194,21 @@ class SAM3IndexedMapNode(Node):
                     c = [r, g, b]
                     if c not in reserved: colors.append(c)
         
-        # Fill exactly up to 256 to ensure array shape stability
-        while len(reserved + colors) < 256:
-            colors.append([128, 128, 128])
+        palette = np.array(reserved + colors, dtype=np.uint8)
+        
+        # Generate LUT for O(1) vectorized indexing
+        # This maps any of the 125 quantized combinations to the closest index in palette[3:]
+        self.color_lut = np.zeros((5, 5, 5), dtype=np.uint8)
+        palette_sem = palette[3:]
+        
+        for ri, rv in enumerate(steps):
+            for gi, gv in enumerate(steps):
+                for bi, bv in enumerate(steps):
+                    rgb = np.array([rv, gv, bv], dtype=np.float32)
+                    dist = np.sum((palette_sem - rgb)**2, axis=1)
+                    self.color_lut[ri, gi, bi] = np.argmin(dist) + 3
             
-        return np.array(reserved + colors, dtype=np.uint8)
+        return palette
 
     def _timer_callback(self):
         if self.grid is not None and self.dirty:
