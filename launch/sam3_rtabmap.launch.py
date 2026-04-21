@@ -70,8 +70,11 @@ def generate_launch_description():
             'RGBD/LinearUpdate': '0.01',
             'RGBD/OptimizeFromGraphEnd': 'false',
             'Grid/FromDepth': 'true',
-            'Reg/Strategy': '0', # 0=Visual, 1=ICP, 2=Both
-            'Reg/Force3DoF': 'true', # Force 2D mapping for loop closures if preferred
+            'Reg/Strategy': '0', # 0=オドメトリ(SLAM Toolbox)を信頼, ICP補正なし
+            'Reg/Force3DoF': 'true',
+            # --- 点群の間引き設定 ---
+            'Grid/VoxelSize': '0.05',        # 2Dグリッドマップ作成時の間引き
+            'Optimizer/Strategy': '1',       # 1=g2o (TOROの警告を回避するため)
         }],
         remappings=[
             ('scan_cloud', '/sam3/obstacles'),
