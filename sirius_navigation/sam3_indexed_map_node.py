@@ -151,15 +151,22 @@ class SAM3IndexedMapNode(Node):
             self.get_logger().error(f"Cloud projection error: {e}")
 
     def _generate_default_palette(self):
+        # Index 0: Unknown (Gray), Index 1: Wall (Black), Index 2: Floor (White)
         reserved = [[127, 127, 127], [0, 0, 0], [255, 255, 255]]
         colors = []
-        steps = [0, 128, 255]
+        # 5 steps for 5x5x5 = 125 colors (R,G,B 0,64,128,192,255)
+        # Total index stays <= 127, safe for int8 occupancy grid.
+        steps = [0, 64, 128, 192, 255]
         for r in steps:
             for g in steps:
                 for b in steps:
                     c = [r, g, b]
                     if c not in reserved: colors.append(c)
-        while len(colors) < 253: colors.append([128, 128, 128])
+        
+        # Fill exactly up to 256 to ensure array shape stability
+        while len(reserved + colors) < 256:
+            colors.append([128, 128, 128])
+            
         return np.array(reserved + colors, dtype=np.uint8)
 
     def _timer_callback(self):

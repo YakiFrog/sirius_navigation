@@ -14,6 +14,8 @@ class SAM3GridVisualizer(Node):
         # Parameters
         self.declare_parameter('map_frame', 'map')
         self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
+        self.declare_parameter('z_offset', -0.20)
+        self.z_offset = self.get_parameter('z_offset').get_parameter_value().double_value
         
         # Internal State
         self.palette = self._generate_default_palette()
@@ -32,15 +34,22 @@ class SAM3GridVisualizer(Node):
         self.get_logger().info('SAM3 Grid Visualizer started.')
 
     def _generate_default_palette(self):
+        # Index 0: Unknown (Gray), Index 1: Wall (Black), Index 2: Floor (White)
         reserved = [[127, 127, 127], [0, 0, 0], [255, 255, 255]]
         colors = []
-        steps = [0, 128, 255] # Match the node's palette
+        # 5 steps for 5x5x5 = 125 colors (R,G,B 0,64,128,192,255)
+        # Total index stays <= 127, safe for int8 occupancy grid.
+        steps = [0, 64, 128, 192, 255]
         for r in steps:
             for g in steps:
                 for b in steps:
                     c = [r, g, b]
                     if c not in reserved: colors.append(c)
-        while len(colors) < 253: colors.append([128, 128, 128])
+        
+        # Fill exactly up to 256 to ensure array shape stability
+        while len(reserved + colors) < 256:
+            colors.append([128, 128, 128])
+            
         return np.array(reserved + colors, dtype=np.uint8)
 
     def grid_callback(self, msg):
@@ -62,7 +71,7 @@ class SAM3GridVisualizer(Node):
         # Build coordinates
         x = cols * res + ox
         y = rows * res + oy
-        z = np.zeros(num_points)
+        z = np.full(num_points, self.z_offset, dtype=np.float32)
 
         # Get colors from palette
         colors = self.palette[indices] # [N, 3] (R, G, B)
