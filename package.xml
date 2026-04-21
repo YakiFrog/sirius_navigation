@@ -16,6 +16,9 @@
   <depend>nav2_simple_commander</depend>
   <depend>nav2_msgs</depend>
   <depend>action_msgs</depend>
+  <depend>rtabmap_slam</depend>
+  <depend>rtabmap_viz</depend>
+  <depend>rtabmap_ros</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
