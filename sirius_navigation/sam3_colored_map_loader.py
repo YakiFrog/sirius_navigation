@@ -17,10 +17,12 @@ class SAM3ColoredMapLoader(Node):
         self.declare_parameter('map_path', '')
         self.declare_parameter('publish_rate', 1.0)
         self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('z_offset', -0.2)
         
         self.map_path = self.get_parameter('map_path').get_parameter_value().string_value
         self.publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
         self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
+        self.z_offset = self.get_parameter('z_offset').get_parameter_value().double_value
         
         # Publisher
         self.pub_cloud = self.create_publisher(PointCloud2, '/sam3/static_colored_map_cloud', 10)
@@ -100,7 +102,7 @@ class SAM3ColoredMapLoader(Node):
             r, g, b = rgb_list[i]
             # Pack RGB into a single float (standard ROS pattern)
             rgb_packed = struct.unpack('f', struct.pack('I', (r << 16) | (g << 8) | b))[0]
-            points.append([float(x_coords[i]), float(y_coords[i]), 0.0, rgb_packed])
+            points.append([float(x_coords[i]), float(y_coords[i]), self.z_offset, rgb_packed])
 
         self.cloud_msg = pc2.create_cloud(
             header=Header(stamp=self.get_clock().now().to_msg(), frame_id=self.map_frame),
@@ -112,7 +114,7 @@ class SAM3ColoredMapLoader(Node):
             ],
             points=points
         )
-        self.get_logger().info(f'Converted {len(points)} points to cloud.')
+        self.get_logger().info(f'Converted {len(points)} points to cloud with Z={self.z_offset}.')
 
     def timer_callback(self):
         if self.cloud_msg is not None:
