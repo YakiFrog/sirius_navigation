@@ -27,6 +27,7 @@ class Waypoint:
     angle_radians: float
     rotate: float = 0.0
     stop: bool = False
+    wait_time: float = 0.0  # 待機時間（秒）
     change_map: str = ""  # 地図変更用のフィールド（地図名を指定）
     
 class Nav2GoalClient(Node):
@@ -54,6 +55,7 @@ class Nav2GoalClient(Node):
         self.distance = float('inf')
         self.positions_list = []
         self.current_goal_index = None
+        self._waiting_until = None  # 待機終了時刻
         self.timer = self.create_timer(1.0, self.get_position)
         
     def load_waypoints(self, file_path: str) -> List[Waypoint]:
@@ -83,6 +85,7 @@ class Nav2GoalClient(Node):
             angle_radians = wp['angle_radians'],
             rotate = wp.get('rotate', 0.0),  # キーが存在しない場合は0.0を返す
             stop = wp.get('stop', False),  # キーが存在しない場合はFalseを返す
+            wait_time = float(wp.get('wait_time', 0.0)),  # 待機時間（秒）
             change_map = wp.get('change_map', "")  # キーが存在しない場合は空文字を返す
         ) for wp in data['waypoints']]
         
@@ -257,6 +260,21 @@ class Nav2GoalClient(Node):
             
     def get_position(self):
         try:
+            # 待機中かどうかのチェック
+            if self._waiting_until is not None:
+                current_time = self.get_clock().now()
+                if current_time < self._waiting_until:
+                    remaining = (self._waiting_until - current_time).nanoseconds / 1e9
+                    self.get_logger().info(f"Waiting... {remaining:.1f}s remaining", throttle_duration_sec=2.0)
+                    return
+                else:
+                    self.get_logger().info("Wait time finished. Resuming.")
+                    self._waiting_until = None
+                    self.publish_stop_command(False, self.count) # 再開
+                    self.count += 1
+                    self.send_goal()
+                    return
+
             # 最新のtransformを取得
             when = self.tfBuffer.get_latest_common_time('map', 'sirius3/base_footprint')
             transform = self.tfBuffer.lookup_transform(
@@ -279,17 +297,26 @@ class Nav2GoalClient(Node):
                 current_wp_info = f"[WP:{current_wp.number}] ({self.count + 1}/{len(self.waypoints)})"
                 self.get_logger().info(f"{current_wp_info} dist={self.distance:.2f}m")
                 
-                # stopコマンドまたはchange_mapによって判定距離を変更
+                # stop/wait/change_mapによって判定距離を変更
                 if (hasattr(current_wp, 'stop') and current_wp.stop) or \
+                   (hasattr(current_wp, 'wait_time') and current_wp.wait_time > 0) or \
                    (hasattr(current_wp, 'change_map') and current_wp.change_map):
-                    threshold_distance = 0.5  # stopがTrueまたはchange_mapが設定されている場合は0.5m
+                    threshold_distance = 0.5  # 精密判定が必要な場合
                 else:
-                    threshold_distance = 1.5  # それ以外の場合は1.5m
+                    threshold_distance = 1.5  # それ以外
 
                 if self.distance < threshold_distance:
                     self.get_logger().info(
                         f"{current_wp_info} reached (thr={threshold_distance:.2f}m) dist={self.distance:.2f}m"
                     )
+                    
+                    # wait_time属性の処理（優先）
+                    if hasattr(current_wp, 'wait_time') and current_wp.wait_time > 0:
+                        self.get_logger().info(f"Starting wait for {current_wp.wait_time} seconds.")
+                        self.publish_stop_command(True, self.count)
+                        self._waiting_until = self.get_clock().now() + \
+                                            rclpy.duration.Duration(seconds=current_wp.wait_time)
+                        return # ここで終了し、次の get_position で待機チェックに入る
                     
                     # stop属性の処理
                     if hasattr(current_wp, 'stop') and current_wp.stop is not None:
