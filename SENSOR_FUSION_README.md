@@ -124,7 +124,7 @@ evince frames.pdf
 ros2 topic echo /diagnostics
 
 # EKFノードのログを確認
-ros2 node info /ekf_filter_node
+ros2 node info /ekf_node
 ```
 
 ### RVizで可視化

@@ -145,7 +145,7 @@ sirius_navigation/
 ros2 service list | grep set_pose
 
 # サービスの呼び出し（テスト）
-ros2 service call /ekf_filter_node/set_pose \
+ros2 service call /set_pose \
   robot_localization/srv/SetPose \
   "{pose: {header: {frame_id: 'map'}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}}}}}"
 

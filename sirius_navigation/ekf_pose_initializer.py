@@ -26,13 +26,13 @@ class EKFPoseInitializer(Node):
         # EKFのset_poseサービスクライアント
         self.set_pose_client = self.create_client(
             SetPose,
-            '/ekf_filter_node/set_pose'
+            '/set_pose'
         )
         
         # サービスが利用可能になるまで待機（最大10秒）
         self.get_logger().info('EKF set_pose サービスを待機中...')
         retry_count = 0
-        max_retries = 10
+        max_retries = 30
         
         while not self.set_pose_client.wait_for_service(timeout_sec=1.0):
             retry_count += 1

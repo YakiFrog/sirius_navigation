@@ -82,7 +82,7 @@ def generate_launch_description():
     ekf_node = Node(
         package='robot_localization',
         executable='ekf_node',
-        name='ekf_filter_node',
+        name='ekf_node',
         output='screen',
         parameters=[
             params_file,
@@ -98,7 +98,7 @@ def generate_launch_description():
             ('/odometry/filtered', '/odom/filtered')
         ],
         # ログレベルを詳細に設定
-        arguments=['--ros-args', '--log-level', 'warn']  # info→warnでログ削減
+        ros_arguments=['--log-level', 'warn']  # info→warnでログ削減
     )
     
     # ========================================
@@ -136,6 +136,7 @@ def generate_launch_description():
                 executable='ekf_pose_initializer',
                 name='ekf_pose_initializer',
                 output='screen',
+                parameters=[{'use_sim_time': use_sim_time}],
                 arguments=['--ros-args', '--log-level', 'info']
             )
         ]
