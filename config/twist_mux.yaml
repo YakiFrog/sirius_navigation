@@ -15,10 +15,18 @@ twist_mux:
         topic: "cmd_vel_teleop"
         timeout: 0.5
         priority: 100
+      docking:
+        topic: "cmd_vel_docking"
+        timeout: 0.5
+        priority: 50
       navigation:
         topic: "cmd_vel_nav"
         timeout: 0.5
         priority: 10
+      idle:
+        topic: "cmd_vel_idle"
+        timeout: 0.5
+        priority: 0
 
     # ロックの定義
     locks:

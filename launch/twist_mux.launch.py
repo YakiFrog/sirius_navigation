@@ -21,6 +21,15 @@ def generate_launch_description():
         ]
     )
     
+    # twist_mux monitor node
+    twist_mux_monitor_node = Node(
+        package='sirius_navigation',
+        executable='twist_mux_monitor',
+        name='twist_mux_monitor',
+        output='screen'
+    )
+    
     return LaunchDescription([
-        twist_mux_node
+        twist_mux_node,
+        twist_mux_monitor_node
     ])

@@ -34,6 +34,7 @@ setup(
             'sam3_indexed_map_node = sirius_navigation.sam3_indexed_map_node:main',
             'sam3_colored_map_loader = sirius_navigation.sam3_colored_map_loader:main',
             'sam3_grid_visualizer = sirius_navigation.sam3_grid_visualizer:main',
+            'twist_mux_monitor = sirius_navigation.twist_mux_monitor:main',
         ],
     },
 )
