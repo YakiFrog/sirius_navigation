@@ -24,7 +24,7 @@ class TargetFollower(Node):
         
         # ROS 2 パラメータの宣言と初期化
         self.declare_parameter('enable_following', True)      # 自律追従の有効化フラグ
-        self.declare_parameter('follow_distance', 1.2)       # ターゲットとの維持目標距離（メートル）
+        self.declare_parameter('follow_distance', 0.5)       # ターゲットとの維持目標距離（メートル）
         self.declare_parameter('min_update_distance', 0.2)    # ターゲットがこの距離以上動いたらゴールを再送信（チャタリング防止）
         self.declare_parameter('control_rate', 1.0)           # 制御ループの実行頻度（Hz）
         self.declare_parameter('deadband', 0.15)              # 停止判定用の不感帯（維持距離±15cm）
