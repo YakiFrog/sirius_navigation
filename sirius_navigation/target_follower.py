@@ -24,10 +24,11 @@ class TargetFollower(Node):
         
         # ROS 2 パラメータの宣言と初期化
         self.declare_parameter('enable_following', True)      # 自律追従の有効化フラグ
-        self.declare_parameter('follow_distance', 0.5)       # ターゲットとの維持目標距離（メートル）
+        self.declare_parameter('follow_distance', 0.8)       # ターゲットとの維持目標距離（メートル）
         self.declare_parameter('min_update_distance', 0.2)    # ターゲットがこの距離以上動いたらゴールを再送信（チャタリング防止）
         self.declare_parameter('control_rate', 1.0)           # 制御ループの実行頻度（Hz）
         self.declare_parameter('deadband', 0.15)              # 停止判定用の不感帯（維持距離±15cm）
+        self.declare_parameter('robot_base_frame', 'sirius3/base_footprint') # ロボットのベースフレーム
         
         # パラメータ値の取得
         self.enable_following = self.get_parameter('enable_following').value
@@ -35,6 +36,7 @@ class TargetFollower(Node):
         self.min_update_distance = self.get_parameter('min_update_distance').value
         self.control_rate = self.get_parameter('control_rate').value
         self.deadband = self.get_parameter('deadband').value
+        self.robot_base_frame = self.get_parameter('robot_base_frame').value
         
         # パラメータが動的に変更された際のコールバック関数を登録
         self.add_on_set_parameters_callback(self.parameter_callback)
@@ -100,6 +102,9 @@ class TargetFollower(Node):
                 # タイマー周期を動的に更新
                 self.timer.cancel()
                 self.timer = self.create_timer(1.0 / self.control_rate, self.control_loop)
+            elif param.name == 'robot_base_frame':
+                self.robot_base_frame = param.value
+                self.get_logger().info(f"パラメータ 'robot_base_frame' が更新されました: {self.robot_base_frame}")
         return SetParametersResult(successful=True)
 
     def target_callback(self, msg: Odometry):
@@ -150,7 +155,7 @@ class TargetFollower(Node):
             now = rclpy.time.Time()
             transform = self.tf_buffer.lookup_transform(
                 'map',
-                'sirius3/base_footprint',
+                self.robot_base_frame,
                 now,
                 rclpy.duration.Duration(seconds=0.1)
             )

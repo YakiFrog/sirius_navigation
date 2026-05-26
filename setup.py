@@ -29,6 +29,7 @@ setup(
             'ekf_pose_initializer = sirius_navigation.ekf_pose_initializer:main',
             'move_goal = sirius_navigation.move_goal:main',
             'target_follower = sirius_navigation.target_follower:main',
+            'target_detector = sirius_navigation.target_detector:main',
             'get_position_distance = sirius_navigation.get_position_distance:main',
             'get_position_enter = sirius_navigation.get_position_enter:main',
             'sam3_ros_bridge = sirius_navigation.sam3_ros_bridge:main',
