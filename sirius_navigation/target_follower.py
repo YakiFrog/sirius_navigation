@@ -61,6 +61,7 @@ class TargetFollower(Node):
         
         # 各種状態変数の初期化
         self.target_pose = None             # 最新のターゲット座標
+        self.last_target_time = None        # 最新のターゲット座標を受信した時刻
         self.last_sent_target_pose = None   # 最後にNav2にゴールを送信した時のターゲット座標
         self.goal_handle = None             # アクションのゴールハンドル（予備キャンセル用）
         self.goal_sending_in_progress = False # 多重送信防止フラグ
@@ -114,6 +115,7 @@ class TargetFollower(Node):
         Unity上のNPCの位置トピック (/npc/odom) を受信したときに座標を更新するコールバック。
         """
         self.target_pose = msg.pose.pose
+        self.last_target_time = self.get_clock().now()
 
     def cancel_current_goal(self, force=False):
         """
@@ -152,9 +154,18 @@ class TargetFollower(Node):
             return
             
         # ターゲットの位置情報がまだ届いていない場合は待機
+        now = self.get_clock().now()
         if self.target_pose is None:
             self.get_logger().info("トピック /npc/odom からターゲット位置が届くのを待っています...", throttle_duration_sec=5.0)
             return
+
+        if self.last_target_time is not None:
+            elapsed = (now - self.last_target_time).nanoseconds / 1e9
+            if elapsed > 2.0:
+                self.get_logger().warning("ターゲットからのデータ更新が途絶えました。追従を一時停止します。", throttle_duration_sec=5.0)
+                self.target_pose = None
+                self.cancel_current_goal()
+                return
 
         # 1. TFを使用してロボットの現在位置（map座標系上の base_footprint）を取得
         try:
