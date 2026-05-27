@@ -49,7 +49,7 @@ class TargetDetector(Node):
         self.declare_parameter('gating_distance', 0.6)          # カルマンフィルターの関連付けゲート距離（0.6mに縮小して静的オブジェクトへの吸い付きを防止）
         self.declare_parameter('max_lost_frames', 150)           # ロスト判定フレーム数（15秒相当）
         self.declare_parameter('active_max_range', 5.0)         # 追従中の最大検出距離（5.0m）
-        self.declare_parameter('active_fov_deg', 180.0)         # 追従中の視野角（前方180度のみ）
+        self.declare_parameter('active_fov_deg', 270.0)         # 追従中の視野角（270度に広げて真横もカバー）
         self.declare_parameter('lockon_max_range', 1.0)         # ロックオン時の最大距離（m）起動時前方60cm想定
         self.declare_parameter('lockon_max_lateral', 0.8)       # ロックオン時の横方向最大距離（m）
 
@@ -446,7 +446,7 @@ class TargetDetector(Node):
                 pred_angle = math.atan2(pred_ly, pred_lx)
                 # 2D LiDAR (scan3/hokuyo_scan) の物理的視野は [-pi/2, pi/2]
                 # マージン 0.1 rad を付与して判定
-                if pred_lx < -0.1 or abs(pred_angle) > (msg.angle_max + 0.1):
+                if pred_lx < -0.8 or abs(pred_angle) > (msg.angle_max + 0.1):
                     is_predicted_in_fov = False
 
         if detected_targets and is_predicted_in_fov:
