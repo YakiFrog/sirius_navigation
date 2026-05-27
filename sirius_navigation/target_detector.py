@@ -84,7 +84,6 @@ class TargetDetector(Node):
         # 二つのスキャントピックを非同期的に購読
         self.leg_scan_sub = self.create_subscription(LaserScan, self.leg_scan_topic, self.leg_scan_callback, 10)
         self.torso_scan_sub = self.create_subscription(LaserScan, self.torso_scan_topic, self.torso_scan_callback, 10)
-        self.npc_gt_sub = self.create_subscription(Odometry, '/npc/odom_gt', self.npc_gt_callback, 10)
 
         # TFリスナーのセットアップ
         self.tf_buffer = Buffer()
@@ -110,7 +109,6 @@ class TargetDetector(Node):
         self.is_tracking = False
         self.lost_count = 0
         self.last_time = None
-        self.npc_gt_pose = None
         
         # 最新の検出された脚候補リストを保持する
         self.latest_leg_candidates = []
@@ -346,10 +344,6 @@ class TargetDetector(Node):
                 })
         self.latest_leg_candidates = leg_candidates
 
-    def npc_gt_callback(self, msg: Odometry):
-        """NPCのグラウンドトゥルース位置情報を更新するコールバック"""
-        self.npc_gt_pose = msg.pose.pose.position
-
     def torso_scan_callback(self, msg: LaserScan):
         """
         胴体高さのスキャン (scan3) のコールバック。
@@ -405,15 +399,8 @@ class TargetDetector(Node):
             if torso_map is None:
                 continue
 
-            # 真値NPC検証（利用可能な場合）
-            is_valid_gt = False
-            if self.npc_gt_pose is not None:
-                dist_to_gt = math.sqrt((torso_map[0] - self.npc_gt_pose.x)**2 + (torso_map[1] - self.npc_gt_pose.y)**2)
-                if dist_to_gt <= 1.0:
-                    is_valid_gt = True
-
-            if has_matching_leg or self.is_tracking or is_valid_gt:
-                # 脚と胴体の空間フュージョンが取れたターゲット、または追跡中、または真値で検証されたターゲットを検出と判定
+            if has_matching_leg or self.is_tracking:
+                # 脚と胴体の空間フュージョンが取れたターゲット、または追跡中のターゲットを検出と判定
                 detected_targets.append({
                     'centroid_map': torso_map,
                     'width': torso['width'],
@@ -437,7 +424,19 @@ class TargetDetector(Node):
         measured_x = 0.0
         measured_y = 0.0
 
-        if detected_targets:
+        # 予測されたターゲット位置がセンサーの視野内にあるかチェック
+        is_predicted_in_fov = True
+        if self.is_tracking:
+            pred_local = self.transform_map_to_base_link(pred_state[0], pred_state[1], msg.header.stamp, msg.header.frame_id)
+            if pred_local is not None:
+                pred_lx, pred_ly = pred_local
+                pred_angle = math.atan2(pred_ly, pred_lx)
+                # 2D LiDAR (scan3/hokuyo_scan) の物理的視野は [-pi/2, pi/2]
+                # マージン 0.1 rad を付与して判定
+                if pred_lx < -0.1 or abs(pred_angle) > (msg.angle_max + 0.1):
+                    is_predicted_in_fov = False
+
+        if detected_targets and is_predicted_in_fov:
             if self.is_tracking:
                 best_target = None
                 lowest_cost = float('inf')
@@ -485,11 +484,6 @@ class TargetDetector(Node):
                         # FOVに基づいた許容幅を計算（fov_degの左右半角）
                         max_local_y = local_x * math.tan(self.fov_deg * math.pi / 360.0)
                         if 0.3 <= local_x <= 1.5 and abs(local_y) <= max_local_y:
-                            # 静的障害物（壁や柱）への誤ロックオン防止：真値NPCの座標と近い候補のみをロックオンする
-                            if self.npc_gt_pose is not None:
-                                dist_to_gt = math.sqrt((cx_map - self.npc_gt_pose.x)**2 + (cy_map - self.npc_gt_pose.y)**2)
-                                if dist_to_gt > 1.0:
-                                    continue
                             if target['distance'] < closest_dist:
                                 closest_dist = target['distance']
                                 best_target = target
@@ -530,7 +524,9 @@ class TargetDetector(Node):
         else:
             if self.is_tracking:
                 self.lost_count += 1
-                if self.lost_count >= self.max_lost_frames:
+                # 視野外(後ろなど)にいるときは、旋回して再捕捉する時間を与えるため、ロスト判定の猶予を長く(5秒/50フレーム)する
+                allowed_lost_frames = 50 if not is_predicted_in_fov else self.max_lost_frames
+                if self.lost_count >= allowed_lost_frames:
                     self.is_tracking = False
                     self.locked_width = 0.0
                     self.locked_points_factor = 0.0
