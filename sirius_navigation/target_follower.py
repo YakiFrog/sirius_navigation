@@ -64,6 +64,8 @@ class TargetFollower(Node):
         self.last_sent_target_pose = None   # 最後にNav2にゴールを送信した時のターゲット座標
         self.goal_handle = None             # アクションのゴールハンドル（予備キャンセル用）
         self.goal_sending_in_progress = False # 多重送信防止フラグ
+        self.is_goal_active = False         # アクション実行中フラグ
+
         
         # 制御ループタイマーの開始
         self.timer = self.create_timer(1.0 / self.control_rate, self.control_loop)
@@ -113,13 +115,17 @@ class TargetFollower(Node):
         """
         self.target_pose = msg.pose.pose
 
-    def cancel_current_goal(self):
+    def cancel_current_goal(self, force=False):
         """
         現在Nav2で実行中の移動目標をすべてキャンセルし、ロボットを停止させる関数。
         """
+        if not self.is_goal_active and not force:
+            return
+            
         self.get_logger().info("実行中のすべてのNavigateToPoseゴールをキャンセルしています...")
         self.last_sent_target_pose = None
         self.goal_handle = None
+        self.is_goal_active = False
         
         # アクションのキャンセルサービスが立ち上がっているか確認
         if not self.cancel_client.wait_for_service(timeout_sec=1.0):
@@ -247,10 +253,12 @@ class TargetFollower(Node):
             goal_handle = future.result()
             if not goal_handle.accepted:
                 self.get_logger().warning("追従目標がNav2サーバーによって拒否されました。")
+                self.is_goal_active = False
                 return
             
             # アクティブなゴールハンドルを保存
             self.goal_handle = goal_handle
+            self.is_goal_active = True
         except Exception as e:
             self.get_logger().error(f"ゴール応答コールバックでエラーが発生しました: {e}")
 
@@ -273,7 +281,7 @@ def main(args=None):
         pass
     finally:
         # ノード終了時に、Nav2上のゴールをキャンセルしてロボットを停止状態にする
-        node.cancel_current_goal()
+        node.cancel_current_goal(force=True)
         node.destroy_node()
         rclpy.shutdown()
 
