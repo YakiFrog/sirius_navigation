@@ -29,7 +29,7 @@ class TargetDetector(Node):
         self.declare_parameter('robot_base_frame', 'sirius3/base_footprint')
         
         self.declare_parameter('min_range', 0.3)                # 検出最小距離（自身を弾く）
-        self.declare_parameter('max_range', 3.5)                # 検出最大距離（3.5m以内）
+        self.declare_parameter('max_range', 5.0)                # 検出最大距離（3.5m以内）
         self.declare_parameter('fov_deg', 120.0)                # ロックオン用前方視野角（左右60度、計120度）
         
         # 脚検出用のクラスタリングパラメータ
@@ -51,7 +51,7 @@ class TargetDetector(Node):
         self.declare_parameter('active_max_range', 5.0)         # 追従中の最大検出距離（5.0m）
         self.declare_parameter('active_fov_deg', 180.0)         # 追従中の視野角（前方180度のみ）
         self.declare_parameter('lockon_max_range', 1.0)         # ロックオン時の最大距離（m）起動時前方60cm想定
-        self.declare_parameter('lockon_max_lateral', 0.4)       # ロックオン時の横方向最大距離（m）
+        self.declare_parameter('lockon_max_lateral', 0.8)       # ロックオン時の横方向最大距離（m）
 
         # パラメータの取得
         self.leg_scan_topic = self.get_parameter('leg_scan_topic').value
@@ -134,7 +134,7 @@ class TargetDetector(Node):
         self.calib_buffer = []          # 前方検出フレームを蓄積
         self.calib_target_count = 6     # 6フレーム安定検出でロックオン確定（約0.6秒）
         self.calib_miss_count = 0       # ターゲットが見えなかったフレーム数（リセット猶予）
-        self.calib_miss_tolerance = 3   # この回数まではバッファをリセットしない
+        self.calib_miss_tolerance = 10   # この回数まではバッファをリセットしない
 
         self.get_logger().info(
             f"Target Detector Node (Leg-Torso Fusion) Initialized.\n"
