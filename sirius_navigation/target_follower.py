@@ -25,9 +25,9 @@ class TargetFollower(Node):
         # ROS 2 パラメータの宣言と初期化
         self.declare_parameter('enable_following', True)      # 自律追従の有効化フラグ
         self.declare_parameter('follow_distance', 0.8)       # ターゲットとの維持目標距離（メートル）
-        self.declare_parameter('min_update_distance', 0.2)    # ターゲットがこの距離以上動いたらゴールを再送信（チャタリング防止）
-        self.declare_parameter('control_rate', 1.0)           # 制御ループの実行頻度（Hz）
-        self.declare_parameter('deadband', 0.15)              # 停止判定用の不感帯（維持距離±15cm）
+        self.declare_parameter('min_update_distance', 0.15)   # ターゲットがこの距離以上動いたらゴールを再送信
+        self.declare_parameter('control_rate', 2.0)           # 制御ループの実行頻度（Hz）
+        self.declare_parameter('deadband', 0.1)               # 停止判定用の不感帯（維持距離±10cm）
         self.declare_parameter('robot_base_frame', 'sirius3/base_footprint') # ロボットのベースフレーム
         
         # パラメータ値の取得
@@ -161,7 +161,7 @@ class TargetFollower(Node):
 
         if self.last_target_time is not None:
             elapsed = (now - self.last_target_time).nanoseconds / 1e9
-            if elapsed > 2.0:
+            if elapsed > 5.0:  # 2秒→5秒に延長（一時的なトラッキングロストでキャンセルしない）
                 self.get_logger().warning("ターゲットからのデータ更新が途絶えました。追従を一時停止します。", throttle_duration_sec=5.0)
                 self.target_pose = None
                 self.cancel_current_goal()
@@ -197,13 +197,24 @@ class TargetFollower(Node):
         # 目標距離とのズレを計算 (例: 現在距離 1.3m - 目標 1.2m = +0.1m)
         dist_diff = dist - self.follow_distance
 
-        # 2. ズレが不感帯（デッドバンド）内の場合は、その場に停止する（チャタリング・振動防止）
+        # 2. ゴール実行中は不感帯チェックをスキップ（Nav2に制御を委ねる）
+        # Nav2が目標に到達するまで待つ。追従中に毎回キャンセルするとロボットが動かなくなる。
+        if self.is_goal_active:
+            # ターゲットが不感帯内に入った場合のみ停止（移動中は不感帯チェック不要）
+            if abs(dist_diff) <= self.deadband:
+                self.get_logger().info(
+                    f"ターゲットに到達しました (距離: {dist:.2f}m / 目標: {self.follow_distance:.2f}m)。停止。",
+                    throttle_duration_sec=3.0
+                )
+                self.cancel_current_goal()
+            return  # それ以外はゴール再送信しない
+
+        # ゴールがない場合：不感帯内なら停止（開始時のチェック）
         if abs(dist_diff) <= self.deadband:
             self.get_logger().info(
-                f"ターゲットが不感帯内です (距離: {dist:.2f}m / 目標: {self.follow_distance:.2f}m)。ロボットを停止します。", 
+                f"ターゲットが不感帯内です (距離: {dist:.2f}m / 目標: {self.follow_distance:.2f}m)。停止中。",
                 throttle_duration_sec=3.0
             )
-            self.cancel_current_goal()
             return
 
         # 3. ターゲットがあまり動いていない場合は無駄なゴール更新をスキップ（通信量と計算負荷の削減）

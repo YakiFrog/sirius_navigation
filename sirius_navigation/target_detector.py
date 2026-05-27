@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
@@ -8,6 +9,8 @@ from nav_msgs.msg import Odometry
 from tf2_ros import Buffer, TransformListener
 import math
 import numpy as np
+
+_PID_FILE = '/tmp/target_detector.pid'
 
 class TargetDetector(Node):
     """
@@ -23,7 +26,7 @@ class TargetDetector(Node):
         self.declare_parameter('torso_scan_topic', '/scan3')
         self.declare_parameter('association_threshold', 0.65)  # 脚と胴体のマッチング許容距離（65cm）
         self.declare_parameter('odom_topic', '/npc/odom')
-        self.declare_parameter('robot_base_frame', 'base_link')
+        self.declare_parameter('robot_base_frame', 'sirius3/base_footprint')
         
         self.declare_parameter('min_range', 0.3)                # 検出最小距離（自身を弾く）
         self.declare_parameter('max_range', 3.5)                # 検出最大距離（3.5m以内）
@@ -43,10 +46,12 @@ class TargetDetector(Node):
         self.declare_parameter('min_torso_width', 0.10)         # 胴体の最小幅（10cmに緩和）
         self.declare_parameter('max_torso_width', 0.85)         # 胴体の最大幅（85cmに緩和）
 
-        self.declare_parameter('gating_distance', 2.5)          # カルマンフィルターの関連付けゲート距離
-        self.declare_parameter('max_lost_frames', 60)            # ロスト判定フレーム数
+        self.declare_parameter('gating_distance', 1.0)          # カルマンフィルターの関連付けゲート距離（1.0mに紞小化）
+        self.declare_parameter('max_lost_frames', 150)           # ロスト判定フレーム数（15秒相当）
         self.declare_parameter('active_max_range', 5.0)         # 追従中の最大検出距離（5.0m）
-        self.declare_parameter('active_fov_deg', 360.0)         # 追従中の視野角（360度）
+        self.declare_parameter('active_fov_deg', 180.0)         # 追従中の視野角（前方180度のみ）
+        self.declare_parameter('lockon_max_range', 1.2)         # ロックオン時の最大距離（m）起動時前方60cm想定
+        self.declare_parameter('lockon_max_lateral', 0.4)       # ロックオン時の横方向最大距離（m）
 
         # パラメータの取得
         self.leg_scan_topic = self.get_parameter('leg_scan_topic').value
@@ -74,6 +79,8 @@ class TargetDetector(Node):
         self.max_lost_frames = self.get_parameter('max_lost_frames').value
         self.active_max_range = self.get_parameter('active_max_range').value
         self.active_fov_deg = self.get_parameter('active_fov_deg').value
+        self.lockon_max_range = self.get_parameter('lockon_max_range').value
+        self.lockon_max_lateral = self.get_parameter('lockon_max_lateral').value
 
         # パブリッシャーとサブスクライバーのセットアップ
         self.odom_pub = self.create_publisher(Odometry, self.odom_topic, 10)
@@ -96,7 +103,7 @@ class TargetDetector(Node):
 
         # カルマンフィルターパラメータ
         # プロセスノイズ共分散 Q
-        self.Q = np.diag([0.002, 0.002, 0.01, 0.01])
+        self.Q = np.diag([0.005, 0.005, 0.02, 0.02])
         # 観測行列 H
         self.H = np.array([
             [1.0, 0.0, 0.0, 0.0],
@@ -118,10 +125,16 @@ class TargetDetector(Node):
         self.locked_points_factor = 0.0
 
         # コスト計算用の重み付け
-        self.w_dist = 1.0
-        self.w_width = 2.0
-        self.w_points = 1.0
-        self.max_gating_cost = 1.5
+        self.w_dist = 1.0    # 距離差の重み
+        self.w_width = 0.5   # 幅差の重み（2.0→ノイズに弱わなかったため下げ）
+        self.w_points = 0.3  # 点群係数差の重み
+        self.max_gating_cost = 3.0  # コスト閾値（1.5→歩行中の変動を許容）
+
+        # キャリブレーションバッファ（起動時に複数フレーム観測してからロックオン）
+        self.calib_buffer = []          # 前方検出フレームを蓄積
+        self.calib_target_count = 6     # 6フレーム安定検出でロックオン確定（約0.6秒）
+        self.calib_miss_count = 0       # ターゲットが見えなかったフレーム数（リセット猶予）
+        self.calib_miss_tolerance = 3   # この回数まではバッファをリセットしない
 
         self.get_logger().info(
             f"Target Detector Node (Leg-Torso Fusion) Initialized.\n"
@@ -399,10 +412,10 @@ class TargetDetector(Node):
             if torso_map is None:
                 continue
 
-            if has_matching_leg or self.is_tracking:
-                # 脚と胴体の空間フュージョンが取れたターゲット、または追跡中のターゲットを検出と判定
+            if has_matching_leg or self.is_tracking or True:
                 detected_targets.append({
                     'centroid_map': torso_map,
+                    'centroid_base': torso_base,  # ロックオン判定用（TF逆変換不要）
                     'width': torso['width'],
                     'points_count': torso['points_count'],
                     'distance': torso['distance'],
@@ -457,14 +470,15 @@ class TargetDetector(Node):
                     # 統合コスト計算
                     cost = self.w_dist * d_dist + self.w_width * d_width + self.w_points * d_points
                     if not target['has_matching_leg']:
-                        cost += 2.0  # 脚の検出がない胴体候補にはペナルティを付与して、脚がある候補を優先する
+                        cost += 3.0  # 脚の検出がない胴体候補にはペナルティを付与して、脚がある候補を優先する
                     
                     if cost < lowest_cost:
                         lowest_cost = cost
                         best_target = target
 
-                # ゲート判定 (空間ゲートを通過した中でコスト最小のものを採用)
-                if best_target is not None:
+                # コスト閾値フィルター：最小コストが max_gating_cost 以下の場合のみ採用
+                # （定義されていたが使われていなかったバグを修正）
+                if best_target is not None and lowest_cost <= self.max_gating_cost:
                     measured_x, measured_y = best_target['centroid_map']
                     measurement_updated = True
                     
@@ -472,43 +486,83 @@ class TargetDetector(Node):
                     self.locked_width = 0.95 * self.locked_width + 0.05 * best_target['width']
                     self.locked_points_factor = 0.95 * self.locked_points_factor + 0.05 * best_target['points_factor']
             else:
-                # 未追跡時：ロボットの「正面」（base_link基準で前方0.3m〜1.5m, 左右50cm以内）にいるターゲットでロックオン
+                # 未追跡時：キャリブレーションモード
+                # centroid_base (ロボットローカル座標) を直接使用→ TF逆変換不要で安定
                 best_target = None
+                best_target_has_leg = False
                 closest_dist = float('inf')
-                
+
                 for target in detected_targets:
-                    cx_map, cy_map = target['centroid_map']
-                    local_pt = self.transform_map_to_base_link(cx_map, cy_map, msg.header.stamp, msg.header.frame_id)
-                    if local_pt is not None:
-                        local_x, local_y = local_pt
-                        # FOVに基づいた許容幅を計算（fov_degの左右半角）
-                        max_local_y = local_x * math.tan(self.fov_deg * math.pi / 360.0)
-                        if 0.3 <= local_x <= 1.5 and abs(local_y) <= max_local_y:
-                            if target['distance'] < closest_dist:
-                                closest_dist = target['distance']
-                                best_target = target
+                    local_x, local_y = target['centroid_base']  # 直接使用（TF不要）
+                    # 距離条件：前方 0.3m〜lockon_max_range
+                    # 横方向条件：固定 ±lockon_max_lateral
+                    if (0.3 <= local_x <= self.lockon_max_range
+                            and abs(local_y) <= self.lockon_max_lateral):
+                        has_leg = target['has_matching_leg']
+                        is_better = False
+                        if best_target is None:
+                            is_better = True
+                        elif has_leg and not best_target_has_leg:
+                            is_better = True
+                        elif has_leg == best_target_has_leg and target['distance'] < closest_dist:
+                            is_better = True
+                        if is_better:
+                            closest_dist = target['distance']
+                            best_target = target
+                            best_target_has_leg = has_leg
 
                 if best_target is not None:
-                    cx_map, cy_map = best_target['centroid_map']
-                    # カルマンフィルター状態の初期化
-                    self.kf_state = np.array([cx_map, cy_map, 0.0, 0.0])
-                    self.kf_cov = np.eye(4) * 0.5
-                    
-                    # 特徴量のロックオン
-                    self.locked_width = best_target['width']
-                    self.locked_points_factor = best_target['points_factor']
-                    
-                    self.is_tracking = True
-                    self.lost_count = 0
-                    measurement_updated = True
-                    measured_x, measured_y = cx_map, cy_map
-                    
-                    self.get_logger().info(
-                        f"ターゲットを正面でロックオンしました！\n"
-                        f"  位置(map): ({cx_map:.2f}, {cy_map:.2f}) 距離: {best_target['distance']:.2f}m\n"
-                        f"  初期幅: {self.locked_width:.2f}m\n"
-                        f"  初期点群係数: {self.locked_points_factor:.1f}"
-                    )
+                    self.calib_miss_count = 0  # ターゲット発見でミスカウントをリセット
+                    # キャリブレーションバッファに蓄積
+                    self.calib_buffer.append(best_target)
+                    remaining = self.calib_target_count - len(self.calib_buffer)
+                    if len(self.calib_buffer) == 1:
+                        self.get_logger().info(
+                            f"キャリブレーション開始。前方 {closest_dist:.2f}m にターゲット検出。"
+                            f"あと {remaining} フレームでロックオン..."
+                        )
+
+                    if len(self.calib_buffer) >= self.calib_target_count:
+                        # 複数フレームの平均でKFを初期化
+                        avg_x = sum(t['centroid_map'][0] for t in self.calib_buffer) / len(self.calib_buffer)
+                        avg_y = sum(t['centroid_map'][1] for t in self.calib_buffer) / len(self.calib_buffer)
+                        avg_width = sum(t['width'] for t in self.calib_buffer) / len(self.calib_buffer)
+                        avg_pf = sum(t['points_factor'] for t in self.calib_buffer) / len(self.calib_buffer)
+                        self.calib_buffer = []
+                        self.calib_miss_count = 0
+
+                        self.kf_state = np.array([avg_x, avg_y, 0.0, 0.0])
+                        self.kf_cov = np.eye(4) * 0.05
+                        self.locked_width = avg_width
+                        self.locked_points_factor = avg_pf
+                        self.is_tracking = True
+                        self.lost_count = 0
+                        measurement_updated = True
+                        measured_x, measured_y = avg_x, avg_y
+
+                        self.get_logger().info(
+                            f"キャリブレーション完了！{self.calib_target_count}フレーム平均でロックオン！\n"
+                            f"  位置(map): ({avg_x:.2f}, {avg_y:.2f})\n"
+                            f"  平均幅: {avg_width:.3f}m  点群係数: {avg_pf:.1f}"
+                        )
+                else:
+                    # ターゲットが見えない → 猶予カウンタで管理
+                    self.calib_miss_count += 1
+                    if self.calib_buffer and self.calib_miss_count > self.calib_miss_tolerance:
+                        self.get_logger().info(
+                            f"キャリブレーション中断（{self.calib_miss_count}フレーム連続で視野外）。"
+                            f"バッファ({len(self.calib_buffer)}フレーム)をリセット。",
+                            throttle_duration_sec=2.0
+                        )
+                        self.calib_buffer = []
+                        self.calib_miss_count = 0
+
+        elif not self.is_tracking and self.calib_buffer:
+            # detected_targetsが空の場合も猶予カウンタで管理
+            self.calib_miss_count += 1
+            if self.calib_miss_count > self.calib_miss_tolerance:
+                self.calib_buffer = []
+                self.calib_miss_count = 0
 
         # 4. 観測更新 (Update) or デッドレコニング (Prediction Only)
         if measurement_updated:
@@ -533,8 +587,8 @@ class TargetDetector(Node):
                     self.get_logger().warn("Target lost. Feature lock cleared.")
                 else:
                     self.kf_state = pred_state
-                    self.kf_state[2] *= 0.9  # vx 減衰
-                    self.kf_state[3] *= 0.9  # vy 減衰
+                    self.kf_state[2] *= 0.7  # vx 減衰（0.9→ドリフト防止のため加速）
+                    self.kf_state[3] *= 0.7  # vy 減衰
                     self.kf_cov = pred_cov
 
         # 5. Odometryの配信
@@ -687,15 +741,40 @@ class TargetDetector(Node):
         self.target_marker_pub.publish(marker)
 
 def main(args=None):
+    # ===== 多重起動防止（PIDファイルロック） =====
+    if os.path.exists(_PID_FILE):
+        try:
+            with open(_PID_FILE) as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)  # プロセスが生きているか確認
+            print(f'[ERROR] target_detector はすでに起動中です (PID={old_pid})。終了します。')
+            return
+        except (ProcessLookupError, ValueError, OSError):
+            pass  # 古いPIDファイルなら無視
+    with open(_PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    # ==========================================
+
     rclpy.init(args=args)
     node = TargetDetector()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except Exception:
+        pass  # ExternalShutdownException などを包括
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass  # 二重呼び出しエラーを無視
+        # PIDファイルを削除して次回起動を許可
+        if os.path.exists(_PID_FILE):
+            os.remove(_PID_FILE)
 
 if __name__ == '__main__':
     main()
