@@ -46,11 +46,11 @@ class TargetDetector(Node):
         self.declare_parameter('min_torso_width', 0.10)         # 胴体の最小幅（10cmに緩和）
         self.declare_parameter('max_torso_width', 0.85)         # 胴体の最大幅（85cmに緩和）
 
-        self.declare_parameter('gating_distance', 1.0)          # カルマンフィルターの関連付けゲート距離（1.0mに紞小化）
+        self.declare_parameter('gating_distance', 0.6)          # カルマンフィルターの関連付けゲート距離（0.6mに縮小して静的オブジェクトへの吸い付きを防止）
         self.declare_parameter('max_lost_frames', 150)           # ロスト判定フレーム数（15秒相当）
         self.declare_parameter('active_max_range', 5.0)         # 追従中の最大検出距離（5.0m）
         self.declare_parameter('active_fov_deg', 180.0)         # 追従中の視野角（前方180度のみ）
-        self.declare_parameter('lockon_max_range', 1.2)         # ロックオン時の最大距離（m）起動時前方60cm想定
+        self.declare_parameter('lockon_max_range', 1.0)         # ロックオン時の最大距離（m）起動時前方60cm想定
         self.declare_parameter('lockon_max_lateral', 0.4)       # ロックオン時の横方向最大距離（m）
 
         # パラメータの取得
