@@ -470,7 +470,7 @@ class TargetDetector(Node):
                     # 統合コスト計算
                     cost = self.w_dist * d_dist + self.w_width * d_width + self.w_points * d_points
                     if not target['has_matching_leg']:
-                        cost += 3.0  # 脚の検出がない胴体候補にはペナルティを付与して、脚がある候補を優先する
+                        cost += 1.2  # 脚の検出がない胴体候補には小さなペナルティを付与（側面に回り込んで脚が見えないときも追跡を継続するため）
                     
                     if cost < lowest_cost:
                         lowest_cost = cost

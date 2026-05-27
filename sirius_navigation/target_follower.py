@@ -197,24 +197,14 @@ class TargetFollower(Node):
         # 目標距離とのズレを計算 (例: 現在距離 1.3m - 目標 1.2m = +0.1m)
         dist_diff = dist - self.follow_distance
 
-        # 2. ゴール実行中は不感帯チェックをスキップ（Nav2に制御を委ねる）
-        # Nav2が目標に到達するまで待つ。追従中に毎回キャンセルするとロボットが動かなくなる。
-        if self.is_goal_active:
-            # ターゲットが不感帯内に入った場合のみ停止（移動中は不感帯チェック不要）
-            if abs(dist_diff) <= self.deadband:
+        # 2. ターゲットが不感帯内（維持目標距離の前後 deadband）に入った場合は停止
+        if abs(dist_diff) <= self.deadband:
+            if self.is_goal_active:
                 self.get_logger().info(
-                    f"ターゲットに到達しました (距離: {dist:.2f}m / 目標: {self.follow_distance:.2f}m)。停止。",
+                    f"ターゲットに到達しました (距離: {dist:.2f}m / 目標: {self.follow_distance:.2f}m)。停止します。",
                     throttle_duration_sec=3.0
                 )
                 self.cancel_current_goal()
-            return  # それ以外はゴール再送信しない
-
-        # ゴールがない場合：不感帯内なら停止（開始時のチェック）
-        if abs(dist_diff) <= self.deadband:
-            self.get_logger().info(
-                f"ターゲットが不感帯内です (距離: {dist:.2f}m / 目標: {self.follow_distance:.2f}m)。停止中。",
-                throttle_duration_sec=3.0
-            )
             return
 
         # 3. ターゲットがあまり動いていない場合は無駄なゴール更新をスキップ（通信量と計算負荷の削減）
@@ -281,8 +271,26 @@ class TargetFollower(Node):
             # アクティブなゴールハンドルを保存
             self.goal_handle = goal_handle
             self.is_goal_active = True
+            
+            # ゴールの実行結果を非同期で監視するコールバックを登録 (クロージャで goal_handle を渡す)
+            result_future = self.goal_handle.get_result_async()
+            result_future.add_done_callback(
+                lambda future_result, gh=goal_handle: self.goal_result_callback(future_result, gh)
+            )
         except Exception as e:
             self.get_logger().error(f"ゴール応答コールバックでエラーが発生しました: {e}")
+
+    def goal_result_callback(self, future, goal_handle):
+        """
+        ゴールの実行が完了（成功、中断、キャンセルなど）したときに呼び出されるコールバック。
+        """
+        # 現在のアクティブなゴールハンドルと一致する場合のみ状態を更新
+        if self.goal_handle is not None and goal_handle == self.goal_handle:
+            self.is_goal_active = False
+            self.goal_handle = None
+            
+            status = future.result().status
+            self.get_logger().info(f"アクティブなゴールが終了しました。ステータスコード: {status}")
 
 def sigterm_handler(signum, frame):
     """
