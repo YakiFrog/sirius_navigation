@@ -380,66 +380,72 @@ class TargetDetector(Node):
             track.state = F @ track.state
             track.cov = F @ track.cov @ F.T + self.Q
 
-        # 4. データ関連付け (Gated Nearest Neighbor)
+        # 4. データ関連付け (scipy.optimize.linear_sum_assignment を用いたハンガリアン法)
+        from scipy.optimize import linear_sum_assignment
         matched_detections = set()
         matched_tracks = set()
-        associations = []
         
-        for t_idx, track in enumerate(self.tracks):
-            is_predicted_in_fov = True
-            pred_local = self.transform_map_to_base_link(track.state[0], track.state[1], msg.header.stamp, msg.header.frame_id)
-            if pred_local is not None:
-                pred_lx, pred_ly = pred_local
-                pred_angle = math.atan2(pred_ly, pred_lx)
-                if pred_lx < -0.8 or abs(pred_angle) > (msg.angle_max + 0.1):
-                    is_predicted_in_fov = False
+        num_tracks = len(self.tracks)
+        num_detections = len(detected_targets)
+        
+        if num_tracks > 0 and num_detections > 0:
+            cost_matrix = np.full((num_tracks, num_detections), 1e5)
             
-            if not is_predicted_in_fov:
-                continue
+            for t_idx, track in enumerate(self.tracks):
+                is_predicted_in_fov = True
+                pred_local = self.transform_map_to_base_link(track.state[0], track.state[1], msg.header.stamp, msg.header.frame_id)
+                if pred_local is not None:
+                    pred_lx, pred_ly = pred_local
+                    pred_angle = math.atan2(pred_ly, pred_lx)
+                    if pred_lx < -0.8 or abs(pred_angle) > (msg.angle_max + 0.1):
+                        is_predicted_in_fov = False
                 
-            for d_idx, det in enumerate(detected_targets):
-                cx_map, cy_map = det['centroid_map']
-                d_dist = math.sqrt((cx_map - track.state[0])**2 + (cy_map - track.state[1])**2)
-                
-                # ゲート距離チェック
-                if d_dist > self.gating_distance:
+                if not is_predicted_in_fov:
                     continue
                     
-                d_width = abs(det['width'] - track.width)
-                if track.points_factor > 0:
-                    d_points = abs(det['points_factor'] - track.points_factor) / track.points_factor
-                else:
-                    d_points = 0.0
+                for d_idx, det in enumerate(detected_targets):
+                    cx_map, cy_map = det['centroid_map']
+                    d_dist = math.sqrt((cx_map - track.state[0])**2 + (cy_map - track.state[1])**2)
                     
-                cost = self.w_dist * d_dist + self.w_width * d_width + self.w_points * d_points
-                if not det['has_matching_leg']:
-                    cost += 1.2
+                    # ゲート距離チェック
+                    if d_dist > self.gating_distance:
+                        continue
+                        
+                    d_width = abs(det['width'] - track.width)
+                    if track.points_factor > 0:
+                        d_points = abs(det['points_factor'] - track.points_factor) / track.points_factor
+                    else:
+                        d_points = 0.0
+                        
+                    cost = self.w_dist * d_dist + self.w_width * d_width + self.w_points * d_points
+                    if not det['has_matching_leg']:
+                        cost += 1.2
+                        
+                    if cost <= self.max_gating_cost:
+                        cost_matrix[t_idx, d_idx] = cost
+            
+            # 最小コストとなる最適な組み合わせを選択
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            for r, c in zip(row_ind, col_ind):
+                if cost_matrix[r, c] < 1e4:  # 無効な割当（1e5のまま）を除外
+                    matched_tracks.add(r)
+                    matched_detections.add(c)
                     
-                if cost <= self.max_gating_cost:
-                    associations.append((cost, t_idx, d_idx))
-
-        # コストが低い順にマッチング
-        associations.sort(key=lambda x: x[0])
-        for cost, t_idx, d_idx in associations:
-            if t_idx not in matched_tracks and d_idx not in matched_detections:
-                matched_tracks.add(t_idx)
-                matched_detections.add(d_idx)
-                
-                track = self.tracks[t_idx]
-                det = detected_targets[d_idx]
-                
-                Z = np.array([det['centroid_map'][0], det['centroid_map'][1]])
-                Y = Z - self.H @ track.state
-                S = self.H @ track.cov @ self.H.T + self.R
-                K = track.cov @ self.H.T @ np.linalg.inv(S)
-                
-                track.state = track.state + K @ Y
-                track.cov = (np.eye(4) - K @ self.H) @ track.cov
-                track.lost_count = 0
-                track.age += 1
-                
-                track.width = 0.95 * track.width + 0.05 * det['width']
-                track.points_factor = 0.95 * track.points_factor + 0.05 * det['points_factor']
+                    track = self.tracks[r]
+                    det = detected_targets[c]
+                    
+                    Z = np.array([det['centroid_map'][0], det['centroid_map'][1]])
+                    Y = Z - self.H @ track.state
+                    S = self.H @ track.cov @ self.H.T + self.R
+                    K = track.cov @ self.H.T @ np.linalg.inv(S)
+                    
+                    track.state = track.state + K @ Y
+                    track.cov = (np.eye(4) - K @ self.H) @ track.cov
+                    track.lost_count = 0
+                    track.age += 1
+                    
+                    track.width = 0.95 * track.width + 0.05 * det['width']
+                    track.points_factor = 0.95 * track.points_factor + 0.05 * det['points_factor']
 
         # 5. マッチしなかったトラックの更新（デッドレコニング）
         for t_idx, track in enumerate(self.tracks):
