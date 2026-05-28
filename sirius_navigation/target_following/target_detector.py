@@ -131,7 +131,8 @@ class TargetDetector(Node):
         self.w_dist = 1.0    # 距離差の重み
         self.w_width = 0.5   # 幅差の重み
         self.w_points = 0.3  # 点群係数差の重み
-        self.max_gating_cost = 3.0  # コスト閾値
+        self.w_dir = 1.2     # 移動方向（速度ベクトル）の一致度の重み
+        self.max_gating_cost = 3.5  # コスト閾値（方向ペナルティ考慮のため少し緩和）
 
         # キャリブレーションパラメータ
         self.calib_target_count = 6     # 6フレーム安定検出でロックオン
@@ -416,8 +417,26 @@ class TargetDetector(Node):
                         d_points = abs(det['points_factor'] - track.points_factor) / track.points_factor
                     else:
                         d_points = 0.0
-                        
-                    cost = self.w_dist * d_dist + self.w_width * d_width + self.w_points * d_points
+
+                    # 進行方向（速度ベクトル）の一致度の計算
+                    vx = track.state[2]
+                    vy = track.state[3]
+                    v_mag = math.sqrt(vx**2 + vy**2)
+                    
+                    prev_x = track.state[0] - vx * dt
+                    prev_y = track.state[1] - vy * dt
+                    disp_x = cx_map - prev_x
+                    disp_y = cy_map - prev_y
+                    disp_mag = math.sqrt(disp_x**2 + disp_y**2)
+                    
+                    dir_cost = 0.0
+                    if v_mag > 0.15 and disp_mag > 0.05:
+                        cos_theta = (vx * disp_x + vy * disp_y) / (v_mag * disp_mag)
+                        cos_theta = max(-1.0, min(1.0, cos_theta))
+                        # 反対方向（cos_theta < 0）に進むようなマッチングには強いペナルティを与える
+                        dir_cost = self.w_dir * (1.0 - cos_theta)
+
+                    cost = self.w_dist * d_dist + self.w_width * d_width + self.w_points * d_points + dir_cost
                     if not det['has_matching_leg']:
                         cost += 1.2
                         
