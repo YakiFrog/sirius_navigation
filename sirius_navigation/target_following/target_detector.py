@@ -47,22 +47,22 @@ class TargetDetector(Node):
         self.declare_parameter('leg_cluster_tolerance', 0.15)   # 点同士の最大距離（15cm）
         self.declare_parameter('min_leg_cluster_size', 2)       # 最小点数
         self.declare_parameter('max_leg_cluster_size', 60)      # 最大点数
-        self.declare_parameter('min_leg_width', 0.08)           # 脚の最小幅（8cm）
-        self.declare_parameter('max_leg_width', 0.25)           # 脚の最大幅（25cm）
+        self.declare_parameter('min_leg_width', 0.07)           # 脚の最小幅（150cmNPCの脚径10.5cmを考慮し7cmに設定）
+        self.declare_parameter('max_leg_width', 0.20)           # 脚の最大幅（175cmNPCの脚径12.3cmを考慮し20cmに設定）
         
         # 胴体検出用のクラスタリングパラメータ
         self.declare_parameter('torso_cluster_tolerance', 0.25) # 点同士の最大距離（25cm）
         self.declare_parameter('min_torso_cluster_size', 5)     # 最小点数（ノイズカットのため5点に引き上げ）
         self.declare_parameter('max_torso_cluster_size', 60)    # 最大点数
-        self.declare_parameter('min_torso_width', 0.18)         # 胴体の最小幅（18cm）
-        self.declare_parameter('max_torso_width', 0.55)         # 胴体の最大幅（55cm）
+        self.declare_parameter('min_torso_width', 0.15)         # 胴体の最小幅（150cmNPCが横を向いた時の厚み21.9cmを考慮し15cmに設定）
+        self.declare_parameter('max_torso_width', 0.55)         # 胴体の最大幅（175cmNPCの肩幅46cmを考慮し55cmに設定）
 
         self.declare_parameter('gating_distance', 0.6)          # カルマンフィルターの関連付けゲート距離（0.6m）
         self.declare_parameter('max_lost_frames', 150)          # ロスト判定フレーム数（15秒相当）
-        self.declare_parameter('active_max_range', 5.0)         # 追従中の最大検出距離（5.0m）
+        self.declare_parameter('active_max_range', 10)         # 追従中の最大検出距離（10.0m）
         self.declare_parameter('active_fov_deg', 270.0)         # 追従中の視野角（270度）
         self.declare_parameter('lockon_max_range', 1.2)         # ロックオン時の最大距離（m）
-        self.declare_parameter('lockon_max_lateral', 0.35)       # ロックオン時の横方向最大距離（m、正面のみに限定）
+        self.declare_parameter('lockon_max_lateral', 0.30)       # ロックオン時の横方向最大距離（m、正面のみに限定）
 
         # パラメータの取得
         self.leg_scan_topic = self.get_parameter('leg_scan_topic').value
