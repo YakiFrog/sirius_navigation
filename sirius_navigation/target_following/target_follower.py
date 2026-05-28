@@ -24,7 +24,7 @@ class TargetFollower(Node):
         
         # ROS 2 パラメータの宣言と初期化
         self.declare_parameter('enable_following', True)      # 自律追従の有効化フラグ
-        self.declare_parameter('follow_distance', 0.8)       # ターゲットとの維持目標距離（メートル）
+        self.declare_parameter('follow_distance', 0.6)     # ターゲットとの維持目標距離（メートル）
         self.declare_parameter('min_update_distance', 0.15)   # ターゲットがこの距離以上動いたらゴールを再送信
         self.declare_parameter('control_rate', 2.0)           # 制御ループの実行頻度（Hz）
         self.declare_parameter('deadband', 0.1)               # 停止判定用の不感帯（維持距離±10cm）
@@ -208,7 +208,8 @@ class TargetFollower(Node):
             return
 
         # 3. ターゲットがあまり動いていない場合は無駄なゴール更新をスキップ（通信量と計算負荷の削減）
-        if self.last_sent_target_pose is not None:
+        # ただし、ターゲットが「近づきすぎ」の状態（目標距離より手前）の場合は、後退を強制するためスキップしない
+        if dist_diff >= -self.deadband and self.last_sent_target_pose is not None:
             tdx = target_x - self.last_sent_target_pose.position.x
             tdy = target_y - self.last_sent_target_pose.position.y
             moved_dist = math.sqrt(tdx**2 + tdy**2)

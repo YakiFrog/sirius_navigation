@@ -61,8 +61,8 @@ class TargetDetector(Node):
         self.declare_parameter('max_lost_frames', 150)          # ロスト判定フレーム数（15秒相当）
         self.declare_parameter('active_max_range', 5.0)         # 追従中の最大検出距離（5.0m）
         self.declare_parameter('active_fov_deg', 270.0)         # 追従中の視野角（270度）
-        self.declare_parameter('lockon_max_range', 1.0)         # ロックオン時の最大距離（m）
-        self.declare_parameter('lockon_max_lateral', 0.8)       # ロックオン時の横方向最大距離（m）
+        self.declare_parameter('lockon_max_range', 1.2)         # ロックオン時の最大距離（m）
+        self.declare_parameter('lockon_max_lateral', 0.35)       # ロックオン時の横方向最大距離（m、正面のみに限定）
 
         # パラメータの取得
         self.leg_scan_topic = self.get_parameter('leg_scan_topic').value
