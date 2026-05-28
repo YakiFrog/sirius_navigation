@@ -627,16 +627,23 @@ class TargetDetector(Node):
                 marker.pose.position.z = 0.01  # 地面すれすれに配置
                 marker.pose.orientation.w = 1.0
                 
-                # 直径を倍（0.2mから0.4m）に変更
                 marker.scale.x = 0.4
                 marker.scale.y = 0.4
                 marker.scale.z = 0.01  # 極薄のシリンダー（円）にする
                 
-                # オレンジ色で半透明
-                marker.color.r = 1.0
-                marker.color.g = 0.5
-                marker.color.b = 0.0
-                marker.color.a = 0.6
+                # 確信度の違いで色分け
+                if det.get('has_matching_leg', False):
+                    # 高確信度（胴体＋脚を同時検出）: オレンジ
+                    marker.color.r = 1.0
+                    marker.color.g = 0.5
+                    marker.color.b = 0.0
+                    marker.color.a = 0.7
+                else:
+                    # 低確信度（胴体のみ、足元見えず）: 黄色
+                    marker.color.r = 0.9
+                    marker.color.g = 0.9
+                    marker.color.b = 0.0
+                    marker.color.a = 0.5
                 
                 marker_array.markers.append(marker)
                 raw_count += 1
