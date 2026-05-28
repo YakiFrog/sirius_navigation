@@ -502,6 +502,10 @@ class TargetDetector(Node):
                 local_x, local_y = det['centroid_base']
                 # ロックオンエリア内で最初に見つかった場合のみ、新規のTrack候補として登録する
                 if (0.3 <= local_x <= self.lockon_max_range and abs(local_y) <= self.lockon_max_lateral):
+                    # 新規登録時は「胴体＋脚」の同時検出（has_matching_leg）を必須とする（静的障害物の誤ロックオン防止）
+                    if not det.get('has_matching_leg', False):
+                        continue
+
                     # 【重複防止ガード】すでに半径0.5m以内に他の追従・追跡対象が存在する場合は、同一オブジェクトへの二重登録を防ぐため新規生成をスキップする
                     cx_map, cy_map = det['centroid_map']
                     too_close = False
