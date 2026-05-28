@@ -22,6 +22,12 @@ class Track:
         self.points_factor = points_factor
         self.lost_count = 0
         self.age = 1
+        
+        # 静的障害物（柱やゴミ箱など）の誤検出防止用パラメータ
+        self.start_x = state[0]
+        self.start_y = state[1]
+        self.max_displacement = 0.0
+        self.is_static = False
 
 class TargetDetector(Node):
     """
@@ -466,6 +472,17 @@ class TargetDetector(Node):
                     track.width = 0.95 * track.width + 0.05 * det['width']
                     track.points_factor = 0.95 * track.points_factor + 0.05 * det['points_factor']
 
+                    # 初期位置からの変位（移動距離）を計算し最大値を更新
+                    disp = math.sqrt((track.state[0] - track.start_x)**2 + (track.state[1] - track.start_y)**2)
+                    if disp > track.max_displacement:
+                        track.max_displacement = disp
+
+                    # 一定以上動いたら動的ターゲットとして認識、動かないまま一定フレーム経過したら静止物として認識
+                    if track.max_displacement >= 0.25:
+                        track.is_static = False
+                    elif track.age > 40: # 約4秒以上その場から動いていない場合
+                        track.is_static = True
+
         # 5. マッチしなかったトラックの更新（デッドレコニング）
         for t_idx, track in enumerate(self.tracks):
             if t_idx not in matched_tracks:
@@ -549,7 +566,7 @@ class TargetDetector(Node):
                 rx, ry = 0.0, 0.0
 
             for track in self.tracks:
-                if track.age >= self.calib_target_count:
+                if track.age >= self.calib_target_count and not track.is_static:
                     dist_to_robot = math.sqrt((track.state[0] - rx)**2 + (track.state[1] - ry)**2)
                     if dist_to_robot < closest_dist:
                         closest_dist = dist_to_robot
@@ -565,7 +582,11 @@ class TargetDetector(Node):
         if self.primary_track_id is not None:
             primary_track = next((t for t in self.tracks if t.id == self.primary_track_id), None)
             if primary_track is not None:
-                self.publish_odom(primary_track, msg.header.stamp, msg.header.frame_id)
+                if primary_track.is_static:
+                    self.get_logger().warn(f"Locked target Track {self.primary_track_id} determined to be static. Unlocking.")
+                    self.primary_track_id = None
+                else:
+                    self.publish_odom(primary_track, msg.header.stamp, msg.header.frame_id)
 
     def publish_all_markers(self, stamp, sensor_frame_id, detected_targets=None):
         from visualization_msgs.msg import Marker, MarkerArray
@@ -591,12 +612,17 @@ class TargetDetector(Node):
             marker.scale.y = 0.3
             marker.scale.z = 1.0
             
-            # プライマリ（追従対象）はオレンジ、他は水色
+            # プライマリ（追従対象）はオレンジ、静止判定されたものはグレー、他は水色
             if track.id == self.primary_track_id:
                 marker.color.r = 1.0
                 marker.color.g = 0.5
                 marker.color.b = 0.0
                 marker.color.a = 0.8
+            elif track.is_static:
+                marker.color.r = 0.5
+                marker.color.g = 0.5
+                marker.color.b = 0.5
+                marker.color.a = 0.2
             else:
                 marker.color.r = 0.0
                 marker.color.g = 0.8
