@@ -47,15 +47,15 @@ class TargetDetector(Node):
         self.declare_parameter('leg_cluster_tolerance', 0.15)   # 点同士の最大距離（15cm）
         self.declare_parameter('min_leg_cluster_size', 2)       # 最小点数
         self.declare_parameter('max_leg_cluster_size', 60)      # 最大点数
-        self.declare_parameter('min_leg_width', 0.06)           # 脚の最小幅（6cm）
-        self.declare_parameter('max_leg_width', 0.80)           # 脚の最大幅（80cm）
+        self.declare_parameter('min_leg_width', 0.08)           # 脚の最小幅（8cm）
+        self.declare_parameter('max_leg_width', 0.25)           # 脚の最大幅（25cm）
         
         # 胴体検出用のクラスタリングパラメータ
         self.declare_parameter('torso_cluster_tolerance', 0.25) # 点同士の最大距離（25cm）
-        self.declare_parameter('min_torso_cluster_size', 3)     # 最小点数
+        self.declare_parameter('min_torso_cluster_size', 5)     # 最小点数（ノイズカットのため5点に引き上げ）
         self.declare_parameter('max_torso_cluster_size', 60)    # 最大点数
-        self.declare_parameter('min_torso_width', 0.10)         # 胴体の最小幅（10cmに緩和）
-        self.declare_parameter('max_torso_width', 0.85)         # 胴体の最大幅（85cmに緩和）
+        self.declare_parameter('min_torso_width', 0.18)         # 胴体の最小幅（18cm）
+        self.declare_parameter('max_torso_width', 0.55)         # 胴体の最大幅（55cm）
 
         self.declare_parameter('gating_distance', 0.6)          # カルマンフィルターの関連付けゲート距離（0.6m）
         self.declare_parameter('max_lost_frames', 150)          # ロスト判定フレーム数（15秒相当）
@@ -502,6 +502,18 @@ class TargetDetector(Node):
                 local_x, local_y = det['centroid_base']
                 # ロックオンエリア内で最初に見つかった場合のみ、新規のTrack候補として登録する
                 if (0.3 <= local_x <= self.lockon_max_range and abs(local_y) <= self.lockon_max_lateral):
+                    # 【重複防止ガード】すでに半径0.5m以内に他の追従・追跡対象が存在する場合は、同一オブジェクトへの二重登録を防ぐため新規生成をスキップする
+                    cx_map, cy_map = det['centroid_map']
+                    too_close = False
+                    for track in self.tracks:
+                        dist = math.sqrt((cx_map - track.state[0])**2 + (cy_map - track.state[1])**2)
+                        if dist < 0.5:
+                            too_close = True
+                            break
+                    
+                    if too_close:
+                        continue
+                        
                     new_track = Track(
                         track_id=self.next_track_id,
                         state=np.array([det['centroid_map'][0], det['centroid_map'][1], 0.0, 0.0]),
