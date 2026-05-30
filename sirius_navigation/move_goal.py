@@ -30,6 +30,7 @@ class Waypoint:
     stop: bool = False
     wait_time: float = 0.0  # 待機時間（秒）
     change_map: str = ""  # 地図変更用のフィールド（地図名を指定）
+    threshold: float = -1.0  # 個別の到達判定距離。マイナスの場合はデフォルト値を使用
     
 class Nav2GoalClient(Node):
     def __init__(self, count = 1):
@@ -60,7 +61,7 @@ class Nav2GoalClient(Node):
         self.positions_list = []
         self.current_goal_index = None
         self._waiting_until = None  # 待機終了時刻
-        self.timer = self.create_timer(1.0, self.get_position)
+        self.timer = self.create_timer(0.1, self.get_position)  # 10Hz (0.1秒周期) に変更して応答性を向上
         
     def load_waypoints(self, file_path: str) -> List[Waypoint]:
         # Expand ~ and resolve absolute path
@@ -90,7 +91,8 @@ class Nav2GoalClient(Node):
             rotate = wp.get('rotate', 0.0),  # キーが存在しない場合は0.0を返す
             stop = wp.get('stop', False),  # キーが存在しない場合はFalseを返す
             wait_time = float(wp.get('wait_time', 0.0)),  # 待機時間（秒）
-            change_map = wp.get('change_map', "")  # キーが存在しない場合は空文字を返す
+            change_map = wp.get('change_map', ""),  # キーが存在しない場合は空文字を返す
+            threshold = float(wp.get('threshold', -1.0))  # キーが存在しない場合は-1.0を返す
         ) for wp in data['waypoints']]
         
     def euler_to_quaternion(self, yaw):
@@ -354,13 +356,15 @@ class Nav2GoalClient(Node):
                 current_wp_info = f"[WP:{current_wp.number}] ({self.count + 1}/{len(self.waypoints)})"
                 self.get_logger().info(f"{current_wp_info} dist={self.distance:.2f}m", throttle_duration_sec=1.0)
                 
-                # stop/wait/change_mapによって判定距離を変更
+                # stop/wait/change_mapまたは個別のしきい値設定によって判定距離を変更
                 if (hasattr(current_wp, 'stop') and current_wp.stop) or \
                    (hasattr(current_wp, 'wait_time') and current_wp.wait_time > 0) or \
                    (hasattr(current_wp, 'change_map') and current_wp.change_map):
                     threshold_distance = 0.5  # 精密判定が必要な場合
+                elif hasattr(current_wp, 'threshold') and current_wp.threshold > 0.0:
+                    threshold_distance = current_wp.threshold  # 個別設定がある場合
                 else:
-                    threshold_distance = 1.5  # それ以外
+                    threshold_distance = 2.0  # デフォルト（速度低下を防ぐため1.5mから2.0mに増加）
 
                 if self.distance < threshold_distance:
                     self.get_logger().info(
