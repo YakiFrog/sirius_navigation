@@ -108,7 +108,10 @@ class Nav2GoalClient(Node):
         
     def send_goal(self):
         if self.count >= len(self.waypoints):
-            self.get_logger().info(f"All {len(self.waypoints)} waypoints completed.")
+            self.get_logger().info(f"All {len(self.waypoints)} waypoints completed. Exiting node...")
+            if hasattr(self, 'timer') and self.timer:
+                self.timer.destroy()
+            rclpy.shutdown()
             return
         
         wp = self.waypoints[self.count]
@@ -449,9 +452,14 @@ def main(args = None):
         f"starting from index {parsed_args.count}"
     )
     node.send_goal()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
     
 if __name__ == '__main__':
     main()
