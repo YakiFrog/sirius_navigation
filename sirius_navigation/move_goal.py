@@ -350,9 +350,9 @@ class Nav2GoalClient(Node):
                 x_distance = x_goal - self.position[0]
                 y_distance = y_goal - self.position[1]
                 self.distance = math.sqrt(x_distance**2 + y_distance**2)
-                # Log the current distance to the active goal with formatting
+                # Log the current distance to the active goal with formatting (throttle log to prevent console flood)
                 current_wp_info = f"[WP:{current_wp.number}] ({self.count + 1}/{len(self.waypoints)})"
-                self.get_logger().info(f"{current_wp_info} dist={self.distance:.2f}m")
+                self.get_logger().info(f"{current_wp_info} dist={self.distance:.2f}m", throttle_duration_sec=1.0)
                 
                 # stop/wait/change_mapによって判定距離を変更
                 if (hasattr(current_wp, 'stop') and current_wp.stop) or \
@@ -395,8 +395,8 @@ class Nav2GoalClient(Node):
                     # Send the next goal (if any) and log it from send_goal
                     self.send_goal()
                 
-                # 定期的にゴールを再送信
-                elif self.loop_count % 5 == 0:
+                # 定期的にゴールを再送信 (10Hzのため100ループ=10秒毎)
+                elif self.loop_count % 100 == 0:
                     self.get_logger().info(f"{current_wp_info} Resending...")
                     self.send_goal()
                 
@@ -407,8 +407,7 @@ class Nav2GoalClient(Node):
         except Exception as e:
             self.get_logger().warning(f"Transform error: {str(e)}")
             
-        # タイマーの周期を2秒に変更
-        self.timer.timer_period_ns = 2000000000  # 2秒
+        # 10Hzの周期を維持するため、タイマー書き換え処理は削除
             
 def main(args = None):
     parser = argparse.ArgumentParser(description='Nav2 waypoint follower with map switching support.')
