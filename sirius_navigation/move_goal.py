@@ -33,7 +33,7 @@ class Waypoint:
     threshold: float = -1.0  # 個別の到達判定距離。マイナスの場合はデフォルト値を使用
     
 class Nav2GoalClient(Node):
-    def __init__(self, count = 1, loop = False):
+    def __init__(self, count = 1, loop = False, default_threshold = 2.0):
         super().__init__('nav2_goal_client')
         
         self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -57,6 +57,7 @@ class Nav2GoalClient(Node):
         self.waypoints = self.load_waypoints(file_path)
         self.count = count - 1
         self.loop = loop
+        self.default_threshold = default_threshold
         self.loop_count = 0
         self.distance = float('inf')
         self.positions_list = []
@@ -68,7 +69,7 @@ class Nav2GoalClient(Node):
         # Expand ~ and resolve absolute path
         expanded = os.path.expanduser(file_path)
         path = Path(expanded).resolve()
-
+ 
         # If file not found, try typical workspace-relative location (cwd) as a fallback
         if not path.exists():
             fallback = Path.cwd() / 'maps_waypoints' / 'waypoints' / 'waypoints.yaml'
@@ -81,7 +82,7 @@ class Nav2GoalClient(Node):
                     f"Waypoint file not found. Tried the following locations: {tried}.\n"
                     "Set the SIRIUS_WAYPOINTS environment variable or create the file at one of these paths."
                 )
-
+ 
         with open(path, 'r') as f:
             data = yaml.safe_load(f)
         return [Waypoint(
@@ -372,7 +373,7 @@ class Nav2GoalClient(Node):
                 elif hasattr(current_wp, 'threshold') and current_wp.threshold > 0.0:
                     threshold_distance = current_wp.threshold  # 個別設定がある場合
                 else:
-                    threshold_distance = 2.0  # デフォルト（速度低下を防ぐため1.5mから2.0mに増加）
+                    threshold_distance = self.default_threshold  # デフォルト（速度低下を防ぐため）
 
                 if self.distance < threshold_distance:
                     self.get_logger().info(
@@ -429,6 +430,8 @@ def main(args = None):
                         help='Waypoints file path or name (e.g., "waypoints.yaml" or "atc_1F")')
     parser.add_argument('--loop', '-l', action='store_true',
                         help='Loop waypoints infinitely')
+    parser.add_argument('--threshold', '-t', type=float, default=2.0,
+                        help='Default threshold distance to waypoints (default: 2.0)')
     parsed_args = parser.parse_args()
     
     # ウェイポイントファイルのパスを決定
@@ -453,10 +456,10 @@ def main(args = None):
     os.environ['SIRIUS_WAYPOINTS'] = os.path.expanduser(waypoints_file)
     
     rclpy.init(args=args)
-    node = Nav2GoalClient(count=parsed_args.count, loop=parsed_args.loop)
+    node = Nav2GoalClient(count=parsed_args.count, loop=parsed_args.loop, default_threshold=parsed_args.threshold)
     node.get_logger().info(
         f"Starting Nav2GoalClient: {len(node.waypoints)} waypoints from '{waypoints_file}', "
-        f"starting from index {parsed_args.count}"
+        f"starting from index {parsed_args.count}, default threshold={parsed_args.threshold:.2f}m"
     )
     node.send_goal()
     try:
