@@ -33,7 +33,7 @@ class Waypoint:
     threshold: float = -1.0  # 個別の到達判定距離。マイナスの場合はデフォルト値を使用
     
 class Nav2GoalClient(Node):
-    def __init__(self, count = 1):
+    def __init__(self, count = 1, loop = False):
         super().__init__('nav2_goal_client')
         
         self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -56,6 +56,7 @@ class Nav2GoalClient(Node):
         )
         self.waypoints = self.load_waypoints(file_path)
         self.count = count - 1
+        self.loop = loop
         self.loop_count = 0
         self.distance = float('inf')
         self.positions_list = []
@@ -108,11 +109,15 @@ class Nav2GoalClient(Node):
         
     def send_goal(self):
         if self.count >= len(self.waypoints):
-            self.get_logger().info(f"All {len(self.waypoints)} waypoints completed. Exiting node...")
-            if hasattr(self, 'timer') and self.timer:
-                self.timer.destroy()
-            rclpy.shutdown()
-            return
+            if self.loop:
+                self.get_logger().info("Loop mode active: returning to the first waypoint.")
+                self.count = 0
+            else:
+                self.get_logger().info(f"All {len(self.waypoints)} waypoints completed. Exiting node...")
+                if hasattr(self, 'timer') and self.timer:
+                    self.timer.destroy()
+                rclpy.shutdown()
+                return
         
         wp = self.waypoints[self.count]
         goal_msg = NavigateToPose.Goal()
@@ -422,6 +427,8 @@ def main(args = None):
                         help='Starting waypoint index (default: 1)')
     parser.add_argument('--waypoints', '-w', type=str, default=None,
                         help='Waypoints file path or name (e.g., "waypoints.yaml" or "atc_1F")')
+    parser.add_argument('--loop', '-l', action='store_true',
+                        help='Loop waypoints infinitely')
     parsed_args = parser.parse_args()
     
     # ウェイポイントファイルのパスを決定
@@ -446,7 +453,7 @@ def main(args = None):
     os.environ['SIRIUS_WAYPOINTS'] = os.path.expanduser(waypoints_file)
     
     rclpy.init(args=args)
-    node = Nav2GoalClient(count=parsed_args.count)
+    node = Nav2GoalClient(count=parsed_args.count, loop=parsed_args.loop)
     node.get_logger().info(
         f"Starting Nav2GoalClient: {len(node.waypoints)} waypoints from '{waypoints_file}', "
         f"starting from index {parsed_args.count}"
