@@ -144,6 +144,11 @@ class TargetDetector(Node):
         self.calib_target_count = 6     # 6フレーム安定検出でロックオン
         self.calib_miss_tolerance = 10  # リセット猶予フレーム
 
+        self.last_sent_people_count = -1
+        self.last_sent_tracked_count = -1
+        self.grpc_stub = None
+        self.init_grpc()
+
         self.get_logger().info(
             f"Target Detector Node (Multi-Target Tracking) Initialized.\n"
             f"  Subscribing to leg scan: {self.leg_scan_topic}\n"
@@ -151,6 +156,46 @@ class TargetDetector(Node):
             f"  Publishing odom to: {self.odom_topic}\n"
             f"  Publishing markers to: /target_detector/target_markers"
         )
+
+    def init_grpc(self):
+        import sys
+        if '/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages' not in sys.path:
+            sys.path.insert(0, '/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages')
+        if '/home/kotantu-desktop/sirius_face_anim2/scripts/stubs' not in sys.path:
+            sys.path.insert(0, '/home/kotantu-desktop/sirius_face_anim2/scripts/stubs')
+        
+        # システム側の protobuf が先に読み込まれて衝突するのを防ぐため、キャッシュをクリアする
+        for key in list(sys.modules.keys()):
+            if key.startswith('google.protobuf') or key.startswith('google'):
+                del sys.modules[key]
+                
+        try:
+            import grpc
+            import face_control_pb2
+            import face_control_pb2_grpc
+            channel = grpc.insecure_channel('localhost:50051')
+            self.grpc_stub = face_control_pb2_grpc.FaceServiceStub(channel)
+        except Exception as e:
+            self.get_logger().warn(f"Failed to initialize gRPC to FaceService: {e}")
+
+    def send_people_counts_grpc(self, detected, tracked):
+        if self.grpc_stub is None:
+            self.init_grpc()
+            if self.grpc_stub is None:
+                return
+        try:
+            import face_control_pb2
+            self.grpc_stub.UpdateParameters(face_control_pb2.ParameterRequest(
+                values={
+                    "peopleCount": float(detected),
+                    "trackedPeopleCount": float(tracked)
+                }
+            ))
+            self.last_sent_people_count = detected
+            self.last_sent_tracked_count = tracked
+        except Exception as e:
+            self.get_logger().warn(f"Failed to send people counts via gRPC: {e}")
+            self.grpc_stub = None
 
     def detect_clusters(self, msg: LaserScan, min_w, max_w, tolerance, min_size, max_size):
         """2Dレーザースキャンから極座標 -> デカルト座標(x, y)への変換 & クラスタリングを行うヘルパー"""
@@ -587,6 +632,12 @@ class TargetDetector(Node):
                     self.primary_track_id = None
                 else:
                     self.publish_odom(primary_track, msg.header.stamp, msg.header.frame_id)
+
+        # Update peopleCount and trackedPeopleCount to FaceService via gRPC if changed
+        detected_count = sum(1 for det in detected_targets if det.get('has_matching_leg', False)) if detected_targets is not None else 0
+        tracked_count = len(self.tracks)
+        if detected_count != self.last_sent_people_count or tracked_count != self.last_sent_tracked_count:
+            self.send_people_counts_grpc(detected_count, tracked_count)
 
     def publish_all_markers(self, stamp, sensor_frame_id, detected_targets=None):
         from visualization_msgs.msg import Marker, MarkerArray
