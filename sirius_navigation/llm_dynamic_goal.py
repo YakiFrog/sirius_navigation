@@ -14,6 +14,8 @@ from action_msgs.srv import CancelGoal
 from action_msgs.msg import GoalInfo
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import Marker
+from rclpy.action import ActionClient
+from nav2_msgs.action import Spin
 
 class LlmDynamicGoal(Node):
     def __init__(self):
@@ -47,6 +49,7 @@ class LlmDynamicGoal(Node):
         
         # アクションキャンセルのためのサービス
         self.cancel_client = self.create_client(CancelGoal, '/navigate_to_pose/_action/cancel_goal')
+        self.spin_client = ActionClient(self, Spin, 'spin')
         
         # 自然言語指示トピックのサブスクライバー
         self.instruction_sub = self.create_subscription(
@@ -74,11 +77,17 @@ class LlmDynamicGoal(Node):
         self.turn_target_yaw = None
         self.turn_remaining_angle = None
         self.last_yaw_robot = 0.0
+        self.turn_goal_distance = 0.7  # xy_goal_tolerance (0.5m) より大きい値として 0.7m に設定（壁との衝突を防ぐ）
+        self.turn_start_x = 0.0
+        self.turn_start_y = 0.0
+        self.turn_total_angle = 1.0
         
         # スタック検知用状態管理
         self.distance_remaining_history = []
         self.yaw_diff_history = []
         self.is_stuck = False
+        self.command_start_time = None
+        self.spin_goal_handle = None
         
         # 会話履歴管理 (マルチターン対話用)
         self.chat_history = []
@@ -87,8 +96,8 @@ class LlmDynamicGoal(Node):
         # 1Hzで自己位置と目標位置の距離を監視するタイマー
         self.goal_monitor_timer = self.create_timer(1.0, self.monitor_goal_distance)
         
-        # 5Hz (0.2秒周期)でダイナミックゴールを再発行・更新するタイマー
-        self.dynamic_goal_timer = self.create_timer(0.2, self.timer_goal_publisher)
+        # 10Hz (0.1秒周期)で旋回中の角度監視を行うタイマー（preemptionを防ぐため再発行は行わない）
+        self.dynamic_goal_timer = self.create_timer(0.1, self.timer_goal_publisher)
         
         # 対話型コマンドライン入力を別スレッドで開始
         self.running = True
@@ -180,6 +189,7 @@ class LlmDynamicGoal(Node):
                 return
             cmd = self.command_queue.pop(0)
             self.executing_command = True
+            self.command_start_time = self.get_clock().now()
             
         cmd_type = cmd.get("type", "forward")
         value = cmd.get("value", 0.0)
@@ -205,6 +215,7 @@ class LlmDynamicGoal(Node):
             siny_cosp = 2 * (qw * qz + qx * qy)
             cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
             yaw_robot = math.atan2(siny_cosp, cosy_cosp)
+            self.get_logger().info(f"📍 [Start Pose] X={tx:.3f}, Y={ty:.3f}, Yaw={math.degrees(yaw_robot):+.1f}deg")
         except Exception as e:
             self.get_logger().warning(f"Failed to lookup TF (map -> sirius3/base_footprint) during execution: {e}")
             self.execute_next_command()
@@ -226,24 +237,9 @@ class LlmDynamicGoal(Node):
             self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
             
         elif cmd_type == "turn":
-            # 旋回時: 1.1mに設定（遠くに設定することでNav2が十分な旋回速度を出すようにする）
-            # 5Hzタイマーによる動的追従（キャロット方式）でその場旋回を維持する
-            r = 1.1
-            sign = 1.0 if value >= 0 else -1.0
-            theta = sign * 1.2217
-            
-            # 旋回の目標yaw角および残り角度・最終yaw情報を初期化して記録
-            target_yaw_for_turn = (yaw_robot + value + math.pi) % (2 * math.pi) - math.pi
-            with self.lock:
-                self.turn_remaining_angle = value
-                self.last_yaw_robot = yaw_robot
-                self.turn_target_yaw = target_yaw_for_turn
-                
-            self.get_logger().info(
-                f"[Turn] Initialized rotation. target={math.degrees(target_yaw_for_turn):+.1f}deg, "
-                f"remaining={math.degrees(value):+.1f}deg"
-            )
-            self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
+            # 旋回時: Nav2の標準ビヘイビアである /spin アクションを使用し、
+            # 地図の干渉やダミーゴール座標の衝突を避け、確実かつ滑らかにその場旋回を実行する
+            self.send_spin_goal(value)
             
         elif cmd_type == "spin":
             # ======================================================
@@ -353,6 +349,74 @@ class LlmDynamicGoal(Node):
 
     def query_lm_studio(self, instruction):
         """LM StudioのOpenAI互換APIを呼び出し、会話履歴と現在の物理状況（状態フィードバック）を含めて指示を変換する"""
+        
+        # -------------------------------------------------------------------
+        # 賢いルールベースの高速事前解析 (音声認識エラーやタイポ、標準コマンドに対応)
+        # -------------------------------------------------------------------
+        norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
+        
+        # 1. 停止・キャンセルの判定
+        cancel_patterns = ["止ま", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
+        if any(pat in norm_inst for pat in cancel_patterns):
+            return {"commands": [], "cancel": True}
+            
+        # 2. 旋回・右左折の判定
+        is_right = any(pat in norm_inst for pat in ["右", "migi", "みぎ", "みぎむ"])
+        is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
+        
+        # 「右向いて」「左向いて」「みぎむいて」「ひだりむいて」「みぎいて」「ひだりいて」「右向けて」「右無知恵」（タイポ対応）
+        if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae"]):
+            val = -1.5708 if is_right else 1.5708
+            if "少し" in norm_inst or "ちょっと" in norm_inst or "微" in norm_inst:
+                val = -0.5236 if is_right else 0.5236
+            return {"commands": [{"type": "turn", "value": val}], "cancel": False}
+            
+        # その場旋回, 一回転, 360度
+        if any(x in norm_inst for x in ["旋回", "回転", "senkai", "spin"]):
+            deg = 360.0
+            if "右" in norm_inst or "時計回り" in norm_inst:
+                deg = -360.0
+            return {"commands": [{"type": "spin", "value": deg}], "cancel": False}
+
+        # 3. 前進・後退の判定
+        # 後退: 後ろ下がって, usirosagatte, motto, back
+        last_cmd_was_backward = False
+        with self.lock:
+            if self.chat_history:
+                for msg in reversed(self.chat_history):
+                    if msg.get("role") == "assistant":
+                        try:
+                            # アシスタントの返答内容からコマンドを推測
+                            hist_json = json.loads(msg.get("content", "{}"))
+                            hist_cmds = hist_json.get("commands", [])
+                            if hist_cmds and hist_cmds[-1].get("type") == "backward":
+                                last_cmd_was_backward = True
+                                break
+                        except Exception:
+                            pass
+        
+        # 「もっと」「もうすこし」で直前が後退の場合、さらに後退させる
+        if norm_inst in ["motto", "もっと", "もうすこし", "もうちょっと", "さらに"] and last_cmd_was_backward:
+            return {"commands": [{"type": "backward", "value": 1.0}], "cancel": False}
+
+        if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって"]):
+            val = 0.5
+            if "もっと" in norm_inst or "motto" in norm_inst or "大きく" in norm_inst or "たくさん" in norm_inst:
+                val = 1.0
+            return {"commands": [{"type": "backward", "value": val}], "cancel": False}
+
+        # 前進: 前に行って, 進んで, mae, forward
+        if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ"]):
+            val = 1.0
+            if "少し" in norm_inst or "ちょっと" in norm_inst:
+                val = 0.5
+            elif "もっと" in norm_inst or "大きく" in norm_inst or "たくさん" in norm_inst:
+                val = 2.0
+            return {"commands": [{"type": "forward", "value": val}], "cancel": False}
+            
+        # -------------------------------------------------------------------
+        # ルールベースで一致しなかった複雑な指示は LLM (LM Studio) へ問い合わせる
+        # -------------------------------------------------------------------
         system_prompt = (
             "You are a robotic navigator assistant. Your task is to translate natural language directions "
             "into a sequence of motion commands for the robot.\n\n"
@@ -473,7 +537,7 @@ class LlmDynamicGoal(Node):
             if 'res_body' in locals():
                 self.get_logger().error(f"Raw Response: {res_body}")
         return None
-
+        
     def publish_goal_pose(self, tx, ty, yaw_robot, r, theta):
         """相対目標値(r, theta)をmap絶対座標に変換してパブリッシュする内部メソッド"""
         target_map_x = tx + (r * math.cos(theta) * math.cos(yaw_robot) - r * math.sin(theta) * math.sin(yaw_robot))
@@ -516,12 +580,11 @@ class LlmDynamicGoal(Node):
         self.get_logger().info(f"Published goal pose to /goal_pose: X={target_x:.2f}, Y={target_y:.2f}, Yaw={math.degrees(target_yaw):+.1f}deg")
 
     def timer_goal_publisher(self):
-        """5Hzで実行され、旋回中であれば目標位置をロボットの現在位置に追従（かつ残角度キャロット）して動的更新する"""
+        """10Hzで実行され、旋回中であれば目標角度との差分を計算し、8度以下で自動キャンセル（到達判定）する"""
         with self.lock:
             executing = self.executing_command
             remaining = self.turn_remaining_angle
             last_yaw = self.last_yaw_robot
-            turn_tgt = self.turn_target_yaw
             
         if not executing or remaining is None:
             return
@@ -532,8 +595,6 @@ class LlmDynamicGoal(Node):
                 'sirius3/base_footprint',
                 rclpy.time.Time()
             )
-            tx = trans.transform.translation.x
-            ty = trans.transform.translation.y
             
             # クォータニオンからロボットのyaw角を抽出
             qx = trans.transform.rotation.x
@@ -556,6 +617,9 @@ class LlmDynamicGoal(Node):
                 self.get_logger().info(
                     f"✅ [Turn Arrived] Heading aligned: final diff={math.degrees(new_remaining):.1f}deg < 8.0deg. Stopping."
                 )
+                self.get_logger().info(
+                    f"📍 [End Pose] X={trans.transform.translation.x:.3f}, Y={trans.transform.translation.y:.3f}, Yaw={math.degrees(yaw_robot):+.1f}deg"
+                )
                 with self.lock:
                     self.turn_remaining_angle = None
                     self.turn_target_yaw = None
@@ -577,40 +641,11 @@ class LlmDynamicGoal(Node):
                     print("\n✅ 旋回完了！次の指示をどうぞ。")
                     print("Command > ", end="", flush=True)
                 return
-                
-            # 2. キャロット角度の計算（残角度を最大70度(1.2217rad)にクランプ）
-            clamp_angle = math.radians(70.0)
-            sign = 1.0 if new_remaining >= 0 else -1.0
-            theta = sign * clamp_angle if abs(new_remaining) > clamp_angle else new_remaining
             
-            # 現在位置から theta 方向に 1.1m 離れた場所を目標値として再発行
-            target_x = tx + 1.1 * math.cos(yaw_robot + theta)
-            target_y = ty + 1.1 * math.sin(yaw_robot + theta)
-            
-            # 計算上の絶対目標yaw
-            target_yaw = yaw_robot + new_remaining
-            
-            # Nav2に更新されたゴールを送信
-            pose_msg = PoseStamped()
-            pose_msg.header.frame_id = 'map'
-            pose_msg.header.stamp = self.get_clock().now().to_msg()
-            pose_msg.pose.position.x = target_x
-            pose_msg.pose.position.y = target_y
-            pose_msg.pose.position.z = 0.0
-            pose_msg.pose.orientation.x = 0.0
-            pose_msg.pose.orientation.y = 0.0
-            pose_msg.pose.orientation.z = math.sin(target_yaw / 2.0)
-            pose_msg.pose.orientation.w = math.cos(target_yaw / 2.0)
-            
-            self.goal_pub.publish(pose_msg)
-            self.publish_marker(pose_msg)
-            
+            # 内部の残り角度変数を最新に更新
             with self.lock:
                 self.turn_remaining_angle = new_remaining
                 self.last_yaw_robot = yaw_robot
-                self.active_goal_x = target_x
-                self.active_goal_y = target_y
-                self.active_goal_yaw = target_yaw
                 
         except Exception as e:
             pass
@@ -661,11 +696,15 @@ class LlmDynamicGoal(Node):
         should_cancel_due_to_stuck = False
         stuck_msg = ""
         
+        # コマンド開始からの経過時間を計算
+        elapsed_sec = 0.0
         with self.lock:
             turn_tgt = self.turn_target_yaw
             executing = self.executing_command
             vel_x = self.current_vel_x
             vel_theta = self.current_vel_theta
+            if self.command_start_time is not None:
+                elapsed_sec = (self.get_clock().now() - self.command_start_time).nanoseconds / 1e9
             
         # -------------------------------------------------------------------
         # Turn アーリーキャンセルとスタック監視は 5Hz タイマー側で実施するため、
@@ -683,8 +722,8 @@ class LlmDynamicGoal(Node):
             
             if history_len == 5:
                 angle_change = abs(first_diff - last_diff)
-                # 完全に動かない（0.5度未満の変化）かつ速度ゼロの場合のみスタックとみなす
-                if angle_change < math.radians(0.5) and abs(vel_theta) < 0.01:
+                # 完全に動かない（0.5度未満の変化）かつ速度ゼロの場合のみスタックとみなす。かつ開始から15秒以上経過している場合
+                if angle_change < math.radians(0.5) and abs(vel_theta) < 0.01 and elapsed_sec > 15.0:
                     should_cancel_due_to_stuck = True
                     stuck_msg = "🤖 [Stuck Detected during Turn] Robot angular movement is completely blocked."
         else:
@@ -697,11 +736,11 @@ class LlmDynamicGoal(Node):
                 first_dist = self.distance_remaining_history[0] if history_len > 0 else 0
                 last_dist = self.distance_remaining_history[-1] if history_len > 0 else 0
             
-            # 5秒間のデータがあり、並進距離の変化が極小で、実速度も極小の場合
+            # 5秒間のデータがあり、並進距離の変化が極小で、実速度も極小の場合。かつ開始から15秒以上経過している場合
             if history_len == 5:
                 dist_change = abs(first_dist - last_dist)
                 # 閾値を0.005に下げて、短い距離で低速移動している場合の誤判定を防ぐ
-                if dist_change < 0.005 and abs(vel_x) < 0.005 and abs(vel_theta) < 0.005:
+                if dist_change < 0.005 and abs(vel_x) < 0.005 and abs(vel_theta) < 0.005 and elapsed_sec > 15.0:
                     should_cancel_due_to_stuck = True
                     stuck_msg = "🤖 [Stuck Detected during Translation] Robot path is blocked or unable to reach the target."
 
@@ -742,6 +781,9 @@ class LlmDynamicGoal(Node):
                 self.turn_target_yaw = None
             
             self.get_logger().info("🏆 [Goal Reached] Robot has arrived at the target waypoint.")
+            self.get_logger().info(
+                f"📍 [End Pose] X={tx:.3f}, Y={ty:.3f}, Yaw={math.degrees(yaw_robot):+.1f}deg (Remaining dist: {distance:.3f}m, angle: {math.degrees(yaw_diff):+.1f}deg)"
+            )
             
             # キューが残っているかチェックし、残っていれば次のコマンドを実行
             has_more = False
@@ -792,6 +834,16 @@ class LlmDynamicGoal(Node):
     def cancel_navigation(self, clear_queue=True):
         """実行中のナビゲーションをキャンセル"""
         self.delete_marker()
+        
+        # Spinアクションが動いていればキャンセル
+        with self.lock:
+            spin_handle = self.spin_goal_handle
+            self.spin_goal_handle = None
+            
+        if spin_handle is not None:
+            self.get_logger().info("Canceling active Spin action...")
+            spin_handle.cancel_goal_async()
+            
         with self.lock:
             self.active_goal_x = None
             self.active_goal_y = None
@@ -824,6 +876,75 @@ class LlmDynamicGoal(Node):
             msg.data = False
             self.stop_pub.publish(msg)
         threading.Timer(1.0, reset_stop).start()
+
+    def send_spin_goal(self, relative_yaw):
+        if not self.spin_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error("Spin action server not available!")
+            self.execute_next_command()
+            return
+            
+        goal_msg = Spin.Goal()
+        goal_msg.target_yaw = float(relative_yaw)
+        
+        self.get_logger().info(f"Sending Spin action goal: target_yaw={math.degrees(relative_yaw):+.1f}deg")
+        
+        with self.lock:
+            self.spin_goal_handle = None
+            
+        self.spin_send_goal_future = self.spin_client.send_goal_async(goal_msg)
+        self.spin_send_goal_future.add_done_callback(self.spin_goal_response_callback)
+        
+    def spin_goal_response_callback(self, future):
+        try:
+            goal_handle = future.result()
+            if not goal_handle.accepted:
+                self.get_logger().error("Spin goal rejected by server")
+                self.execute_next_command()
+                return
+                
+            self.get_logger().info("Spin goal accepted by server")
+            with self.lock:
+                self.spin_goal_handle = goal_handle
+                
+            self.spin_result_future = goal_handle.get_result_async()
+            self.spin_result_future.add_done_callback(self.spin_goal_result_callback)
+        except Exception as e:
+            self.get_logger().error(f"Error in spin goal response: {e}")
+            self.execute_next_command()
+
+    def spin_goal_result_callback(self, future):
+        self.get_logger().info("Spin goal finished execution")
+        
+        # 最終自己位置の取得と表示
+        try:
+            trans = self.tf_buffer.lookup_transform(
+                'map',
+                'sirius3/base_footprint',
+                rclpy.time.Time()
+            )
+            qx = trans.transform.rotation.x
+            qy = trans.transform.rotation.y
+            qz = trans.transform.rotation.z
+            qw = trans.transform.rotation.w
+            siny_cosp = 2 * (qw * qz + qx * qy)
+            cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
+            yaw_robot = math.atan2(siny_cosp, cosy_cosp)
+            self.get_logger().info(
+                f"📍 [End Pose] X={trans.transform.translation.x:.3f}, Y={trans.transform.translation.y:.3f}, Yaw={math.degrees(yaw_robot):+.1f}deg"
+            )
+        except Exception:
+            pass
+
+        with self.lock:
+            self.spin_goal_handle = None
+            self.executing_command = False
+            has_more = bool(self.command_queue)
+            
+        if has_more:
+            self.execute_next_command()
+        else:
+            print("\n✅ 旋回完了！次の指示をどうぞ。")
+            print("Command > ", end="", flush=True)
 
 def main(args=None):
     rclpy.init(args=args)
