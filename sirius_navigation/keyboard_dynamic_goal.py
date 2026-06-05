@@ -17,8 +17,8 @@ from tf2_ros import Buffer, TransformListener
 KEY_NAMES = {
     '\x1b[A': '↑ (進行方向設定 / 連続押しで距離・速度アップ)',
     '\x1b[B': '↓ (後退方向設定 / 連続押しで距離・速度アップ)',
-    '\x1b[D': '← (ゴール反時計回り回転 +15°)',
-    '\x1b[C': '→ (ゴール時計回り回転 -15°)',
+    '\x1b[D': '← (その場旋回・左 90° / R=0.1m)',
+    '\x1b[C': '→ (その場旋回・右 -90° / R=0.1m)',
     'w': 'w (目標距離アップ +0.2m)',
     's': 's (目標距離ダウン -0.2m)',
     ',': ', (直進距離のみ停止 - R=0.0m)',
@@ -198,8 +198,8 @@ class KeyboardDynamicGoal(Node):
 操作キー:
   ↑ (矢印上)  : ゴールをロボットの真前方にセット (θ = 0°)
   ↓ (矢印下)  : ゴールをロボットの真後方にセット (θ = 180°)
-  ← (矢印左)  : 反時計回りにゴールを回転 (+15°)
-  → (矢印右)  : 時計回りにゴールを回転 (-15°)
+  ← (矢印左)  : その場旋回・左方向 (θ = 90°, R = 0.1m)
+  → (矢印右)  : その場旋回・右方向 (θ = -90°, R = 0.1m)
   w / s       : ゴール距離 (R) を遠く/近く調整 (±{self.r_step:.1f}m)
   g           : 現在設定値で目標ゴールを再送 (即時発行)
 
@@ -352,40 +352,50 @@ class KeyboardDynamicGoal(Node):
 
                     if key == '\x1b[A':  # UP arrow
                         with self.lock:
-                            # 進行方向が前以外（後ろを向いていた、またはその場回転中）だった場合は前にリセットして初期距離にする
-                            if self.theta != 0.0 or not self.goal_active or self.r == 0.0:
+                            # 進行方向が前側（-90度〜90度の範囲）かつ走行中の場合は、現在の角度thetaを維持したまま距離Rを増やす
+                            # そうでなければ前方にリセットして初期距離にする
+                            is_forward = math.cos(self.theta) > 0.0
+                            if not is_forward or not self.goal_active or self.r == 0.0:
                                 self.theta = 0.0
                                 self.r = 0.5  # 開始距離
                             else:
-                                # すでに前進中なら距離（速度）を上げる
+                                # すでに前進方向を向いているなら距離（速度）を上げる
                                 self.r = min(self.r + self.r_step, self.r_max)
                             self.goal_active = True
                         should_publish = True
                     elif key == '\x1b[B':  # DOWN arrow
                         with self.lock:
-                            # 進行方向が後ろ以外だった場合は後ろにリセットして初期距離にする
-                            if self.theta != math.pi or not self.goal_active or self.r == 0.0:
+                            # 進行方向が後ろ側（90度より大きい、または-90度より小さい範囲）かつ走行中の場合は、現在の角度thetaを維持したまま距離Rを増やす
+                            # そうでなければ後方にリセットして初期距離にする
+                            is_backward = math.cos(self.theta) < 0.0
+                            if not is_backward or not self.goal_active or self.r == 0.0:
                                 self.theta = math.pi
                                 self.r = 0.5  # 開始距離
                             else:
-                                # すでに後退中なら距離（速度）を上げる
+                                # すでに後退方向を向いているなら距離（速度）を上げる
                                 self.r = min(self.r + self.r_step, self.r_max)
                             self.goal_active = True
                         should_publish = True
                     elif key == '\x1b[D':  # LEFT arrow
                         with self.lock:
-                            # その場回転がスムーズに行えるよう、目標距離Rが1.0m未満の場合は自動的に1.0mに設定する
-                            if self.r < 1.0:
-                                self.r = 1.0
-                            self.theta += self.theta_step
+                            if self.goal_active and self.r > 0.1:
+                                # 既に走行中の場合は、現在の距離Rを維持したまま角度のみを傾けて旋回させる
+                                self.theta += self.theta_step
+                            else:
+                                # 停止中からの旋回開始時は、その場回転のために目標角度を左90度、距離を1.1mにする
+                                self.r = 1.10
+                                self.theta = math.radians(70.0)
                             self.goal_active = True
                         should_publish = True
                     elif key == '\x1b[C':  # RIGHT arrow
                         with self.lock:
-                            # その場回転がスムーズに行えるよう、目標距離Rが1.0m未満の場合は自動的に1.0mに設定する
-                            if self.r < 1.0:
-                                self.r = 1.0
-                            self.theta -= self.theta_step
+                            if self.goal_active and self.r > 0.1:
+                                # 既に走行中の場合は、現在の距離Rを維持したまま角度のみを傾けて旋回させる
+                                self.theta -= self.theta_step
+                            else:
+                                # 停止中からの旋回開始時は、その場回転のために目標角度を右-90度、距離を1.1mにする
+                                self.r = 1.10
+                                self.theta = math.radians(-70.0)
                             self.goal_active = True
                         should_publish = True
                     elif key_lower == 'w':  # 距離遠く
