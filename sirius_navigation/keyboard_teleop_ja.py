@@ -74,7 +74,13 @@ class SiriusKeyboardTeleopJA(Node):
             if is_blocked != self.blocked:
                 self.blocked = is_blocked
                 print("\033[H\033[J", end="")
-                print(self.get_status_msg())
+                print(self.get_status_msg_unlocked())
+
+    def refresh_display(self):
+        """スレッドセーフに画面表示をクリアして更新する"""
+        with self.lock:
+            print("\033[H\033[J", end="")
+            print(self.get_status_msg_unlocked())
 
     def getKey(self):
         tty.setraw(sys.stdin.fileno())
@@ -97,7 +103,8 @@ class SiriusKeyboardTeleopJA(Node):
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
         return key
 
-    def get_status_msg(self):
+    def get_status_msg_unlocked(self):
+        """ロックが獲得されている状態で呼ばれる内部用メソッド"""
         warning_msg = ""
         if self.blocked:
             warning_msg = "\033[1;31m⚠️  [警告] 目の前または進路に障害物があるため動けません (制限中)\033[0m\n"
@@ -133,7 +140,7 @@ class SiriusKeyboardTeleopJA(Node):
         return msg
 
     def run(self):
-        print(self.get_status_msg())
+        self.refresh_display()
 
         try:
             while rclpy.ok():
@@ -149,39 +156,32 @@ class SiriusKeyboardTeleopJA(Node):
                 if key == '\x1b[A':  # UP arrow
                     with self.lock:
                         self.target_linear_vel = min(self.target_linear_vel + self.linear_vel_step, self.linear_vel_max)
-                    print("\033[H\033[J", end="")
-                    print(self.get_status_msg())
+                    self.refresh_display()
                 elif key == '\x1b[B':  # DOWN arrow
                     with self.lock:
                         self.target_linear_vel = max(self.target_linear_vel - self.linear_vel_step, -self.linear_vel_max)
-                    print("\033[H\033[J", end="")
-                    print(self.get_status_msg())
+                    self.refresh_display()
                 elif key == '\x1b[D':  # LEFT arrow
                     with self.lock:
                         self.target_angular_vel = min(self.target_angular_vel + self.angular_vel_step, self.angular_vel_max)
-                    print("\033[H\033[J", end="")
-                    print(self.get_status_msg())
+                    self.refresh_display()
                 elif key == '\x1b[C':  # RIGHT arrow
                     with self.lock:
                         self.target_angular_vel = max(self.target_angular_vel - self.angular_vel_step, -self.angular_vel_max)
-                    print("\033[H\033[J", end="")
-                    print(self.get_status_msg())
+                    self.refresh_display()
                 elif key == ',':  # Stop linear only
                     with self.lock:
                         self.target_linear_vel = 0.0
-                    print("\033[H\033[J", end="")
-                    print(self.get_status_msg())
+                    self.refresh_display()
                 elif key == '.':  # Stop angular only
                     with self.lock:
                         self.target_angular_vel = 0.0
-                    print("\033[H\033[J", end="")
-                    print(self.get_status_msg())
+                    self.refresh_display()
                 elif key == ' ' or key == 'k':  # Full stop
                     with self.lock:
                         self.target_linear_vel = 0.0
                         self.target_angular_vel = 0.0
-                    print("\033[H\033[J", end="")
-                    print(self.get_status_msg())
+                    self.refresh_display()
                 elif key == '\x03':  # Ctrl+C
                     break
 
