@@ -9,18 +9,26 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool
 
-# キー表記用のマッピング
+# キー表記用のマッピング (全角入力対応)
 KEY_NAMES = {
     '\x1b[A': '↑ (直進速度アップ)',
     '\x1b[B': '↓ (直進速度ダウン/後退)',
     '\x1b[D': '← (左旋回速度アップ)',
     '\x1b[C': '→ (右旋回速度アップ/右旋回)',
     ',': ', (直進のみ停止)',
+    '、': '、 (直進のみ停止 - 全角)',
+    '，': '， (直進のみ停止 - 全角)',
     '.': '. (旋回のみ停止)',
+    '。': '。 (旋回のみ停止 - 全角)',
+    '．': '． (旋回のみ停止 - 全角)',
     ' ': 'Space (完全停止)',
+    '　': '全角スペース (完全停止)',
     'k': 'k (完全停止)',
+    'ｋ': 'ｋ (完全停止 - 全角)',
     'e': 'e (緊急停止オン)',
-    'q': 'q (緊急停止解除)'
+    'ｅ': 'ｅ (緊急停止オン - 全角)',
+    'q': 'q (緊急停止解除)',
+    'ｑ': 'ｑ (緊急停止解除 - 全角)'
 }
 
 class SiriusKeyboardTeleopJA(Node):
@@ -93,22 +101,40 @@ class SiriusKeyboardTeleopJA(Node):
         tty.setraw(sys.stdin.fileno())
         # 入力待ち（タイムアウトを短めの 0.05秒にして応答性を向上）
         rlist, _, _ = select.select([sys.stdin.fileno()], [], [], 0.05)
-        key = ''
+        key_str = ''
         if rlist:
             import os
             # Pythonの内部バッファの影響を受けないよう、os.readで生FDから読み取る
             b = os.read(sys.stdin.fileno(), 1)
-            if b == b'\x1b':
-                key = '\x1b'
-                # エスケープシーケンスの場合、残りの文字（通常2バイト）を読み取る
+            
+            # マルチバイト文字（全角文字など）の読み取り処理
+            lead = b[0]
+            num_bytes = 1
+            if lead >= 0xf0:
+                num_bytes = 4
+            elif lead >= 0xe0:
+                num_bytes = 3
+            elif lead >= 0xc0:
+                num_bytes = 2
+                
+            key = b
+            if num_bytes > 1:
+                rlist2, _, _ = select.select([sys.stdin.fileno()], [], [], 0.03)
+                if rlist2:
+                    b2 = os.read(sys.stdin.fileno(), num_bytes - 1)
+                    key += b2
+            
+            # エスケープシーケンス（矢印キーなど）のハンドリング
+            if key == b'\x1b':
                 rlist2, _, _ = select.select([sys.stdin.fileno()], [], [], 0.03)
                 if rlist2:
                     b2 = os.read(sys.stdin.fileno(), 2)
-                    key += b2.decode('utf-8', errors='ignore')
-            else:
-                key = b.decode('utf-8', errors='ignore')
+                    key += b2
+                    
+            key_str = key.decode('utf-8', errors='ignore')
+            
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
-        return key
+        return key_str
 
     def get_status_msg_unlocked(self):
         """ロックが獲得されている状態で呼ばれる内部用メソッド"""
@@ -140,7 +166,7 @@ class SiriusKeyboardTeleopJA(Node):
   ← (矢印左)  : 左旋回速度を上げる (+{self.angular_vel_step:.2f} rad/s)
   → (矢印右)  : 右旋回速度を上げる (-{self.angular_vel_step:.2f} rad/s)
 
-停止・緊急停止キー:
+停止・緊急停止キー (全角・日本語入力対応):
   e           : 緊急停止 (オン)
   q           : 緊急停止 (解除/オフ)
   , (カンマ)  : 直進速度のみ停止 (0.0 m/s)
@@ -165,12 +191,27 @@ class SiriusKeyboardTeleopJA(Node):
                 if not key:
                     continue
                 
-                # 小文字化して判定（e.g. Eとe, Qとqを同じに扱うため）
-                key_lower = key.lower()
-                key_name = KEY_NAMES.get(key_lower, KEY_NAMES.get(key, f"'{key}'"))
-                
+                # 入力キー名称の取得
+                key_name = KEY_NAMES.get(key, f"'{key}'")
                 with self.lock:
                     self.last_key_name = key_name
+
+                # 全角入力を半角に正規化して判定
+                key_norm = key
+                if key == '　':
+                    key_norm = ' '
+                elif key in ('、', '，'):
+                    key_norm = ','
+                elif key in ('。', '．'):
+                    key_norm = '.'
+                elif key == 'ｋ':
+                    key_norm = 'k'
+                elif key == 'ｅ':
+                    key_norm = 'e'
+                elif key == 'ｑ':
+                    key_norm = 'q'
+
+                key_lower = key_norm.lower()
 
                 # 緊急停止（オン）
                 if key_lower == 'e':
@@ -210,15 +251,15 @@ class SiriusKeyboardTeleopJA(Node):
                         with self.lock:
                             self.target_angular_vel = max(self.target_angular_vel - self.angular_vel_step, -self.angular_vel_max)
                         self.refresh_display()
-                    elif key == ',':  # Stop linear only
+                    elif key_norm == ',':  # Stop linear only
                         with self.lock:
                             self.target_linear_vel = 0.0
                         self.refresh_display()
-                    elif key == '.':  # Stop angular only
+                    elif key_norm == '.':  # Stop angular only
                         with self.lock:
                             self.target_angular_vel = 0.0
                         self.refresh_display()
-                    elif key == ' ' or key == 'k':  # Full stop
+                    elif key_norm == ' ' or key_norm == 'k':  # Full stop
                         with self.lock:
                             self.target_linear_vel = 0.0
                             self.target_angular_vel = 0.0
