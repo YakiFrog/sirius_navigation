@@ -12,6 +12,7 @@ from std_msgs.msg import Bool
 from action_msgs.srv import CancelGoal
 from action_msgs.msg import GoalInfo
 from tf2_ros import Buffer, TransformListener
+from visualization_msgs.msg import Marker
 
 # キー表記用のマッピング
 KEY_NAMES = {
@@ -31,7 +32,8 @@ KEY_NAMES = {
     'k': 'k (ナビゲーション中断/キャンセル)',
     'g': 'g (現在の目標を再送/即時発行)',
     'e': 'e (緊急停止オン)',
-    'q': 'q (緊急停止解除)'
+    'q': 'q (緊急停止解除)',
+    'm': 'm (マーカー形状切り替え: 矢印 ⇄ 点)'
 }
 
 class KeyboardDynamicGoal(Node):
@@ -44,6 +46,11 @@ class KeyboardDynamicGoal(Node):
         
         # /goal_pose パブリッシャー (Nav2の目標設定トピック, グローバル指定)
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
+        
+        # 可視化マーカーのパブリッシャー
+        self.marker_pub = self.create_publisher(Marker, '/dynamic_goal_marker', 10)
+        self.marker_types = [Marker.ARROW, Marker.SPHERE]
+        self.marker_type_index = 0
         
         # 緊急停止トピックのパブリッシャー
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
@@ -179,6 +186,8 @@ class KeyboardDynamicGoal(Node):
         else:
             active_status = "\033[1;33m⏸️  待機中 (キー入力で走行開始)\033[0m"
 
+        marker_name = "矢印 (ARROW)" if self.marker_types[self.marker_type_index] == Marker.ARROW else "点 (SPHERE)"
+
         msg = f"""
 === Sirius 周囲360度ダイナミックゴール・キーオペ ===
 
@@ -194,22 +203,24 @@ class KeyboardDynamicGoal(Node):
   目標距離 (R):  \033[1;32m{self.r:.2f} m\033[0m (可変範囲: {self.r_min}m 〜 {self.r_max}m)
   目標角度 (θ):  \033[1;32m{deg:+.1f} deg\033[0m ({dir_text}方向)
   相対座標値:   X = {target_x:+.2f} m, Y = {target_y:+.2f} m
+  マーカー形状:  \033[1;35m{marker_name}\033[0m
 
 操作キー:
-  ↑ (矢印上)  : ゴールをロボットの真前方にセット (θ = 0°)
-  ↓ (矢印下)  : ゴールをロボットの真後方にセット (θ = 180°)
-  ← (矢印左)  : その場旋回・左方向 (θ = 90°, R = 0.1m)
-  → (矢印右)  : その場旋回・右方向 (θ = -90°, R = 0.1m)
+  ↑ (矢印上)  : ゴールを真前方にセット (θ = 0°) / 走行中は距離R(速度)アップ
+  ↓ (矢印下)  : ゴールを真後方にセット (θ = 180°) / 走行中は距離R(速度)アップ
+  ← (矢印左)  : 左旋回 (停止中: θ = 70°, R = 1.1m のその場旋回 / 走行中: θ + 15° の移動旋回)
+  → (矢印右)  : 右旋回 (停止中: θ = -70°, R = 1.1m のその場旋回 / 走行中: θ - 15° の移動旋回)
   w / s       : ゴール距離 (R) を遠く/近く調整 (±{self.r_step:.1f}m)
+  m           : RViz マーカー形状切り替え (矢印 ⇄ 点)
   g           : 現在設定値で目標ゴールを再送 (即時発行)
-
+ 
 停止・緊急停止キー:
   e           : 緊急停止 (オン)
   q           : 緊急停止 (解除/オフ)
   , (カンマ)  : 直進のみ停止 (R = 0.0m / その場旋回は継続)
   . (ピリオド): 旋回のみ停止 (θ = 0.0°)
   space / k   : 走行タスク中断 (Nav2アクティブゴール取り消し)
-
+ 
 終了するには Ctrl+C を押してください
 ---------------------------------------------
 """
@@ -277,9 +288,55 @@ class KeyboardDynamicGoal(Node):
         pose_msg.pose.orientation.w = math.cos(target_map_yaw / 2.0)
             
         self.goal_pub.publish(pose_msg)
+        
+        # 5. 可視化用マーカーのパブリッシュ
+        self.publish_marker(pose_msg)
+ 
+    def publish_marker(self, pose_msg):
+        """目標位置にRViz可視化用のマーカーをパブリッシュする"""
+        marker = Marker()
+        marker.header = pose_msg.header
+        marker.ns = 'dynamic_goal'
+        marker.id = 0
+        with self.lock:
+            marker.type = self.marker_types[self.marker_type_index]
+        marker.action = Marker.ADD
+        marker.pose = pose_msg.pose
+        
+        # 形状に応じてサイズを調整
+        if marker.type == Marker.ARROW:
+            marker.scale.x = 0.6  # 矢印の長さ
+            marker.scale.y = 0.15 # 矢印の太さ
+            marker.scale.z = 0.15 # 矢印の高さ
+        else: # SPHERE (点・球体)
+            marker.scale.x = 0.3  # 直径
+            marker.scale.y = 0.3
+            marker.scale.z = 0.3
+        
+        # 色設定 (緑色、半透明)
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 0.8
+        
+        # ライフタイム (0は永続)
+        marker.lifetime = rclpy.duration.Duration(seconds=0.0).to_msg()
+        
+        self.marker_pub.publish(marker)
+
+    def delete_marker(self):
+        """RViz上のマーカーを削除する"""
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'dynamic_goal'
+        marker.id = 0
+        marker.action = Marker.DELETE
+        self.marker_pub.publish(marker)
 
     def cancel_navigation(self):
         """実行中のナビゲーションをキャンセル"""
+        self.delete_marker()
         if not self.cancel_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().warning("ナビゲーションキャンセルサービスが見つかりません。")
             return
@@ -319,6 +376,8 @@ class KeyboardDynamicGoal(Node):
                     key_norm = 's'
                 elif key == 'ｇ':
                     key_norm = 'g'
+                elif key == 'ｍ':
+                    key_norm = 'm'
                 elif key in (',', '、', '，'):
                     key_norm = ','
                 elif key in ('.', '。', '．'):
@@ -403,6 +462,14 @@ class KeyboardDynamicGoal(Node):
                             self.r = min(self.r + self.r_step, self.r_max)
                             self.goal_active = True
                         should_publish = True
+                    elif key_lower == 'm':  # マーカー形状切り替え
+                        with self.lock:
+                            self.marker_type_index = (self.marker_type_index + 1) % len(self.marker_types)
+                        # すでにゴールがアクティブであれば、最新形状でマーカーを再送信する
+                        if self.goal_active:
+                            should_publish = True
+                        else:
+                            self.refresh_display()
                     elif key_lower == 's':  # 距離近く
                         with self.lock:
                             self.r = max(self.r - self.r_step, self.r_min)
