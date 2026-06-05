@@ -79,19 +79,21 @@ class SiriusKeyboardTeleopJA(Node):
     def getKey(self):
         tty.setraw(sys.stdin.fileno())
         # 入力待ち（タイムアウトを短めの 0.05秒にして応答性を向上）
-        rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+        rlist, _, _ = select.select([sys.stdin.fileno()], [], [], 0.05)
         key = ''
         if rlist:
-            key = sys.stdin.read(1)
-            # エスケープシーケンス（矢印キーなど）のハンドリング
-            if key == '\x1b':
-                # ノンブロッキングで残りの文字を読み取る
-                for _ in range(2):
-                    rlist, _, _ = select.select([sys.stdin], [], [], 0.02)
-                    if rlist:
-                        key += sys.stdin.read(1)
-                    else:
-                        break
+            import os
+            # Pythonの内部バッファの影響を受けないよう、os.readで生FDから読み取る
+            b = os.read(sys.stdin.fileno(), 1)
+            if b == b'\x1b':
+                key = '\x1b'
+                # エスケープシーケンスの場合、残りの文字（通常2バイト）を読み取る
+                rlist2, _, _ = select.select([sys.stdin.fileno()], [], [], 0.03)
+                if rlist2:
+                    b2 = os.read(sys.stdin.fileno(), 2)
+                    key += b2.decode('utf-8', errors='ignore')
+            else:
+                key = b.decode('utf-8', errors='ignore')
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
         return key
 
