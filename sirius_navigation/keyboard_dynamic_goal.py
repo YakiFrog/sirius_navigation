@@ -11,6 +11,7 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool
 from action_msgs.srv import CancelGoal
 from action_msgs.msg import GoalInfo
+from tf2_ros import Buffer, TransformListener
 
 # キー表記用のマッピング
 KEY_NAMES = {
@@ -30,6 +31,10 @@ KEY_NAMES = {
 class KeyboardDynamicGoal(Node):
     def __init__(self):
         super().__init__('keyboard_dynamic_goal')
+        
+        # TFのリスナーを初期化
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # /goal_pose パブリッシャー (Nav2の目標設定トピック, グローバル指定)
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
@@ -181,24 +186,65 @@ class KeyboardDynamicGoal(Node):
         return msg
 
     def publish_goal(self):
-        """現在のR, thetaをロボットのローカルフレーム上の目標として発行"""
+        """現在のR, thetaをロボットのローカルフレーム上の目標として発行 (map座標系に変換)"""
         if self.emergency_stop:
             self.get_logger().warning("緊急停止中のため、ゴール発行をスキップします。")
             return
 
+        # 1. ロボット座標系での相対座標を計算
+        with self.lock:
+            x_local = self.r * math.cos(self.theta)
+            y_local = self.r * math.sin(self.theta)
+            theta_local = self.theta
+
+        # 2. TFを使用してmapからsirius3/base_footprintへの変換を取得
+        try:
+            # 最新の変換情報を取得 (Time 0を指定)
+            trans = self.tf_buffer.lookup_transform(
+                'map',
+                'sirius3/base_footprint',
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=1.0)
+            )
+        except Exception as e:
+            self.get_logger().warning(f"TF (map -> sirius3/base_footprint) の取得に失敗したため、ゴール発行をスキップします: {e}")
+            return
+
+        # 3. 変換情報を使って、ロボット座標系上の目標点をmap座標系に変換
+        tx = trans.transform.translation.x
+        ty = trans.transform.translation.y
+        
+        # クォータニオンからロボットのyaw角を抽出
+        qx = trans.transform.rotation.x
+        qy = trans.transform.rotation.y
+        qz = trans.transform.rotation.z
+        qw = trans.transform.rotation.w
+        
+        siny_cosp = 2 * (qw * qz + qx * qy)
+        cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
+        yaw_robot = math.atan2(siny_cosp, cosy_cosp)
+        
+        # 回転と並進の適用
+        target_map_x = tx + (x_local * math.cos(yaw_robot) - y_local * math.sin(yaw_robot))
+        target_map_y = ty + (x_local * math.sin(yaw_robot) + y_local * math.cos(yaw_robot))
+        
+        # 目標の向き（ロボットの絶対姿勢yaw_robot + 相対角度theta_local）
+        target_map_yaw = yaw_robot + theta_local
+
+        # 4. PoseStamped メッセージの構築
         pose_msg = PoseStamped()
-        pose_msg.header.frame_id = 'sirius3/base_footprint'  # ロボットベースフレーム基準
+        pose_msg.header.frame_id = 'map'  # Nav2が確実に受け入れられるmap座標系にする
         pose_msg.header.stamp = self.get_clock().now().to_msg()
         
-        # 極座標を直交座標(X, Y)に変換
-        with self.lock:
-            pose_msg.pose.position.x = self.r * math.cos(self.theta)
-            pose_msg.pose.position.y = self.r * math.sin(self.theta)
-            pose_msg.pose.position.z = 0.0
-            
-            # ゴールの向きを角度theta（外側向き）に設定
-            pose_msg.pose.orientation.z = math.sin(self.theta / 2.0)
-            pose_msg.pose.orientation.w = math.cos(self.theta / 2.0)
+        pose_msg.pose.position.x = target_map_x
+        pose_msg.pose.position.y = target_map_y
+        pose_msg.pose.position.z = 0.0
+        
+        # Yaw角から四元数への変換
+        pose_msg.pose.orientation.x = 0.0
+        pose_msg.pose.orientation.y = 0.0
+        pose_msg.pose.orientation.z = math.sin(target_map_yaw / 2.0)
+        pose_msg.pose.orientation.w = math.cos(target_map_yaw / 2.0)
             
         self.goal_pub.publish(pose_msg)
 
