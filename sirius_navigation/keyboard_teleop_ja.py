@@ -8,6 +8,18 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
+# キー表記用のマッピング
+KEY_NAMES = {
+    '\x1b[A': '↑ (直進速度アップ)',
+    '\x1b[B': '↓ (直進速度ダウン/後退)',
+    '\x1b[D': '← (左旋回速度アップ)',
+    '\x1b[C': '→ (右旋回速度アップ/右旋回)',
+    ',': ', (直進速度リセット/停止)',
+    '.': '. (旋回速度リセット/停止)',
+    ' ': 'Space (完全停止)',
+    'k': 'k (完全停止)'
+}
+
 class SiriusKeyboardTeleopJA(Node):
     def __init__(self):
         super().__init__('sirius_keyboard_teleop_ja')
@@ -31,6 +43,7 @@ class SiriusKeyboardTeleopJA(Node):
         self.angular_vel_max = 1.8     # rad/s
         
         self.blocked = False           # 障害物による停止・減速フラグ
+        self.last_key_name = 'なし'     # 最後に認識された入力キー
         self.lock = threading.Lock()
         
         self.settings = termios.tcgetattr(sys.stdin)
@@ -92,11 +105,14 @@ class SiriusKeyboardTeleopJA(Node):
 
 ステータス:
   {warning_msg}
+入力フィードバック:
+  最後に入力されたキー: \033[1;36m[{self.last_key_name}]\033[0m
+
 操作キー:
   ↑ (矢印上)  : 直進速度を上げる (+{self.linear_vel_step:.2f} m/s)
   ↓ (矢印下)  : 直進速度を下げる (-{self.linear_vel_step:.2f} m/s)
-  ← (矢印左)  : 左旋回速度を上げる (+{self.angular_vel_step:.2f} rad/s)
-  → (矢印右)  : 右旋回速度を上げる (-{self.angular_vel_step:.2f} rad/s)
+  ← (矢印left) : 左旋回速度を上げる (+{self.angular_vel_step:.2f} rad/s)
+  → (矢印right): 右旋回速度を上げる (-{self.angular_vel_step:.2f} rad/s)
 
 停止キー:
   , (カンマ)  : 直進速度のみ停止 (0.0 m/s)
@@ -119,7 +135,14 @@ class SiriusKeyboardTeleopJA(Node):
         try:
             while rclpy.ok():
                 key = self.getKey()
+                if not key:
+                    continue
                 
+                # 入力キー名称の取得
+                key_name = KEY_NAMES.get(key, f"'{key}'")
+                with self.lock:
+                    self.last_key_name = key_name
+
                 # キー判定と処理
                 if key == '\x1b[A':  # UP arrow
                     with self.lock:
