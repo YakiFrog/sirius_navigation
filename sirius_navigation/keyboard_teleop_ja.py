@@ -28,13 +28,18 @@ KEY_NAMES = {
     'e': 'e (緊急停止オン)',
     'ｅ': 'ｅ (緊急停止オン - 全角)',
     'q': 'q (緊急停止解除)',
-    'ｑ': 'ｑ (緊急停止解除 - 全角)'
+    'ｑ': 'ｑ (緊急停止解除 - 全角)',
+    't': 't (アシストON/OFF切り替え)',
+    'ｔ': 'ｔ (アシストON/OFF切り替え - 全角)'
 }
 
 class SiriusKeyboardTeleopJA(Node):
     def __init__(self):
         super().__init__('sirius_keyboard_teleop_ja')
+        # アシスト機能有効時のパブリッシャー
         self.pub = self.create_publisher(Twist, 'cmd_vel_teleop', 10)
+        # アシスト機能無効(ダイレクト操作)時のパブリッシャー (cmd_velへ直送り)
+        self.pub_direct = self.create_publisher(Twist, 'cmd_vel', 10)
         
         # 緊急停止トピックのパブリッシャー (scnと共通)
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
@@ -58,6 +63,7 @@ class SiriusKeyboardTeleopJA(Node):
         
         self.blocked = False           # 障害物による停止・減速フラグ
         self.emergency_stop = False    # 緊急停止状態フラグ
+        self.assisted_mode = True      # アシスト操縦（障害物回避）モードのON/OFF
         self.last_key_name = 'なし'     # 最後に認識された入力キー
         self.lock = threading.Lock()
         
@@ -66,6 +72,14 @@ class SiriusKeyboardTeleopJA(Node):
 
     def cmdVelCallback(self, msg):
         with self.lock:
+            # ダイレクト操作モードの時はブロック判定を行わない
+            if not self.assisted_mode:
+                if self.blocked:
+                    self.blocked = False
+                    print("\033[H\033[J", end="")
+                    print(self.get_status_msg_unlocked())
+                return
+
             is_blocked = False
             
             # 直進方向のブロッキング判定
@@ -139,7 +153,9 @@ class SiriusKeyboardTeleopJA(Node):
     def get_status_msg_unlocked(self):
         """ロックが獲得されている状態で呼ばれる内部用メソッド"""
         warning_msg = ""
-        if self.blocked:
+        if not self.assisted_mode:
+            warning_msg = "\033[1;33m⚠️  [警告] アシスト機能無効 (障害物回避は作動しません)\033[0m\n"
+        elif self.blocked:
             warning_msg = "\033[1;31m⚠️  [警告] 目の前または進路に障害物があるため動けません (制限中)\033[0m\n"
         else:
             warning_msg = "\033[1;32m✅  進路クリア (安全に走行可能です)\033[0m\n"
@@ -150,9 +166,16 @@ class SiriusKeyboardTeleopJA(Node):
         else:
             estop_msg = "\033[1;32m🟢  緊急停止オフ (Eキーで緊急停止)\033[0m\n"
 
+        assist_status = ""
+        if self.assisted_mode:
+            assist_status = "\033[1;32mON (安全アシスト有効)\033[0m"
+        else:
+            assist_status = "\033[1;33mOFF (ダイレクト操作)\033[0m"
+
         msg = f"""
 === Sirius アシスト付きキーボード操作ガイド (scn互換・加速式) ===
 
+アシスト機能状態: {assist_status}  (Tキーで切り替え)
 緊急停止状態:
   {estop_msg}
 ステータス:
@@ -166,7 +189,8 @@ class SiriusKeyboardTeleopJA(Node):
   ← (矢印左)  : 左旋回速度を上げる (+{self.angular_vel_step:.2f} rad/s)
   → (矢印右)  : 右旋回速度を上げる (-{self.angular_vel_step:.2f} rad/s)
 
-停止・緊急停止キー (全角・日本語入力対応):
+操作モード・緊急停止・停止キー (全角・日本語入力対応):
+  t           : アシスト機能の有効/無効切り替え (障害物回避のバイパス)
   e           : 緊急停止 (オン)
   q           : 緊急停止 (解除/オフ)
   , (カンマ)  : 直進速度のみ停止 (0.0 m/s)
@@ -210,11 +234,25 @@ class SiriusKeyboardTeleopJA(Node):
                     key_norm = 'e'
                 elif key == 'ｑ':
                     key_norm = 'q'
+                elif key == 'ｔ':
+                    key_norm = 't'
 
                 key_lower = key_norm.lower()
 
+                # アシスト機能のON/OFF切り替え
+                if key_lower == 't':
+                    with self.lock:
+                        self.assisted_mode = not self.assisted_mode
+                        # 切り替え時に古い指示を打ち消すため一度両方の系統に停止を送る
+                        zero_twist = Twist()
+                        self.pub.publish(zero_twist)
+                        self.pub_direct.publish(zero_twist)
+                        self.target_linear_vel = 0.0
+                        self.target_angular_vel = 0.0
+                    self.refresh_display()
+
                 # 緊急停止（オン）
-                if key_lower == 'e':
+                elif key_lower == 'e':
                     with self.lock:
                         self.emergency_stop = True
                         self.target_linear_vel = 0.0
@@ -278,7 +316,12 @@ class SiriusKeyboardTeleopJA(Node):
                 twist.linear.z = 0.0
                 twist.angular.x = 0.0
                 twist.angular.y = 0.0
-                self.pub.publish(twist)
+                
+                # モードに応じて送信先トピックを切り替える
+                if self.assisted_mode:
+                    self.pub.publish(twist)
+                else:
+                    self.pub_direct.publish(twist)
 
         except Exception as e:
             self.get_logger().error(f'エラーが発生しました: {e}')
@@ -287,6 +330,7 @@ class SiriusKeyboardTeleopJA(Node):
             # 終了時に停止コマンドと緊急停止解除を送信して安全に終了
             twist = Twist()
             self.pub.publish(twist)
+            self.pub_direct.publish(twist)
             
             stop_msg = Bool()
             stop_msg.data = False
