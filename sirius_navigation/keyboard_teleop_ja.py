@@ -7,6 +7,7 @@ import threading
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+from std_msgs.msg import Bool
 
 # キー表記用のマッピング
 KEY_NAMES = {
@@ -17,13 +18,18 @@ KEY_NAMES = {
     ',': ', (直進のみ停止)',
     '.': '. (旋回のみ停止)',
     ' ': 'Space (完全停止)',
-    'k': 'k (完全停止)'
+    'k': 'k (完全停止)',
+    'e': 'e (緊急停止オン)',
+    'q': 'q (緊急停止解除)'
 }
 
 class SiriusKeyboardTeleopJA(Node):
     def __init__(self):
         super().__init__('sirius_keyboard_teleop_ja')
         self.pub = self.create_publisher(Twist, 'cmd_vel_teleop', 10)
+        
+        # 緊急停止トピックのパブリッシャー (scnと共通)
+        self.stop_pub = self.create_publisher(Bool, 'stop', 10)
         
         # 実際の速度を監視するために cmd_vel を購読
         self.sub = self.create_subscription(
@@ -38,11 +44,12 @@ class SiriusKeyboardTeleopJA(Node):
         self.target_angular_vel = 0.0  # rad/s
         
         self.linear_vel_step = 0.1     # m/s
-        self.linear_vel_max = 1.2      # m/s
+        self.linear_vel_max = 1.0      # m/s
         self.angular_vel_step = 0.15   # rad/s
-        self.angular_vel_max = 1.8     # rad/s
+        self.angular_vel_max = 0.9     # rad/s
         
         self.blocked = False           # 障害物による停止・減速フラグ
+        self.emergency_stop = False    # 緊急停止状態フラグ
         self.last_key_name = 'なし'     # 最後に認識された入力キー
         self.lock = threading.Lock()
         
@@ -111,9 +118,17 @@ class SiriusKeyboardTeleopJA(Node):
         else:
             warning_msg = "\033[1;32m✅  進路クリア (安全に走行可能です)\033[0m\n"
 
+        estop_msg = ""
+        if self.emergency_stop:
+            estop_msg = "\033[1;41;37m🚨  緊急停止オン (EキーでON / Qキーで解除) 🚨\033[0m\n"
+        else:
+            estop_msg = "\033[1;32m🟢  緊急停止オフ (Eキーで緊急停止)\033[0m\n"
+
         msg = f"""
 === Sirius アシスト付きキーボード操作ガイド (scn互換・加速式) ===
 
+緊急停止状態:
+  {estop_msg}
 ステータス:
   {warning_msg}
 入力フィードバック:
@@ -125,7 +140,9 @@ class SiriusKeyboardTeleopJA(Node):
   ← (矢印左)  : 左旋回速度を上げる (+{self.angular_vel_step:.2f} rad/s)
   → (矢印右)  : 右旋回速度を上げる (-{self.angular_vel_step:.2f} rad/s)
 
-停止キー:
+停止・緊急停止キー:
+  e           : 緊急停止 (オン)
+  q           : 緊急停止 (解除/オフ)
   , (カンマ)  : 直進速度のみ停止 (0.0 m/s)
   . (ピリオド): 旋回速度のみ停止 (0.0 rad/s)
   space / k   : 完全停止
@@ -148,44 +165,70 @@ class SiriusKeyboardTeleopJA(Node):
                 if not key:
                     continue
                 
-                key_name = KEY_NAMES.get(key, f"'{key}'")
+                # 小文字化して判定（e.g. Eとe, Qとqを同じに扱うため）
+                key_lower = key.lower()
+                key_name = KEY_NAMES.get(key_lower, KEY_NAMES.get(key, f"'{key}'"))
+                
                 with self.lock:
                     self.last_key_name = key_name
 
-                # キー判定と処理
-                if key == '\x1b[A':  # UP arrow
+                # 緊急停止（オン）
+                if key_lower == 'e':
                     with self.lock:
-                        self.target_linear_vel = min(self.target_linear_vel + self.linear_vel_step, self.linear_vel_max)
-                    self.refresh_display()
-                elif key == '\x1b[B':  # DOWN arrow
-                    with self.lock:
-                        self.target_linear_vel = max(self.target_linear_vel - self.linear_vel_step, -self.linear_vel_max)
-                    self.refresh_display()
-                elif key == '\x1b[D':  # LEFT arrow
-                    with self.lock:
-                        self.target_angular_vel = min(self.target_angular_vel + self.angular_vel_step, self.angular_vel_max)
-                    self.refresh_display()
-                elif key == '\x1b[C':  # RIGHT arrow
-                    with self.lock:
-                        self.target_angular_vel = max(self.target_angular_vel - self.angular_vel_step, -self.angular_vel_max)
-                    self.refresh_display()
-                elif key == ',':  # Stop linear only
-                    with self.lock:
-                        self.target_linear_vel = 0.0
-                    self.refresh_display()
-                elif key == '.':  # Stop angular only
-                    with self.lock:
-                        self.target_angular_vel = 0.0
-                    self.refresh_display()
-                elif key == ' ' or key == 'k':  # Full stop
-                    with self.lock:
+                        self.emergency_stop = True
                         self.target_linear_vel = 0.0
                         self.target_angular_vel = 0.0
+                    stop_msg = Bool()
+                    stop_msg.data = True
+                    self.stop_pub.publish(stop_msg)
                     self.refresh_display()
+                
+                # 緊急停止解除（オフ）
+                elif key_lower == 'q':
+                    with self.lock:
+                        self.emergency_stop = False
+                    stop_msg = Bool()
+                    stop_msg.data = False
+                    self.stop_pub.publish(stop_msg)
+                    self.refresh_display()
+
+                # キー判定と処理 (緊急停止中は操作を受け付けない)
+                elif not self.emergency_stop:
+                    if key == '\x1b[A':  # UP arrow
+                        with self.lock:
+                            self.target_linear_vel = min(self.target_linear_vel + self.linear_vel_step, self.linear_vel_max)
+                        self.refresh_display()
+                    elif key == '\x1b[B':  # DOWN arrow
+                        with self.lock:
+                            self.target_linear_vel = max(self.target_linear_vel - self.linear_vel_step, -self.linear_vel_max)
+                        self.refresh_display()
+                    elif key == '\x1b[D':  # LEFT arrow
+                        with self.lock:
+                            self.target_angular_vel = min(self.target_angular_vel + self.angular_vel_step, self.angular_vel_max)
+                        self.refresh_display()
+                    elif key == '\x1b[C':  # RIGHT arrow
+                        with self.lock:
+                            self.target_angular_vel = max(self.target_angular_vel - self.angular_vel_step, -self.angular_vel_max)
+                        self.refresh_display()
+                    elif key == ',':  # Stop linear only
+                        with self.lock:
+                            self.target_linear_vel = 0.0
+                        self.refresh_display()
+                    elif key == '.':  # Stop angular only
+                        with self.lock:
+                            self.target_angular_vel = 0.0
+                        self.refresh_display()
+                    elif key == ' ' or key == 'k':  # Full stop
+                        with self.lock:
+                            self.target_linear_vel = 0.0
+                            self.target_angular_vel = 0.0
+                        self.refresh_display()
+                    elif key == '\x03':  # Ctrl+C
+                        break
                 elif key == '\x03':  # Ctrl+C
                     break
 
-                # Twist メッセージ送信
+                # Twist メッセージ送信 (緊急停止中は自動で 0.0 送信)
                 twist = Twist()
                 with self.lock:
                     twist.linear.x = self.target_linear_vel
@@ -200,9 +243,14 @@ class SiriusKeyboardTeleopJA(Node):
             self.get_logger().error(f'エラーが発生しました: {e}')
 
         finally:
-            # 終了時に停止コマンドを送信
+            # 終了時に停止コマンドと緊急停止解除を送信して安全に終了
             twist = Twist()
             self.pub.publish(twist)
+            
+            stop_msg = Bool()
+            stop_msg.data = False
+            self.stop_pub.publish(stop_msg)
+            
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
 
 def main(args=None):
