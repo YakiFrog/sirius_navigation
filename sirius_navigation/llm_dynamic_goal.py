@@ -69,8 +69,13 @@ class LlmDynamicGoal(Node):
         self.command_queue = []
         self.executing_command = False
         
+        # Turn (旋回) コマンドのアーリーキャンセル用ターゲットyaw
+        # None以外のとき: 現在実行中コマンドはturnで、このyaw角に近づいたらキャンセル
+        self.turn_target_yaw = None
+        
         # スタック検知用状態管理
         self.distance_remaining_history = []
+        self.yaw_diff_history = []
         self.is_stuck = False
         
         # 会話履歴管理 (マルチターン対話用)
@@ -207,16 +212,88 @@ class LlmDynamicGoal(Node):
             r = value
             theta = 0.0
             self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
+            
         elif cmd_type == "backward":
             r = -abs(value)
             theta = 0.0
             self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
+            
         elif cmd_type == "turn":
             # 旋回時: keyboard_dynamic_goal.py の 1.1m と 70deg に合わせる
             r = 1.1
             sign = 1.0 if value >= 0 else -1.0
             theta = sign * 1.2217
+            # 旋回の目標yaw角を計算して記録（アーリーキャンセル判定用）
+            target_yaw_for_turn = (yaw_robot + value + math.pi) % (2 * math.pi) - math.pi
+            with self.lock:
+                self.turn_target_yaw = target_yaw_for_turn
+            self.get_logger().info(f"[Turn] Target yaw set to {math.degrees(target_yaw_for_turn):+.1f}deg for early-exit.")
             self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
+            
+        elif cmd_type == "spin":
+            # ======================================================
+            # その場旋回: 指定角度(度数法)を85°チャンクのturnコマンドに
+            # 分割してキューの先頭に追加し、順次実行する。
+            # value: 回転角度[度] 正=左回り(反時計), 負=右回り(時計)
+            # value==0 の場合は360°（フルスピン）とみなす
+            # ======================================================
+            total_deg = float(value) if value != 0.0 else 360.0
+            chunk_deg = 85.0  # 一回あたりの旋回量（turn の early-exit と相性が良い値）
+            sign = 1.0 if total_deg >= 0 else -1.0
+            remaining = abs(total_deg)
+            
+            spin_chunks = []
+            while remaining > 3.0:
+                chunk = min(chunk_deg, remaining)
+                spin_chunks.append({"type": "turn", "value": sign * math.radians(chunk)})
+                remaining -= chunk
+            
+            if not spin_chunks:
+                self.get_logger().warning("[Spin] Angle too small, skipping.")
+                self.execute_next_command()
+                return
+            
+            self.get_logger().info(
+                f"[Spin] {total_deg:+.0f}deg → {len(spin_chunks)} turn chunks queued."
+            )
+            with self.lock:
+                self.command_queue = spin_chunks + self.command_queue
+            # 即座に最初のチャンクを実行（turn として処理される）
+            self.execute_next_command()
+            return  # 以降の publish はチャンク側が担当
+            
+        elif cmd_type == "face":
+            # ======================================================
+            # 絶対方角に向く: map座標系の絶対yaw角[度]に向けて旋回する。
+            # value: 目標yaw角[度] (map座標系、0=X正方向、90=Y正方向)
+            # ======================================================
+            try:
+                target_abs_deg = float(value)
+                target_abs_yaw = math.radians(target_abs_deg)
+                # 現在のyawとの差分を計算して turn コマンドに変換
+                diff_yaw = target_abs_yaw - yaw_robot
+                # -π〜π に正規化
+                diff_yaw = (diff_yaw + math.pi) % (2 * math.pi) - math.pi
+                
+                if abs(diff_yaw) < math.radians(5.0):
+                    self.get_logger().info("[Face] Already facing target direction. Skipping.")
+                    self.execute_next_command()
+                    return
+                
+                self.get_logger().info(
+                    f"[Face] Current yaw={math.degrees(yaw_robot):+.1f}deg → "
+                    f"Target={target_abs_deg:+.1f}deg, Δ={math.degrees(diff_yaw):+.1f}deg"
+                )
+                # turn コマンドとして処理
+                with self.lock:
+                    self.command_queue.insert(0, {"type": "turn", "value": diff_yaw})
+                self.execute_next_command()
+                return
+            except Exception as e:
+                self.get_logger().error(f"[Face] Failed to parse angle: {e}")
+                self.execute_next_command()
+                return
+                
         elif cmd_type == "goto":
             # 絶対座標 (map上の座標 [x, y]) に向かう
             try:
@@ -281,35 +358,51 @@ class LlmDynamicGoal(Node):
         """LM StudioのOpenAI互換APIを呼び出し、会話履歴と現在の物理状況（状態フィードバック）を含めて指示を変換する"""
         system_prompt = (
             "You are a robotic navigator assistant. Your task is to translate natural language directions "
-            "into a sequence of relative target coordinates for the robot.\n\n"
+            "into a sequence of motion commands for the robot.\n\n"
             "CRITICAL: Do not explain your reasoning. Do not output any reasoning steps, thoughts, or chain-of-thought content. "
             "You MUST output raw JSON and ONLY raw JSON directly and immediately. Do not include markdown code block syntax (like ```json).\n"
             "Output format:\n"
             "{\n"
             "  \"commands\": [\n"
-            "    {\"type\": \"forward\"|\"backward\"|\"turn\"|\"goto\", \"value\": float | [float, float]}\n"
+            "    {\"type\": \"forward\"|\"backward\"|\"turn\"|\"spin\"|\"face\"|\"goto\", \"value\": float | [float, float]}\n"
             "  ],\n"
             "  \"cancel\": boolean (true if user wants to stop, cancel, halt, or stand by, false otherwise)\n"
             "}\n\n"
             "【Commands Definition】\n"
             "- \"type\": \"forward\": Move straight forward. \"value\": distance in meters (positive float).\n"
+            "  Default distance if unspecified: 1.0m. 'ちょっと'/'少し': 0.5m. '大きく'/'たくさん': 2.0m.\n"
             "- \"type\": \"backward\": Move straight backward. \"value\": distance in meters (positive float).\n"
-            "- \"type\": \"turn\": Rotate in place. \"value\": relative angle in radians. positive for left, negative for right.\n"
+            "  Default distance if unspecified: 0.5m.\n"
+            "- \"type\": \"turn\": Rotate to face a relative angle. \"value\": angle in radians. "
+            "POSITIVE=left(CCW), NEGATIVE=right(CW). Use for '右向いて'(-1.5708), '左向いて'(+1.5708), '少し右'(-0.5236).\n"
+            "- \"type\": \"spin\": Rotate in place by specified degrees without translating. "
+            "\"value\": total rotation angle in DEGREES. POSITIVE=left(CCW), NEGATIVE=right(CW), 0=full 360deg spin.\n"
+            "  Use for: 'その場旋回'(0), '一回転'(360), '右に半回転'(-180), '時計回りに90度'(-90).\n"
+            "- \"type\": \"face\": Turn to face an absolute map direction. "
+            "\"value\": target yaw angle in DEGREES in map frame (0=+X axis, 90=+Y axis, 180/-180=-X axis, -90=-Y axis).\n"
+            "  Use when user says a compass direction like '北を向いて'(90), '南向き'(-90), '東向き'(0), '西向き'(180).\n"
             "- \"type\": \"goto\": Navigate to absolute map coordinates. \"value\": [x_coord, y_coord] (array of two floats).\n\n"
             "【Conversational Context & Embodied Feedback Rules】\n"
-            "You will receive feedback from both the user's conversation AND the robot's physical sensors (the system message labeled 【Robot Current Hardware State Feedback】).\n"
-            "1. If the user complains about the last action (e.g. \"全然進んでいない\" / \"Not moving at all\", \"もっと進んで\"), "
-            "look at the robot's physical state (e.g., if distance remaining is large and velocity is 0.0m/s with BLOCKED status), "
-            "this implies an obstacle blocks the path. You should generate a corrective sequence like a detour turn or reversing:\n"
-            "   - Example: \"全然進んでいない\" -> output a turn command to face a different angle, or reverse.\n"
-            "2. If the robot was simply given a command that was too small (e.g. user says \"全然下がっていない\" after a backward 0.5m action and robot arrived safely), "
-            "amplify the value in your next command (e.g., output \"type\": \"backward\", \"value\": 1.5).\n\n"
-            "【Static Output Reference Examples】\n"
-            "- \"ちょっと前に行って\" -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false}\n"
-            "- \"そこで右向いて\" -> {\"commands\": [{\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
-            "- \"座標 (0.0, 0.0) に向かって\" -> {\"commands\": [{\"type\": \"goto\", \"value\": [0.0, 0.0]}], \"cancel\": false}\n"
-            "- \"3m前に行って、左に曲がって\" -> {\"commands\": [{\"type\": \"forward\", \"value\": 3.0}, {\"type\": \"turn\", \"value\": 1.5708}], \"cancel\": false}\n"
-            "- \"危ない、止まって！\" -> {\"commands\": [], \"cancel\": true}"
+            "You will receive feedback from both the user's conversation AND the robot's physical sensors "
+            "(the system message labeled 【Robot Current Hardware State Feedback】).\n"
+            "1. If the user complains about the last action (e.g. '全然進んでいない' / 'Not moving at all'), "
+            "look at the robot's physical state. If velocity=0.0m/s with BLOCKED status, "
+            "generate a corrective sequence (detour turn or reverse).\n"
+            "2. If a command value was too small and robot arrived safely, amplify the value in the next command.\n\n"
+            "【Output Examples】\n"
+            "- 'ちょっと前に行って' -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false}\n"
+            "- '1.5m後退して' -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.5}], \"cancel\": false}\n"
+            "- '右向いて' -> {\"commands\": [{\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
+            "- '少し左に向いて' -> {\"commands\": [{\"type\": \"turn\", \"value\": 0.5236}], \"cancel\": false}\n"
+            "- 'その場で旋回して' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}], \"cancel\": false}\n"
+            "- '右に一回転' -> {\"commands\": [{\"type\": \"spin\", \"value\": -360}], \"cancel\": false}\n"
+            "- '時計回りに半回転' -> {\"commands\": [{\"type\": \"spin\", \"value\": -180}], \"cancel\": false}\n"
+            "- '北向きになって' -> {\"commands\": [{\"type\": \"face\", \"value\": 90}], \"cancel\": false}\n"
+            "- '東を向いて' -> {\"commands\": [{\"type\": \"face\", \"value\": 0}], \"cancel\": false}\n"
+            "- '座標(1.5, 2.0)に向かって' -> {\"commands\": [{\"type\": \"goto\", \"value\": [1.5, 2.0]}], \"cancel\": false}\n"
+            "- '3m前に行って左に曲がって' -> {\"commands\": [{\"type\": \"forward\", \"value\": 3.0}, {\"type\": \"turn\", \"value\": 1.5708}], \"cancel\": false}\n"
+            "- '旋回しながら前進して' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}, {\"type\": \"forward\", \"value\": 1.0}], \"cancel\": false}\n"
+            "- '危ない、止まって！' -> {\"commands\": [], \"cancel\": true}"
         )
         
         headers = {
@@ -456,31 +549,120 @@ class LlmDynamicGoal(Node):
         # -------------------------------------------------------------
         # スタック検出ロジック (タイマー監視により更新)
         # -------------------------------------------------------------
+        should_cancel_due_to_stuck = False
+        stuck_msg = ""
+        
         with self.lock:
-            self.distance_remaining_history.append(distance)
-            if len(self.distance_remaining_history) > 5:
-                self.distance_remaining_history.pop(0)
+            turn_tgt = self.turn_target_yaw
+            executing = self.executing_command
+            vel_x = self.current_vel_x
+            vel_theta = self.current_vel_theta
             
-            # 5秒間のデータがあり、かつシーケンスが実行中の場合
-            if len(self.distance_remaining_history) == 5 and self.executing_command:
-                diff = abs(self.distance_remaining_history[0] - self.distance_remaining_history[-1])
-                # 5秒間、距離の変化が極小で、オドメトリ速度も極小の場合にスタックと判定
-                if diff < 0.05 and abs(self.current_vel_x) < 0.05 and abs(self.current_vel_theta) < 0.05:
-                    if not self.is_stuck:
-                        self.is_stuck = True
-                        self.get_logger().warning("🤖 [Stuck Detected] Robot is blocked or unable to reach the target.")
-                else:
-                    self.is_stuck = False
+        if executing:
+            if turn_tgt is not None:
+                # 旋回中のスタック検知
+                with self.lock:
+                    self.yaw_diff_history.append(yaw_diff)
+                    if len(self.yaw_diff_history) > 5:
+                        self.yaw_diff_history.pop(0)
+                    history_len = len(self.yaw_diff_history)
+                    first_diff = self.yaw_diff_history[0] if history_len > 0 else 0
+                    last_diff = self.yaw_diff_history[-1] if history_len > 0 else 0
+                
+                # 5秒間のデータがあり、かつ角度の変化が極小で、実速度も極小の場合
+                if history_len == 5:
+                    angle_change = abs(first_diff - last_diff)
+                    if angle_change < math.radians(2.0) and abs(vel_theta) < 0.05:
+                        should_cancel_due_to_stuck = True
+                        stuck_msg = "🤖 [Stuck Detected during Turn] Robot angular movement is blocked by an obstacle."
             else:
+                # 並進移動（前進・後退・goto）中のスタック検知
+                with self.lock:
+                    self.distance_remaining_history.append(distance)
+                    if len(self.distance_remaining_history) > 5:
+                        self.distance_remaining_history.pop(0)
+                    history_len = len(self.distance_remaining_history)
+                    first_dist = self.distance_remaining_history[0] if history_len > 0 else 0
+                    last_dist = self.distance_remaining_history[-1] if history_len > 0 else 0
+                
+                # 5秒間のデータがあり、並進距離の変化が極小で、実速度も極小の場合
+                if history_len == 5:
+                    dist_change = abs(first_dist - last_dist)
+                    if dist_change < 0.05 and abs(vel_x) < 0.05 and abs(vel_theta) < 0.05:
+                        should_cancel_due_to_stuck = True
+                        stuck_msg = "🤖 [Stuck Detected during Translation] Robot path is blocked or unable to reach the target."
+
+        if should_cancel_due_to_stuck:
+            self.get_logger().warning(stuck_msg)
+            self.get_logger().warning("Automatically canceling active goal to prevent persistent blockage.")
+            
+            # 会話履歴にスタック状態の物理フィードバックをシステムログとして挿入し、LLMに教える
+            with self.lock:
+                self.is_stuck = True
+                self.chat_history.append({
+                    "role": "assistant", 
+                    "content": "【System Feedback】Robot detected physical blockage/stuck state. Navigation has been automatically cancelled."
+                })
+            
+            # 安全のためロックの外側でキャンセルを実行
+            self.cancel_navigation()
+            
+            print(f"\n⚠️ {stuck_msg.split(']')[-1].strip()} 目標をキャンセルして停止します。")
+            print("Command > ", end="", flush=True)
+            return
+        else:
+            with self.lock:
                 self.is_stuck = False
         # -------------------------------------------------------------
 
+        # -------------------------------------------------------------------
+        # Turn アーリーキャンセル: 旋回コマンド実行中、目標yaw角に近づいたら即キャンセル
+        # -------------------------------------------------------------------
+        with self.lock:
+            turn_tgt = self.turn_target_yaw
+        
+        if turn_tgt is not None:
+            heading_diff = abs(yaw_robot - turn_tgt)
+            heading_diff = (heading_diff + math.pi) % (2 * math.pi) - math.pi
+            heading_diff = abs(heading_diff)
+            
+            if heading_diff < math.radians(15.0):
+                self.get_logger().info(
+                    f"✅ [Turn Early-Exit] Heading aligned: diff={math.degrees(heading_diff):.1f}deg < 15deg. Canceling nav goal."
+                )
+                with self.lock:
+                    self.turn_target_yaw = None
+                    self.goal_reached_logged = True
+                    self.is_stuck = False
+                    self.distance_remaining_history = []
+                    self.yaw_diff_history = []
+                    has_more = bool(self.command_queue)
+                
+                # Nav2のゴールをキャンセルして停止
+                if self.cancel_client.wait_for_service(timeout_sec=0.5):
+                    req = CancelGoal.Request()
+                    req.goal_info = GoalInfo()
+                    self.cancel_client.call_async(req)
+                
+                if has_more:
+                    print("↪️  旋回完了。次のアクションを開始します。")
+                    self.execute_next_command()
+                else:
+                    with self.lock:
+                        self.executing_command = False
+                    print("\n✅ 旋回完了！次の指示をどうぞ。")
+                    print("Command > ", end="", flush=True)
+                return
+        # -------------------------------------------------------------------
+        
         # 閾値判定 (距離0.35m以内 かつ 角度差20度以内)
         if distance < 0.35 and yaw_diff < math.radians(20.0):
             with self.lock:
                 self.goal_reached_logged = True
                 self.is_stuck = False
                 self.distance_remaining_history = []
+                self.yaw_diff_history = []
+                self.turn_target_yaw = None
             
             self.get_logger().info("🏆 [Goal Reached] Robot has arrived at the target waypoint.")
             
@@ -542,7 +724,9 @@ class LlmDynamicGoal(Node):
             self.command_queue = []
             self.executing_command = False
             self.distance_remaining_history = []
+            self.yaw_diff_history = []
             self.is_stuck = False
+            self.turn_target_yaw = None
             
         if not self.cancel_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().warning("Navigation cancel service not available.")
