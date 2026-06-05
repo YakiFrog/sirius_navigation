@@ -5,7 +5,9 @@ import json
 import urllib.request
 import urllib.error
 import threading
+import unicodedata
 import rclpy
+
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
@@ -16,6 +18,9 @@ from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import Marker
 from rclpy.action import ActionClient
 from nav2_msgs.action import Spin
+from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
+
 
 class LlmDynamicGoal(Node):
     def __init__(self):
@@ -50,6 +55,8 @@ class LlmDynamicGoal(Node):
         # アクションキャンセルのためのサービス
         self.cancel_client = self.create_client(CancelGoal, '/navigate_to_pose/_action/cancel_goal')
         self.spin_client = ActionClient(self, Spin, 'spin')
+        self.param_client = self.create_client(SetParameters, '/controller_server/set_parameters')
+
         
         # 自然言語指示トピックのサブスクライバー
         self.instruction_sub = self.create_subscription(
@@ -145,6 +152,9 @@ class LlmDynamicGoal(Node):
 
     def process_instruction(self, instruction):
         """指示文を解析し、適切なROS 2アクションを実行する"""
+        # 全角英数字などを半角に正規化 (例: "１０ｍ" -> "10m", "０．５" -> "0.5")
+        instruction = unicodedata.normalize('NFKC', instruction)
+        
         # 1. 停止・キャンセル指示の簡易キーワード判定（高速応答のため）
         stop_keywords = ["止まれ", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機"]
         if any(kw in instruction.lower() for kw in stop_keywords):
@@ -196,6 +206,16 @@ class LlmDynamicGoal(Node):
         
         self.get_logger().info(f"Executing next sequence command -> type: {cmd_type}, value: {value}")
         
+        if cmd_type == "speed":
+            try:
+                speed_factor = float(value)
+                self.set_controller_speed(speed_factor)
+                print(f"⚡ 速度パラメータを変更しました (factor: {speed_factor:.2f})")
+            except Exception as e:
+                self.get_logger().error(f"Failed to set speed: {e}")
+            self.execute_next_command()
+            return
+
         # 1. 現在の位置 (TF) を取得 (gotoコマンドや回転計算に必要)
         try:
             trans = self.tf_buffer.lookup_transform(
@@ -350,9 +370,6 @@ class LlmDynamicGoal(Node):
     def query_lm_studio(self, instruction):
         """LM StudioのOpenAI互換APIを呼び出し、会話履歴と現在の物理状況（状態フィードバック）を含めて指示を変換する"""
         
-        # -------------------------------------------------------------------
-        # 賢いルールベースの高速事前解析 (音声認識エラーやタイポ、標準コマンドに対応)
-        # -------------------------------------------------------------------
         norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
         
         # 1. 停止・キャンセルの判定
@@ -360,59 +377,78 @@ class LlmDynamicGoal(Node):
         if any(pat in norm_inst for pat in cancel_patterns):
             return {"commands": [], "cancel": True}
             
-        # 2. 旋回・右左折の判定
-        is_right = any(pat in norm_inst for pat in ["右", "migi", "みぎ", "みぎむ"])
-        is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
+        # 1.5 スピード調整/旋回/前進/後退の判定 (数値指定を含まない標準指示の場合にのみ高速応答)
+        has_number = any(char.isdigit() for char in norm_inst) or any(x in norm_inst for x in ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "点", "度", "㍍", "メートル"])
         
-        # 「右向いて」「左向いて」「みぎむいて」「ひだりむいて」「みぎいて」「ひだりいて」「右向けて」「右無知恵」（タイポ対応）
-        if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae"]):
-            val = -1.5708 if is_right else 1.5708
-            if "少し" in norm_inst or "ちょっと" in norm_inst or "微" in norm_inst:
-                val = -0.5236 if is_right else 0.5236
-            return {"commands": [{"type": "turn", "value": val}], "cancel": False}
+        if not has_number:
+            slow_patterns = ["ゆっくり", "遅く", "スピード下げ", "スピード落と", "速度下げ", "yukkuri", "slow", "下げて", "スピードおと"]
+            normal_patterns = ["ふつう", "普通", "通常", "normal"]
+            fast_patterns = ["早く", "急いで", "スピード上げ", "速度上げ", "fast", "speedup", "上げて"]
             
-        # その場旋回, 一回転, 360度
-        if any(x in norm_inst for x in ["旋回", "回転", "senkai", "spin"]):
-            deg = 360.0
-            if "右" in norm_inst or "時計回り" in norm_inst:
-                deg = -360.0
-            return {"commands": [{"type": "spin", "value": deg}], "cancel": False}
-
-        # 3. 前進・後退の判定
-        # 後退: 後ろ下がって, usirosagatte, motto, back
-        last_cmd_was_backward = False
-        with self.lock:
-            if self.chat_history:
-                for msg in reversed(self.chat_history):
-                    if msg.get("role") == "assistant":
-                        try:
-                            # アシスタントの返答内容からコマンドを推測
-                            hist_json = json.loads(msg.get("content", "{}"))
-                            hist_cmds = hist_json.get("commands", [])
-                            if hist_cmds and hist_cmds[-1].get("type") == "backward":
-                                last_cmd_was_backward = True
-                                break
-                        except Exception:
-                            pass
-        
-        # 「もっと」「もうすこし」で直前が後退の場合、さらに後退させる
-        if norm_inst in ["motto", "もっと", "もうすこし", "もうちょっと", "さらに"] and last_cmd_was_backward:
-            return {"commands": [{"type": "backward", "value": 1.0}], "cancel": False}
-
-        if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって"]):
-            val = 0.5
-            if "もっと" in norm_inst or "motto" in norm_inst or "大きく" in norm_inst or "たくさん" in norm_inst:
-                val = 1.0
-            return {"commands": [{"type": "backward", "value": val}], "cancel": False}
-
-        # 前進: 前に行って, 進んで, mae, forward
-        if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ"]):
-            val = 1.0
-            if "少し" in norm_inst or "ちょっと" in norm_inst:
+            has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "いっ", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい"])
+            
+            if not has_dir:
+                if any(pat in norm_inst for pat in slow_patterns):
+                    return {"commands": [{"type": "speed", "value": 0.2}], "cancel": False}
+                if any(pat in norm_inst for pat in normal_patterns):
+                    return {"commands": [{"type": "speed", "value": 0.9}], "cancel": False}
+                if any(pat in norm_inst for pat in fast_patterns):
+                    return {"commands": [{"type": "speed", "value": 1.0}], "cancel": False}
+                
+            # 2. 旋回・右左折の判定
+            is_right = any(pat in norm_inst for pat in ["右", "migi", "みぎ", "みぎむ"])
+            is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
+            
+            # 「右向いて」「左向いて」「みぎむいて」「ひだりむいて」「みぎいて」「ひだりいて」「右向けて」「右無知恵」（タイポ対応）
+            if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae"]):
+                val = -1.5708 if is_right else 1.5708
+                if "少し" in norm_inst or "ちょっと" in norm_inst or "微" in norm_inst:
+                    val = -0.5236 if is_right else 0.5236
+                return {"commands": [{"type": "turn", "value": val}], "cancel": False}
+                
+            # その場旋回, 一回転, 360度
+            if any(x in norm_inst for x in ["旋回", "回転", "senkai", "spin"]):
+                deg = 360.0
+                if "右" in norm_inst or "時計回り" in norm_inst:
+                    deg = -360.0
+                return {"commands": [{"type": "spin", "value": deg}], "cancel": False}
+    
+            # 3. 前進・後退の判定
+            # 後退: 後ろ下がって, usirosagatte, motto, back
+            last_cmd_was_backward = False
+            with self.lock:
+                if self.chat_history:
+                    for msg in reversed(self.chat_history):
+                        if msg.get("role") == "assistant":
+                            try:
+                                # アシスタントの返答内容からコマンドを推測
+                                hist_json = json.loads(msg.get("content", "{}"))
+                                hist_cmds = hist_json.get("commands", [])
+                                if hist_cmds and hist_cmds[-1].get("type") == "backward":
+                                    last_cmd_was_backward = True
+                                    break
+                            except Exception:
+                                pass
+            
+            # 「もっと」「もうすこし」で直前が後退の場合、さらに後退させる
+            if norm_inst in ["motto", "もっと", "もうすこし", "もうちょっと", "さらに"] and last_cmd_was_backward:
+                return {"commands": [{"type": "backward", "value": 1.0}], "cancel": False}
+    
+            if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって"]):
                 val = 0.5
-            elif "もっと" in norm_inst or "大きく" in norm_inst or "たくさん" in norm_inst:
-                val = 2.0
-            return {"commands": [{"type": "forward", "value": val}], "cancel": False}
+                if "motto" in norm_inst or "もっと" in norm_inst or "大きく" in norm_inst or "たくさん" in norm_inst:
+                    val = 1.0
+                return {"commands": [{"type": "backward", "value": val}], "cancel": False}
+    
+            # 前進: 前に行って, 進んで, mae, forward
+            if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ"]):
+                val = 1.0
+                if "少し" in norm_inst or "ちょっと" in norm_inst:
+                    val = 0.5
+                elif "もっと" in norm_inst or "大きく" in norm_inst or "たくさん" in norm_inst:
+                    val = 2.0
+                return {"commands": [{"type": "forward", "value": val}], "cancel": False}
+
             
         # -------------------------------------------------------------------
         # ルールベースで一致しなかった複雑な指示は LLM (LM Studio) へ問い合わせる
@@ -425,7 +461,7 @@ class LlmDynamicGoal(Node):
             "Output format:\n"
             "{\n"
             "  \"commands\": [\n"
-            "    {\"type\": \"forward\"|\"backward\"|\"turn\"|\"spin\"|\"face\"|\"goto\", \"value\": float | [float, float]}\n"
+            "    {\"type\": \"forward\"|\"backward\"|\"turn\"|\"spin\"|\"face\"|\"goto\"|\"speed\", \"value\": float | [float, float]}\n"
             "  ],\n"
             "  \"cancel\": boolean (true if user wants to stop, cancel, halt, or stand by, false otherwise)\n"
             "}\n\n"
@@ -445,7 +481,9 @@ class LlmDynamicGoal(Node):
             "- \"type\": \"face\": Turn to face an absolute map direction. "
             "\"value\": target yaw angle in DEGREES in map frame (0=+X axis, 90=+Y axis, 180/-180=-X axis, -90=-Y axis).\n"
             "  Use when user says a compass direction like '北を向いて'(90), '南向き'(-90), '東向き'(0), '西向き'(180).\n"
-            "- \"type\": \"goto\": Navigate to absolute map coordinates. \"value\": [x_coord, y_coord] (array of two floats).\n\n"
+            "- \"type\": \"goto\": Navigate to absolute map coordinates. \"value\": [x_coord, y_coord] (array of two floats).\n"
+            "- \"type\": \"speed\": Change the robot movement speed. \"value\": speed factor or absolute speed in m/s "
+            "(mapped to slow [0.20], safe [0.40], normal [0.90], fast [1.00]).\n\n"
             "【Conversational Context & Embodied Feedback Rules】\n"
             "You will receive feedback from both the user's conversation AND the robot's physical sensors "
             "(the system message labeled 【Robot Current Hardware State Feedback】).\n"
@@ -454,7 +492,9 @@ class LlmDynamicGoal(Node):
             "generate a corrective sequence (detour turn or reverse).\n"
             "2. If a command value was too small and robot arrived safely, amplify the value in the next command.\n"
             "3. CRITICAL ON CONTEXT DIRECTION: If the user says 'motto' (more) or 'mottosagatte' / 'motto sagatte' after a 'backward' command, "
-            "you MUST output a 'backward' command (e.g. value: 1.0). Do not output 'forward' unless they explicitly ask to go forward (e.g. 'mae'/'susunde').\n\n"
+            "you MUST output a 'backward' command (e.g. value: 1.0). Do not output 'forward' unless they explicitly ask to go forward (e.g. 'mae'/'susunde').\n"
+            "4. LOOP UNROLLING: If the user asks to repeat an action sequence (e.g., 'X回繰り返して' / 'repeat X times'), you MUST fully unroll/expand the sequence into individual commands in the JSON list.\n"
+            "5. SHAPES (e.g. Squares/四角/正方形): If the user asks to draw or move in a square of size X (e.g., 'Xmの四角を描いて' / 'square of X meters'), unroll it into 8 commands: forward Xm, turn right (-1.5708), forward Xm, turn right, forward Xm, turn right, forward Xm, turn right.\n\n"
             "【Output Examples】\n"
             "- 'ちょっと前に行って' -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false}\n"
             "- '1.5m後退して' -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.5}], \"cancel\": false}\n"
@@ -474,6 +514,12 @@ class LlmDynamicGoal(Node):
             "- '座標(1.5, 2.0)に向かって' -> {\"commands\": [{\"type\": \"goto\", \"value\": [1.5, 2.0]}], \"cancel\": false}\n"
             "- '3m前に行って左に曲がって' -> {\"commands\": [{\"type\": \"forward\", \"value\": 3.0}, {\"type\": \"turn\", \"value\": 1.5708}], \"cancel\": false}\n"
             "- '旋回しながら前進して' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}, {\"type\": \"forward\", \"value\": 1.0}], \"cancel\": false}\n"
+            "- 'ゆっくり3mすすんで' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.20}, {\"type\": \"forward\", \"value\": 3.0}], \"cancel\": false}\n"
+            "- '0.50m/sの速度で3m前進んで' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.50}, {\"type\": \"forward\", \"value\": 3.0}], \"cancel\": false}\n"
+            "- 'スピード上げて' -> {\"commands\": [{\"type\": \"speed\", \"value\": 1.00}], \"cancel\": false}\n"
+            "- '速度を普通に戻して' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.90}], \"cancel\": false}\n"
+            "- '4mの四角を描いて' -> {\"commands\": [{\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
+            "- '1m進んで右に曲がるのを4回繰り返して' -> {\"commands\": [{\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
             "- '危ない、止まって！' -> {\"commands\": [], \"cancel\": true}"
         )
         
@@ -522,6 +568,7 @@ class LlmDynamicGoal(Node):
                         content = "\n".join(lines[1:-1])
                         
                 parsed_json = json.loads(content)
+                self.get_logger().info(f"LLM Raw Output: '{content}'")
                 
                 # 正常にパースできたら履歴に追加
                 with self.lock:
@@ -799,7 +846,144 @@ class LlmDynamicGoal(Node):
                 print("\n🎉 全ての目標地点に到着しました！次の指示をどうぞ。")
                 print("Command > ", end="", flush=True)
 
+    def set_controller_speed(self, speed_setting):
+        """Configure controller_server and velocity_smoother based on navigation mode configs"""
+        nav_modes = {
+            'slow': {
+                '/controller_server': {
+                    'FollowPath.vx_max': 0.20,
+                    'FollowPath.vx_min': -0.10,
+                    'FollowPath.wz_max': 0.20,
+                    'FollowPath.vx_std': 0.20,
+                    'FollowPath.wz_std': 0.20,
+                    'FollowPath.ax_max': 0.20,
+                    'FollowPath.ax_min': -0.20,
+                    'FollowPath.az_max': 0.50,
+                },
+                '/velocity_smoother': {
+                    'max_velocity': [0.20, 0.0, 0.20],
+                    'min_velocity': [-0.10, 0.0, -0.20],
+                    'max_accel': [0.20, 0.0, 0.50],
+                    'max_decel': [-0.20, 0.0, -0.50]
+                }
+            },
+            'safe': {
+                '/controller_server': {
+                    'FollowPath.vx_max': 0.40,
+                    'FollowPath.vx_min': -0.20,
+                    'FollowPath.wz_max': 0.40,
+                    'FollowPath.vx_std': 0.20,
+                    'FollowPath.wz_std': 0.20,
+                    'FollowPath.ax_max': 0.40,
+                    'FollowPath.ax_min': -0.40,
+                    'FollowPath.az_max': 1.00,
+                },
+                '/velocity_smoother': {
+                    'max_velocity': [0.40, 0.0, 0.40],
+                    'min_velocity': [-0.20, 0.0, -0.40],
+                    'max_accel': [0.40, 0.0, 1.00],
+                    'max_decel': [-0.40, 0.0, -1.00]
+                }
+            },
+            'normal': {
+                '/controller_server': {
+                    'FollowPath.vx_max': 0.90,
+                    'FollowPath.vx_min': -0.60,
+                    'FollowPath.wz_max': 0.90,
+                    'FollowPath.vx_std': 0.25,
+                    'FollowPath.wz_std': 0.30,
+                    'FollowPath.ax_max': 0.90,
+                    'FollowPath.ax_min': -0.90,
+                    'FollowPath.az_max': 1.50,
+                },
+                '/velocity_smoother': {
+                    'max_velocity': [0.90, 0.0, 0.90],
+                    'min_velocity': [-0.90, 0.0, -0.90],
+                    'max_accel': [0.90, 0.0, 1.50],
+                    'max_decel': [-0.90, 0.0, -1.50]
+                }
+            },
+            'fast': {
+                '/controller_server': {
+                    'FollowPath.vx_max': 1.00,
+                    'FollowPath.vx_min': -0.60,
+                    'FollowPath.wz_max': 1.00,
+                    'FollowPath.vx_std': 0.40,
+                    'FollowPath.wz_std': 0.48,
+                    'FollowPath.ax_max': 1.50,
+                    'FollowPath.ax_min': -1.50,
+                    'FollowPath.az_max': 2.20,
+                },
+                '/velocity_smoother': {
+                    'max_velocity': [1.00, 0.0, 1.00],
+                    'min_velocity': [-0.60, 0.0, -1.00],
+                    'max_accel': [1.50, 0.0, 2.20],
+                    'max_decel': [-1.50, 0.0, -2.20]
+                }
+            }
+        }
+
+        if isinstance(speed_setting, str):
+            mode = speed_setting.lower()
+        else:
+            try:
+                val = float(speed_setting)
+                if val <= 0.25:
+                    mode = 'slow'
+                elif val <= 0.55:
+                    mode = 'safe'
+                elif val <= 0.95:
+                    mode = 'normal'
+                else:
+                    mode = 'fast'
+            except Exception:
+                mode = 'normal'
+                
+        if mode not in nav_modes:
+            mode = 'normal'
+            
+        self.get_logger().info(f"Applying navigation mode config: '{mode}'")
+        
+        cfg = nav_modes[mode]
+        for node_name, params in cfg.items():
+            self.set_node_parameters(node_name, params)
+
+    def set_node_parameters(self, node_name, params_dict):
+        """Helper to call SetParameters service asynchronously on target node"""
+        srv_name = f'{node_name}/set_parameters'
+        client = self.create_client(SetParameters, srv_name)
+        
+        if not client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warning(f"Service {srv_name} not available!")
+            return
+            
+        req = SetParameters.Request()
+        for name, val in params_dict.items():
+            param = Parameter()
+            param.name = name
+            
+            p_val = ParameterValue()
+            if isinstance(val, bool):
+                p_val.type = ParameterType.PARAMETER_BOOL
+                p_val.bool_value = val
+            elif isinstance(val, int):
+                p_val.type = ParameterType.PARAMETER_INTEGER
+                p_val.integer_value = val
+            elif isinstance(val, float):
+                p_val.type = ParameterType.PARAMETER_DOUBLE
+                p_val.double_value = val
+            elif isinstance(val, list):
+                if len(val) > 0 and isinstance(val[0], float):
+                    p_val.type = ParameterType.PARAMETER_DOUBLE_ARRAY
+                    p_val.double_array_value = [float(v) for v in val]
+            param.value = p_val
+            req.parameters.append(param)
+            
+        client.call_async(req)
+
+
     def publish_marker(self, pose_msg):
+
         """目標位置にRViz可視化用のマーカーをパブリッシュする"""
         marker = Marker()
         marker.header = pose_msg.header
