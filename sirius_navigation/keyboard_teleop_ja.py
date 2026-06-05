@@ -67,6 +67,10 @@ class SiriusKeyboardTeleopJA(Node):
         self.last_key_name = 'なし'     # 最後に認識された入力キー
         self.lock = threading.Lock()
         
+        if not sys.stdin.isatty():
+            self.get_logger().error('標準入力がTTY(端末)ではありません。キー操作ノードはインタラクティブな端末(Xtermなど)から直接実行するか、launchファイルで xterm プレフィックスを使用して起動してください。')
+            sys.exit(1)
+
         self.settings = termios.tcgetattr(sys.stdin)
         self.get_logger().info('Sirius 日本語キーボード操作ノード（scn互換）が起動しました')
 
@@ -76,8 +80,8 @@ class SiriusKeyboardTeleopJA(Node):
             if not self.assisted_mode:
                 if self.blocked:
                     self.blocked = False
-                    print("\033[H\033[J", end="")
-                    print(self.get_status_msg_unlocked())
+                    print("\033[H\033[J", end="", flush=True)
+                    print(self.get_status_msg_unlocked(), flush=True)
                 return
 
             is_blocked = False
@@ -102,16 +106,20 @@ class SiriusKeyboardTeleopJA(Node):
             
             if is_blocked != self.blocked:
                 self.blocked = is_blocked
-                print("\033[H\033[J", end="")
-                print(self.get_status_msg_unlocked())
+                print("\033[H\033[J", end="", flush=True)
+                print(self.get_status_msg_unlocked().replace('\n', '\r\n'), flush=True)
 
     def refresh_display(self):
         """スレッドセーフに画面表示をクリアして更新する"""
         with self.lock:
-            print("\033[H\033[J", end="")
-            print(self.get_status_msg_unlocked())
+            print("\033[H\033[J", end="", flush=True)
+            print(self.get_status_msg_unlocked().replace('\n', '\r\n'), flush=True)
 
     def getKey(self):
+        if not sys.stdin.isatty():
+            import time
+            time.sleep(0.1)
+            return ''
         tty.setraw(sys.stdin.fileno())
         # 入力待ち（タイムアウトを短めの 0.05秒にして応答性を向上）
         rlist, _, _ = select.select([sys.stdin.fileno()], [], [], 0.05)
@@ -147,7 +155,7 @@ class SiriusKeyboardTeleopJA(Node):
                     
             key_str = key.decode('utf-8', errors='ignore')
             
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, self.settings)
         return key_str
 
     def get_status_msg_unlocked(self):
@@ -336,7 +344,7 @@ class SiriusKeyboardTeleopJA(Node):
             stop_msg.data = False
             self.stop_pub.publish(stop_msg)
             
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
+            termios.tcsetattr(sys.stdin, termios.TCSANOW, self.settings)
 
 def main(args=None):
     rclpy.init(args=args)
