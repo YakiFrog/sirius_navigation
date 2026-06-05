@@ -3,6 +3,7 @@ import sys
 import select
 import termios
 import tty
+import threading
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -11,6 +12,14 @@ class SiriusKeyboardTeleopJA(Node):
     def __init__(self):
         super().__init__('sirius_keyboard_teleop_ja')
         self.pub = self.create_publisher(Twist, 'cmd_vel_teleop', 10)
+        
+        # 実際の速度を監視するために cmd_vel を購読
+        self.sub = self.create_subscription(
+            Twist,
+            'cmd_vel',
+            self.cmdVelCallback,
+            10
+        )
         
         # 速度設定とステップ幅
         self.target_linear_vel = 0.0   # m/s
@@ -21,8 +30,40 @@ class SiriusKeyboardTeleopJA(Node):
         self.angular_vel_step = 0.15   # rad/s
         self.angular_vel_max = 1.8     # rad/s
         
+        self.blocked = False           # 障害物による停止・減速フラグ
+        self.lock = threading.Lock()
+        
         self.settings = termios.tcgetattr(sys.stdin)
         self.get_logger().info('Sirius 日本語キーボード操作ノード（scn互換）が起動しました')
+
+    def cmdVelCallback(self, msg):
+        with self.lock:
+            # 指示速度に対して、実際の出力速度（cmd_vel）が著しく制限されているかを判定
+            is_blocked = False
+            
+            # 直進方向のブロッキング判定
+            if abs(self.target_linear_vel) > 0.05:
+                if self.target_linear_vel > 0:
+                    if msg.linear.x < 0.05:  # 前進指示に対して進んでいない
+                        is_blocked = True
+                elif self.target_linear_vel < 0:
+                    if msg.linear.x > -0.05:  # 後退指示に対して進んでいない
+                        is_blocked = True
+                        
+            # 旋回方向のブロッキング判定
+            if abs(self.target_angular_vel) > 0.05:
+                if self.target_angular_vel > 0:
+                    if msg.angular.z < 0.05:  # 左旋回指示に対して旋回していない
+                        is_blocked = True
+                elif self.target_angular_vel < 0:
+                    if msg.angular.z > -0.05:  # 右旋回指示に対して旋回していない
+                        is_blocked = True
+            
+            if is_blocked != self.blocked:
+                self.blocked = is_blocked
+                # 画面表示を即時更新
+                print("\033[H\033[J", end="")
+                print(self.get_status_msg())
 
     def getKey(self):
         tty.setraw(sys.stdin.fileno())
@@ -40,9 +81,17 @@ class SiriusKeyboardTeleopJA(Node):
         return key
 
     def get_status_msg(self):
+        warning_msg = ""
+        if self.blocked:
+            warning_msg = "\033[1;31m⚠️  [警告] 目の前または進路に障害物があるため動けません (制限中)\033[0m\n"
+        else:
+            warning_msg = "\033[1;32m✅  進路クリア (安全に走行可能です)\033[0m\n"
+
         msg = f"""
 === Sirius アシスト付きキーボード操作ガイド (scn互換) ===
 
+ステータス:
+  {warning_msg}
 操作キー:
   ↑ (矢印上)  : 直進速度を上げる (+{self.linear_vel_step:.2f} m/s)
   ↓ (矢印下)  : 直進速度を下げる (-{self.linear_vel_step:.2f} m/s)
@@ -73,32 +122,39 @@ class SiriusKeyboardTeleopJA(Node):
                 
                 # キー判定と処理
                 if key == '\x1b[A':  # UP arrow
-                    self.target_linear_vel = min(self.target_linear_vel + self.linear_vel_step, self.linear_vel_max)
+                    with self.lock:
+                        self.target_linear_vel = min(self.target_linear_vel + self.linear_vel_step, self.linear_vel_max)
                     print("\033[H\033[J", end="")
                     print(self.get_status_msg())
                 elif key == '\x1b[B':  # DOWN arrow
-                    self.target_linear_vel = max(self.target_linear_vel - self.linear_vel_step, -self.linear_vel_max)
+                    with self.lock:
+                        self.target_linear_vel = max(self.target_linear_vel - self.linear_vel_step, -self.linear_vel_max)
                     print("\033[H\033[J", end="")
                     print(self.get_status_msg())
                 elif key == '\x1b[D':  # LEFT arrow
-                    self.target_angular_vel = min(self.target_angular_vel + self.angular_vel_step, self.angular_vel_max)
+                    with self.lock:
+                        self.target_angular_vel = min(self.target_angular_vel + self.angular_vel_step, self.angular_vel_max)
                     print("\033[H\033[J", end="")
                     print(self.get_status_msg())
                 elif key == '\x1b[C':  # RIGHT arrow
-                    self.target_angular_vel = max(self.target_angular_vel - self.angular_vel_step, -self.angular_vel_max)
+                    with self.lock:
+                        self.target_angular_vel = max(self.target_angular_vel - self.angular_vel_step, -self.angular_vel_max)
                     print("\033[H\033[J", end="")
                     print(self.get_status_msg())
                 elif key == ',':  # Stop linear only
-                    self.target_linear_vel = 0.0
+                    with self.lock:
+                        self.target_linear_vel = 0.0
                     print("\033[H\033[J", end="")
                     print(self.get_status_msg())
                 elif key == '.':  # Stop angular only
-                    self.target_angular_vel = 0.0
+                    with self.lock:
+                        self.target_angular_vel = 0.0
                     print("\033[H\033[J", end="")
                     print(self.get_status_msg())
                 elif key == ' ' or key == 'k':  # Full stop
-                    self.target_linear_vel = 0.0
-                    self.target_angular_vel = 0.0
+                    with self.lock:
+                        self.target_linear_vel = 0.0
+                        self.target_angular_vel = 0.0
                     print("\033[H\033[J", end="")
                     print(self.get_status_msg())
                 elif key == '\x03':  # Ctrl+C
@@ -106,12 +162,13 @@ class SiriusKeyboardTeleopJA(Node):
 
                 # Twist メッセージ送信
                 twist = Twist()
-                twist.linear.x = self.target_linear_vel
+                with self.lock:
+                    twist.linear.x = self.target_linear_vel
+                    twist.angular.z = self.target_angular_vel
                 twist.linear.y = 0.0
                 twist.linear.z = 0.0
                 twist.angular.x = 0.0
                 twist.angular.y = 0.0
-                twist.angular.z = self.target_angular_vel
                 self.pub.publish(twist)
 
         except Exception as e:
@@ -126,6 +183,11 @@ class SiriusKeyboardTeleopJA(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = SiriusKeyboardTeleopJA()
+    
+    # サブスクリプション処理を非同期で行うため、別スレッドでスピンを開始
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
+    
     node.run()
     node.destroy_node()
     rclpy.shutdown()
