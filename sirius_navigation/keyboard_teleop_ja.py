@@ -14,8 +14,8 @@ KEY_NAMES = {
     '\x1b[B': '↓ (直進速度ダウン/後退)',
     '\x1b[D': '← (左旋回速度アップ)',
     '\x1b[C': '→ (右旋回速度アップ/右旋回)',
-    ',': ', (直進速度リセット/停止)',
-    '.': '. (旋回速度リセット/停止)',
+    ',': ', (直進のみ停止)',
+    '.': '. (旋回のみ停止)',
     ' ': 'Space (完全停止)',
     'k': 'k (完全停止)'
 }
@@ -51,45 +51,47 @@ class SiriusKeyboardTeleopJA(Node):
 
     def cmdVelCallback(self, msg):
         with self.lock:
-            # 指示速度に対して、実際の出力速度（cmd_vel）が著しく制限されているかを判定
             is_blocked = False
             
             # 直進方向のブロッキング判定
             if abs(self.target_linear_vel) > 0.05:
                 if self.target_linear_vel > 0:
-                    if msg.linear.x < 0.05:  # 前進指示に対して進んでいない
+                    if msg.linear.x < 0.05:
                         is_blocked = True
                 elif self.target_linear_vel < 0:
-                    if msg.linear.x > -0.05:  # 後退指示に対して進んでいない
+                    if msg.linear.x > -0.05:
                         is_blocked = True
                         
             # 旋回方向のブロッキング判定
             if abs(self.target_angular_vel) > 0.05:
                 if self.target_angular_vel > 0:
-                    if msg.angular.z < 0.05:  # 左旋回指示に対して旋回していない
+                    if msg.angular.z < 0.05:
                         is_blocked = True
                 elif self.target_angular_vel < 0:
-                    if msg.angular.z > -0.05:  # 右旋回指示に対して旋回していない
+                    if msg.angular.z > -0.05:
                         is_blocked = True
             
             if is_blocked != self.blocked:
                 self.blocked = is_blocked
-                # 画面表示を即時更新
                 print("\033[H\033[J", end="")
                 print(self.get_status_msg())
 
     def getKey(self):
         tty.setraw(sys.stdin.fileno())
-        # select.select で入力待ち（タイムアウト 0.1秒）
-        rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+        # 入力待ち（タイムアウトを短めの 0.05秒にして応答性を向上）
+        rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
         key = ''
         if rlist:
             key = sys.stdin.read(1)
             # エスケープシーケンス（矢印キーなど）のハンドリング
             if key == '\x1b':
-                rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if rlist:
-                    key += sys.stdin.read(2)
+                # ノンブロッキングで残りの文字を読み取る
+                for _ in range(2):
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    if rlist:
+                        key += sys.stdin.read(1)
+                    else:
+                        break
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
         return key
 
@@ -101,7 +103,7 @@ class SiriusKeyboardTeleopJA(Node):
             warning_msg = "\033[1;32m✅  進路クリア (安全に走行可能です)\033[0m\n"
 
         msg = f"""
-=== Sirius アシスト付きキーボード操作ガイド (scn互換) ===
+=== Sirius アシスト付きキーボード操作ガイド (scn互換・加速式) ===
 
 ステータス:
   {warning_msg}
@@ -111,8 +113,8 @@ class SiriusKeyboardTeleopJA(Node):
 操作キー:
   ↑ (矢印上)  : 直進速度を上げる (+{self.linear_vel_step:.2f} m/s)
   ↓ (矢印下)  : 直進速度を下げる (-{self.linear_vel_step:.2f} m/s)
-  ← (矢印left) : 左旋回速度を上げる (+{self.angular_vel_step:.2f} rad/s)
-  → (矢印right): 右旋回速度を上げる (-{self.angular_vel_step:.2f} rad/s)
+  ← (矢印左)  : 左旋回速度を上げる (+{self.angular_vel_step:.2f} rad/s)
+  → (矢印右)  : 右旋回速度を上げる (-{self.angular_vel_step:.2f} rad/s)
 
 停止キー:
   , (カンマ)  : 直進速度のみ停止 (0.0 m/s)
@@ -129,7 +131,6 @@ class SiriusKeyboardTeleopJA(Node):
         return msg
 
     def run(self):
-        # 最初の画面表示
         print(self.get_status_msg())
 
         try:
@@ -138,7 +139,6 @@ class SiriusKeyboardTeleopJA(Node):
                 if not key:
                     continue
                 
-                # 入力キー名称の取得
                 key_name = KEY_NAMES.get(key, f"'{key}'")
                 with self.lock:
                     self.last_key_name = key_name
