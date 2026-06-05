@@ -15,12 +15,18 @@ from tf2_ros import Buffer, TransformListener
 
 # キー表記用のマッピング
 KEY_NAMES = {
-    '\x1b[A': '↑ (前方 0° に設定)',
-    '\x1b[B': '↓ (後方 180° に設定)',
+    '\x1b[A': '↑ (進行方向設定 / 連続押しで距離・速度アップ)',
+    '\x1b[B': '↓ (後退方向設定 / 連続押しで距離・速度アップ)',
     '\x1b[D': '← (ゴール反時計回り回転 +15°)',
     '\x1b[C': '→ (ゴール時計回り回転 -15°)',
     'w': 'w (目標距離アップ +0.2m)',
     's': 's (目標距離ダウン -0.2m)',
+    ',': ', (直進距離のみ停止 - R=0.0m)',
+    '、': '、 (直進距離のみ停止 - R=0.0m - 全角)',
+    '，': '， (直進距離のみ停止 - R=0.0m - 全角)',
+    '.': '. (旋回角度のみ停止 - θ=0.0°)',
+    '。': '。 (旋回角度のみ停止 - θ=0.0° - 全角)',
+    '．': '． (旋回角度のみ停止 - θ=0.0° - 全角)',
     ' ': 'Space (ナビゲーション中断/キャンセル)',
     'k': 'k (ナビゲーション中断/キャンセル)',
     'g': 'g (現在の目標を再送/即時発行)',
@@ -46,15 +52,16 @@ class KeyboardDynamicGoal(Node):
         self.cancel_client = self.create_client(CancelGoal, '/navigate_to_pose/_action/cancel_goal')
         
         # 目標設定の初期値
-        self.r = 1.5                   # ロボットからの目標距離 (メートル)
+        self.r = 0.0                   # 初期値を0.0にしてその場回転を可能にする
         self.theta = 0.0               # ロボット正面に対する目標角度 (ラジアン, 反時計回りが正)
         
-        self.r_min = 0.5
+        self.r_min = 0.0
         self.r_max = 5.0
         self.r_step = 0.2
         self.theta_step = math.radians(15.0)  # 15度刻みで回転
         
         self.emergency_stop = False    # 緊急停止状態
+        self.goal_active = False       # ゴールのアクティブ状態
         self.last_key_name = 'なし'     # 最後に認識された入力キー
         self.lock = threading.Lock()
         
@@ -64,6 +71,18 @@ class KeyboardDynamicGoal(Node):
 
         self.settings = termios.tcgetattr(sys.stdin)
         self.get_logger().info('Sirius ダイナミックゴール・キーオペノードが起動しました')
+        
+        # タイマーの作成 (5Hz = 0.2秒ごとに最新の相対座標でゴールを更新/再発行)
+        self.timer = self.create_timer(0.2, self.timer_callback)
+
+    def timer_callback(self):
+        """ゴールがアクティブな場合、最新の自己位置から相対座標を再計算してゴールを発行し続ける"""
+        with self.lock:
+            active = self.goal_active
+            estop = self.emergency_stop
+            
+        if active and not estop:
+            self.publish_goal()
 
     def getKey(self):
         if not sys.stdin.isatty():
@@ -154,8 +173,17 @@ class KeyboardDynamicGoal(Node):
         else:
             estop_msg = "\033[1;32m🟢  緊急停止オフ (Eキーで緊急停止)\033[0m\n"
 
+        active_status = ""
+        if self.goal_active:
+            active_status = "\033[1;32m🔥 追従走行中 (ロボット前方に追従中)\033[0m"
+        else:
+            active_status = "\033[1;33m⏸️  待機中 (キー入力で走行開始)\033[0m"
+
         msg = f"""
 === Sirius 周囲360度ダイナミックゴール・キーオペ ===
+
+追従状態:
+  {active_status}
 
 緊急停止状態:
   {estop_msg}
@@ -289,6 +317,10 @@ class KeyboardDynamicGoal(Node):
                     key_norm = 's'
                 elif key == 'ｇ':
                     key_norm = 'g'
+                elif key in (',', '、', '，'):
+                    key_norm = ','
+                elif key in ('.', '。', '．'):
+                    key_norm = '.'
 
                 key_lower = key_norm.lower()
 
@@ -296,6 +328,7 @@ class KeyboardDynamicGoal(Node):
                 if key_lower == 'e':
                     with self.lock:
                         self.emergency_stop = True
+                        self.goal_active = False  # 緊急停止時はゴール無効化
                     stop_msg = Bool()
                     stop_msg.data = True
                     self.stop_pub.publish(stop_msg)
@@ -317,31 +350,68 @@ class KeyboardDynamicGoal(Node):
 
                     if key == '\x1b[A':  # UP arrow
                         with self.lock:
-                            self.theta = 0.0
+                            # 進行方向が前以外（後ろを向いていた、またはその場回転中）だった場合は前にリセットして初期距離にする
+                            if self.theta != 0.0 or not self.goal_active or self.r == 0.0:
+                                self.theta = 0.0
+                                self.r = 0.5  # 開始距離
+                            else:
+                                # すでに前進中なら距離（速度）を上げる
+                                self.r = min(self.r + self.r_step, self.r_max)
+                            self.goal_active = True
                         should_publish = True
                     elif key == '\x1b[B':  # DOWN arrow
                         with self.lock:
-                            self.theta = math.pi
+                            # 進行方向が後ろ以外だった場合は後ろにリセットして初期距離にする
+                            if self.theta != math.pi or not self.goal_active or self.r == 0.0:
+                                self.theta = math.pi
+                                self.r = 0.5  # 開始距離
+                            else:
+                                # すでに後退中なら距離（速度）を上げる
+                                self.r = min(self.r + self.r_step, self.r_max)
+                            self.goal_active = True
                         should_publish = True
                     elif key == '\x1b[D':  # LEFT arrow
                         with self.lock:
+                            # その場回転がスムーズに行えるよう、目標距離Rが1.0m未満の場合は自動的に1.0mに設定する
+                            if self.r < 1.0:
+                                self.r = 1.0
                             self.theta += self.theta_step
+                            self.goal_active = True
                         should_publish = True
                     elif key == '\x1b[C':  # RIGHT arrow
                         with self.lock:
+                            # その場回転がスムーズに行えるよう、目標距離Rが1.0m未満の場合は自動的に1.0mに設定する
+                            if self.r < 1.0:
+                                self.r = 1.0
                             self.theta -= self.theta_step
+                            self.goal_active = True
                         should_publish = True
                     elif key_lower == 'w':  # 距離遠く
                         with self.lock:
                             self.r = min(self.r + self.r_step, self.r_max)
+                            self.goal_active = True
                         should_publish = True
                     elif key_lower == 's':  # 距離近く
                         with self.lock:
                             self.r = max(self.r - self.r_step, self.r_min)
+                            self.goal_active = True
                         should_publish = True
                     elif key_lower == 'g':  # 再送
+                        with self.lock:
+                            self.goal_active = True
+                        should_publish = True
+                    elif key_norm == ',':  # 直進停止 (R = 0.0m)
+                        with self.lock:
+                            self.r = 0.0
+                            self.goal_active = True  # その場回転はできるように追従は維持
+                        should_publish = True
+                    elif key_norm == '.':  # 旋回停止 (theta = 0.0)
+                        with self.lock:
+                            self.theta = 0.0
                         should_publish = True
                     elif key_norm == ' ' or key_norm == 'k':  # 中断
+                        with self.lock:
+                            self.goal_active = False
                         self.cancel_navigation()
                         self.refresh_display()
                     elif key == '\x03':  # Ctrl+C
