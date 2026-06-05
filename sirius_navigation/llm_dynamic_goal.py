@@ -219,8 +219,10 @@ class LlmDynamicGoal(Node):
             self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
             
         elif cmd_type == "backward":
-            r = -abs(value)
-            theta = 0.0
+            # 後退時: keyboard_dynamic_goal.py に合わせ、theta=180度(pi)として後方に移動させる
+            # これによりNav2が前方向のセンサを使って安全に目的地（後方）へアプローチできるようになる
+            r = abs(value)
+            theta = math.pi
             self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
             
         elif cmd_type == "turn":
@@ -366,13 +368,16 @@ class LlmDynamicGoal(Node):
             "【Commands Definition】\n"
             "- \"type\": \"forward\": Move straight forward. \"value\": distance in meters (positive float).\n"
             "  Default distance if unspecified: 1.0m. 'ちょっと'/'少し': 0.5m. '大きく'/'たくさん': 2.0m.\n"
+            "  Also maps to Romaji Japanese: 'mae'/'susunde'/'maeitte'/'susume'.\n"
             "- \"type\": \"backward\": Move straight backward. \"value\": distance in meters (positive float).\n"
             "  Default distance if unspecified: 0.5m.\n"
+            "  Also maps to Romaji Japanese: 'back'/'sagatte'/'usirosagatte'/'ushiro sagatte'.\n"
             "- \"type\": \"turn\": Rotate to face a relative angle. \"value\": angle in radians. "
             "POSITIVE=left(CCW), NEGATIVE=right(CW). Use for '右向いて'(-1.5708), '左向いて'(+1.5708), '少し右'(-0.5236).\n"
+            "  Also maps to Romaji Japanese: 'migimuite'/'migi muite'(-1.5708), 'hidarimuite'/'hidari muite'(+1.5708).\n"
             "- \"type\": \"spin\": Rotate in place by specified degrees without translating. "
             "\"value\": total rotation angle in DEGREES. POSITIVE=left(CCW), NEGATIVE=right(CW), 0=full 360deg spin.\n"
-            "  Use for: 'その場旋回'(0), '一回転'(360), '右に半回転'(-180), '時計回りに90度'(-90).\n"
+            "  Use for: 'その場旋回'(0), '一回転'(360), '右に半回転'(-180), '時計回りに90度'(-90), 'sonobasenkai'(360).\n"
             "- \"type\": \"face\": Turn to face an absolute map direction. "
             "\"value\": target yaw angle in DEGREES in map frame (0=+X axis, 90=+Y axis, 180/-180=-X axis, -90=-Y axis).\n"
             "  Use when user says a compass direction like '北を向いて'(90), '南向き'(-90), '東向き'(0), '西向き'(180).\n"
@@ -383,11 +388,19 @@ class LlmDynamicGoal(Node):
             "1. If the user complains about the last action (e.g. '全然進んでいない' / 'Not moving at all'), "
             "look at the robot's physical state. If velocity=0.0m/s with BLOCKED status, "
             "generate a corrective sequence (detour turn or reverse).\n"
-            "2. If a command value was too small and robot arrived safely, amplify the value in the next command.\n\n"
+            "2. If a command value was too small and robot arrived safely, amplify the value in the next command.\n"
+            "3. CRITICAL ON CONTEXT DIRECTION: If the user says 'motto' (more) or 'mottosagatte' / 'motto sagatte' after a 'backward' command, "
+            "you MUST output a 'backward' command (e.g. value: 1.0). Do not output 'forward' unless they explicitly ask to go forward (e.g. 'mae'/'susunde').\n\n"
             "【Output Examples】\n"
             "- 'ちょっと前に行って' -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false}\n"
             "- '1.5m後退して' -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.5}], \"cancel\": false}\n"
             "- '右向いて' -> {\"commands\": [{\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
+            "- 'usirosagatte' -> {\"commands\": [{\"type\": \"backward\", \"value\": 0.5}], \"cancel\": false}\n"
+            "- 'motto' (when last command was backward) -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.0}], \"cancel\": false}\n"
+            "- 'mottosagatte' -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.5}], \"cancel\": false}\n"
+            "- 'mae itte' -> {\"commands\": [{\"type\": \"forward\", \"value\": 1.0}], \"cancel\": false}\n"
+            "- 'migimuite' -> {\"commands\": [{\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
+            "- 'sonobasenkai' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}], \"cancel\": false}\n"
             "- '少し左に向いて' -> {\"commands\": [{\"type\": \"turn\", \"value\": 0.5236}], \"cancel\": false}\n"
             "- 'その場で旋回して' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}], \"cancel\": false}\n"
             "- '右に一回転' -> {\"commands\": [{\"type\": \"spin\", \"value\": -360}], \"cancel\": false}\n"
@@ -687,7 +700,8 @@ class LlmDynamicGoal(Node):
             # 5秒間のデータがあり、並進距離の変化が極小で、実速度も極小の場合
             if history_len == 5:
                 dist_change = abs(first_dist - last_dist)
-                if dist_change < 0.05 and abs(vel_x) < 0.05 and abs(vel_theta) < 0.05:
+                # 閾値を0.005に下げて、短い距離で低速移動している場合の誤判定を防ぐ
+                if dist_change < 0.005 and abs(vel_x) < 0.005 and abs(vel_theta) < 0.005:
                     should_cancel_due_to_stuck = True
                     stuck_msg = "🤖 [Stuck Detected during Translation] Robot path is blocked or unable to reach the target."
 
