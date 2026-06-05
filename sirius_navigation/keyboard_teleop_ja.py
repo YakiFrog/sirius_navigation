@@ -53,7 +53,7 @@ class SiriusKeyboardTeleopJA(Node):
         
         self.linear_vel_step = 0.1     # m/s
         self.linear_vel_max = 1.0      # m/s
-        self.angular_vel_step = 0.15   # rad/s
+        self.angular_vel_step = 0.05   # rad/s
         self.angular_vel_max = 0.9     # rad/s
         
         self.blocked = False           # 障害物による停止・減速フラグ
