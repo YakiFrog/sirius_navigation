@@ -36,15 +36,11 @@ def generate_launch_description():
     # Teleop Twist Keyboardノード（別ウィンドウで起動）
     # xterm -e を使って別ターミナルで起動
     teleop_keyboard_node = Node(
-        package='teleop_twist_keyboard',
-        executable='teleop_twist_keyboard',
-        name='teleop_twist_keyboard',
+        package='sirius_navigation',
+        executable='keyboard_teleop_ja',
+        name='keyboard_teleop_ja',
         output='screen',
-        prefix='xterm -e',
-        remappings=[
-            # cmd_velトピックはそのまま使用
-            # Assisted Teleopがこれを監視して、安全なコマンドに変換します
-        ]
+        prefix='xterm -T "Sirius アシスト付きキーボード操縦" -geometry 90x25 -e',
     )
     
     return LaunchDescription([

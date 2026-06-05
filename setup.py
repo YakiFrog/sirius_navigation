@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'cancel_navigation = sirius_navigation.cancel_navigation:main',
             'assisted_teleop = sirius_navigation.assisted_teleop:main',
+            'keyboard_teleop_ja = sirius_navigation.keyboard_teleop_ja:main',
             'ekf_pose_initializer = sirius_navigation.ekf_pose_initializer:main',
             'move_goal = sirius_navigation.move_goal:main',
             'target_follower = sirius_navigation.target_following.target_follower:main',

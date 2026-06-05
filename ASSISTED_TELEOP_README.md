@@ -155,18 +155,33 @@ ros2 run sirius_navigation assisted_teleop --ros-args -p time_allowance:=300
 
 ## 技術詳細
 
-### トピック
+### トピックとフロー
 
-- **購読:**
-  - `/cmd_vel` (geometry_msgs/Twist): キーボードからの速度コマンド
-  
-- **パブリッシュ:**
-  - `/cmd_vel` (geometry_msgs/Twist): フィルタリングされた安全な速度コマンド
+```
+[キーボード / コントローラー] -> /cmd_vel_teleop (生の操縦コマンド)
+                                  ↓
+                       [nav2_behaviors::AssistedTeleop]
+                                  ↓
+                        /cmd_vel_nav (衝突回避済みのコマンド)
+                                  ↓
+                         [velocity_smoother]
+                                  ↓
+                        /cmd_vel_smoothed
+                                  ↓
+                        [collision_monitor]
+                                  ↓
+                /cmd_vel (最終的な安全コマンド) -> [Unity / ロボット]
+```
+
+- **入力トピック (キーボード・コントローラー側が送信):**
+  - `/cmd_vel_teleop` (`geometry_msgs/msg/Twist`): アシスト有効時の生の操作入力
+- **中間・最終トピック (Nav2側が配信):**
+  - `/cmd_vel_nav` -> `/cmd_vel_smoothed` -> `/cmd_vel` (`geometry_msgs/msg/Twist`): 加速度制限および衝突回避処理が適用された安全な操縦コマンド
 
 ### アクション
 
 - **使用するアクション:**
-  - `/assisted_teleop` (nav2_msgs/AssistedTeleop): Nav2のAssisted Teleopアクション
+  - `/assisted_teleop` (`nav2_msgs/action/AssistedTeleop`): Nav2のAssisted Teleopアクションサーバー。ゴール（タイムアウト時間）を指定してクライアントから開始します。
 
 ## 参考資料
 
