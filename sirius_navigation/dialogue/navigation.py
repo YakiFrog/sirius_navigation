@@ -13,4 +13,5 @@ NAVIGATION_TEMPLATES = {
     "turn_failure": "[sad]旋回に失敗したのだ。",
     "arrival": "[happy]目的地に到着したのだ！",
     "stuck": "[sad]行く手が遮られていて、進めないのだ...",
+    "parse_failure": "[sad]指示の理解に失敗したのだ。",
 }

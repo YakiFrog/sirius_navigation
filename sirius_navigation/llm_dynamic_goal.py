@@ -219,6 +219,7 @@ class LlmDynamicGoal(Node):
         
         if result is None:
             self.get_logger().error("Failed to parse command from LLM.")
+            self.send_sirius_speak(DIALOGUE_TEMPLATES.get("parse_failure", "[sad]失敗したのだ。"))
             return
             
         is_cancel = result.get("cancel", False)
@@ -230,6 +231,8 @@ class LlmDynamicGoal(Node):
         commands = result.get("commands", [])
         if not commands:
             self.get_logger().warning("No commands generated from LLM.")
+            if not result.get("fast_path", False):
+                self.send_sirius_speak(DIALOGUE_TEMPLATES.get("parse_failure", "[sad]失敗したのだ。"))
             return
             
         self.get_logger().info(f"Parsed {len(commands)} commands from instruction.")
@@ -472,12 +475,12 @@ class LlmDynamicGoal(Node):
         if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
             battery_msg = self.get_sirius_battery_level()
             self.send_sirius_speak(battery_msg)
-            return {"commands": [], "cancel": False}
+            return {"commands": [], "cancel": False, "fast_path": True}
             
         for kw, reply in CHAT_KEYWORDS.items():
             if kw in norm_inst:
                 self.send_sirius_speak(reply)
-                return {"commands": [], "cancel": False}
+                return {"commands": [], "cancel": False, "fast_path": True}
                 
         # 1.5 スピード調整/旋回/前進/後退の判定 (数値指定を含まない標準指示の場合にのみ高速応答)
         has_number = any(char.isdigit() for char in norm_inst) or any(x in norm_inst for x in ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "点", "度", "㍍", "メートル"])
