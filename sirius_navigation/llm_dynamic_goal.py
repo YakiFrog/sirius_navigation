@@ -405,6 +405,9 @@ class LlmDynamicGoal(Node):
                 dy = target_y - ty
                 target_yaw = math.atan2(dy, dx)
                 
+                # 指示受け取り報告
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["goto_start"].format(x=target_x, y=target_y))
+                
                 # 直接 map 座標系でゴールを発行する
                 self.publish_direct_map_goal(target_x, target_y, target_yaw)
             except Exception as e:
