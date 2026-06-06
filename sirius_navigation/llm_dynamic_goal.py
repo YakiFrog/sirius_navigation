@@ -95,6 +95,7 @@ class LlmDynamicGoal(Node):
         self.is_stuck = False
         self.command_start_time = None
         self.spin_goal_handle = None
+        self.last_active_cmd_type = None
         
         # 会話履歴管理 (マルチターン対話用)
         self.chat_history = []
@@ -244,17 +245,46 @@ class LlmDynamicGoal(Node):
         r = 0.0
         theta = 0.0
         
+        if cmd_type in ["forward", "backward"]:
+            with self.lock:
+                active_x = self.active_goal_x
+                active_y = self.active_goal_y
+                active_yaw = self.active_goal_yaw
+                logged = self.goal_reached_logged
+                last_type = self.last_active_cmd_type
+                
+            if active_x is not None and not logged and last_type == cmd_type:
+                base_x = active_x
+                base_y = active_y
+                base_yaw = active_yaw
+                self.get_logger().info(f"Extending active {cmd_type} goal: X={base_x:.3f}, Y={base_y:.3f}, Yaw={math.degrees(base_yaw):+.1f}deg")
+            else:
+                base_x = tx
+                base_y = ty
+                base_yaw = yaw_robot
+                
+            with self.lock:
+                self.last_active_cmd_type = cmd_type
+        else:
+            with self.lock:
+                self.last_active_cmd_type = None
+            base_x = tx
+            base_y = ty
+            base_yaw = yaw_robot
+        
         if cmd_type == "forward":
-            r = value
+            # ウェイポイントは最小1.0mから置くように制限
+            r = max(value, 1.0)
             theta = 0.0
-            self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
+            self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "backward":
             # 後退時: keyboard_dynamic_goal.py に合わせ、theta=180度(pi)として後方に移動させる
             # これによりNav2が前方向のセンサを使って安全に目的地（後方）へアプローチできるようになる
-            r = abs(value)
+            # ウェイポイントは最小1.0mから置くように制限
+            r = max(abs(value), 1.0)
             theta = math.pi
-            self.publish_goal_pose(tx, ty, yaw_robot, r, theta)
+            self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "turn":
             # 旋回時: Nav2の標準ビヘイビアである /spin アクションを使用し、
@@ -402,7 +432,7 @@ class LlmDynamicGoal(Node):
             # 「右向いて」「左向いて」「みぎむいて」「ひだりむいて」「みぎいて」「ひだりいて」「右向けて」「右無知恵」（タイポ対応）
             if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae"]):
                 val = -1.5708 if is_right else 1.5708
-                if "少し" in norm_inst or "ちょっと" in norm_inst or "微" in norm_inst:
+                if any(x in norm_inst for x in ["少し", "ちょっと", "微", "すこし"]):
                     val = -0.5236 if is_right else 0.5236
                 return {"commands": [{"type": "turn", "value": val}], "cancel": False}
                 
@@ -416,6 +446,7 @@ class LlmDynamicGoal(Node):
             # 3. 前進・後退の判定
             # 後退: 後ろ下がって, usirosagatte, motto, back
             last_cmd_was_backward = False
+            last_cmd_was_forward = False
             with self.lock:
                 if self.chat_history:
                     for msg in reversed(self.chat_history):
@@ -424,29 +455,38 @@ class LlmDynamicGoal(Node):
                                 # アシスタントの返答内容からコマンドを推測
                                 hist_json = json.loads(msg.get("content", "{}"))
                                 hist_cmds = hist_json.get("commands", [])
-                                if hist_cmds and hist_cmds[-1].get("type") == "backward":
-                                    last_cmd_was_backward = True
-                                    break
+                                if hist_cmds:
+                                    last_type = hist_cmds[-1].get("type")
+                                    if last_type == "backward":
+                                        last_cmd_was_backward = True
+                                        break
+                                    elif last_type == "forward":
+                                        last_cmd_was_forward = True
+                                        break
                             except Exception:
                                 pass
             
-            # 「もっと」「もうすこし」で直前が後退の場合、さらに後退させる
-            if norm_inst in ["motto", "もっと", "もうすこし", "もうちょっと", "さらに"] and last_cmd_was_backward:
-                return {"commands": [{"type": "backward", "value": 1.0}], "cancel": False}
+            # 「もっと」「もうすこし」などの単体指示で直前の動作（前進/後退）を継続する場合
+            if norm_inst in ["motto", "もっと", "もうすこし", "もう少し", "もうちょっと", "さらに", "すこし", "少し", "ちょっと"]:
+                val = 1.0 if any(x in norm_inst for x in ["すこし", "少し", "ちょっと"]) else 2.0
+                if last_cmd_was_backward:
+                    return {"commands": [{"type": "backward", "value": max(1.0, val)}], "cancel": False}
+                elif last_cmd_was_forward:
+                    return {"commands": [{"type": "forward", "value": max(1.0, val)}], "cancel": False}
     
             if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって"]):
-                val = 0.5
-                if "motto" in norm_inst or "もっと" in norm_inst or "大きく" in norm_inst or "たくさん" in norm_inst:
-                    val = 1.0
+                val = 1.0
+                if any(x in norm_inst for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
+                    val = 2.0
                 return {"commands": [{"type": "backward", "value": val}], "cancel": False}
     
             # 前進: 前に行って, 進んで, mae, forward
             if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ"]):
-                val = 1.0
-                if "少し" in norm_inst or "ちょっと" in norm_inst:
-                    val = 0.5
-                elif "もっと" in norm_inst or "大きく" in norm_inst or "たくさん" in norm_inst:
-                    val = 2.0
+                val = 1.5
+                if any(x in norm_inst for x in ["少し", "ちょっと", "すこし"]):
+                    val = 1.0
+                elif any(x in norm_inst for x in ["もっと", "大きく", "たくさん", "さらに"]):
+                    val = 2.5
                 return {"commands": [{"type": "forward", "value": val}], "cancel": False}
 
             
@@ -467,10 +507,10 @@ class LlmDynamicGoal(Node):
             "}\n\n"
             "【Commands Definition】\n"
             "- \"type\": \"forward\": Move straight forward. \"value\": distance in meters (positive float).\n"
-            "  Default distance if unspecified: 1.0m. 'ちょっと'/'少し': 0.5m. '大きく'/'たくさん': 2.0m.\n"
+            "  Default distance if unspecified: 1.5m. 'ちょっと'/'少し': 1.0m. '大きく'/'たくさん': 2.5m. Minimum distance is 1.0m.\n"
             "  Also maps to Romaji Japanese: 'mae'/'susunde'/'maeitte'/'susume'.\n"
             "- \"type\": \"backward\": Move straight backward. \"value\": distance in meters (positive float).\n"
-            "  Default distance if unspecified: 0.5m.\n"
+            "  Default distance if unspecified: 1.0m. Minimum distance is 1.0m.\n"
             "  Also maps to Romaji Japanese: 'back'/'sagatte'/'usirosagatte'/'ushiro sagatte'.\n"
             "- \"type\": \"turn\": Rotate to face a relative angle. \"value\": angle in radians. "
             "POSITIVE=left(CCW), NEGATIVE=right(CW). Use for '右向いて'(-1.5708), '左向いて'(+1.5708), '少し右'(-0.5236).\n"
@@ -1039,7 +1079,6 @@ class LlmDynamicGoal(Node):
             self.turn_target_yaw = None
             
             if clear_queue:
-                self.chat_history = []
                 self.command_queue = []
                 self.executing_command = False
             
