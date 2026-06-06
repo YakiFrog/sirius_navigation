@@ -411,83 +411,100 @@ class LlmDynamicGoal(Node):
         has_number = any(char.isdigit() for char in norm_inst) or any(x in norm_inst for x in ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "点", "度", "㍍", "メートル"])
         
         if not has_number:
-            slow_patterns = ["ゆっくり", "遅く", "スピード下げ", "スピード落と", "速度下げ", "yukkuri", "slow", "下げて", "スピードおと"]
+            slow_patterns = ["ゆっくり", "遅く", "おそく", "おそい", "遅い", "スピード下げ", "スピード落と", "速度下げ", "yukkuri", "slow", "下げて", "スピードおと"]
             normal_patterns = ["ふつう", "普通", "通常", "normal"]
             fast_patterns = ["早く", "急いで", "スピード上げ", "速度上げ", "fast", "speedup", "上げて"]
             
+            # スピード変更の抽出
+            speed_val = None
+            if any(pat in norm_inst for pat in slow_patterns):
+                speed_val = 0.2
+            elif any(pat in norm_inst for pat in normal_patterns):
+                speed_val = 0.9
+            elif any(pat in norm_inst for pat in fast_patterns):
+                speed_val = 1.0
+
+            # 方向指示が含まれているかチェック
             has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "いっ", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい"])
             
-            if not has_dir:
-                if any(pat in norm_inst for pat in slow_patterns):
-                    return {"commands": [{"type": "speed", "value": 0.2}], "cancel": False}
-                if any(pat in norm_inst for pat in normal_patterns):
-                    return {"commands": [{"type": "speed", "value": 0.9}], "cancel": False}
-                if any(pat in norm_inst for pat in fast_patterns):
-                    return {"commands": [{"type": "speed", "value": 1.0}], "cancel": False}
+            cmd_list = []
+            if speed_val is not None:
+                cmd_list.append({"type": "speed", "value": speed_val})
                 
-            # 2. 旋回・右左折の判定
-            is_right = any(pat in norm_inst for pat in ["右", "migi", "みぎ", "みぎむ"])
-            is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
-            
-            # 「右向いて」「左向いて」「みぎむいて」「ひだりむいて」「みぎいて」「ひだりいて」「右向けて」「右無知恵」（タイポ対応）
-            if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae"]):
-                val = -1.5708 if is_right else 1.5708
-                if any(x in norm_inst for x in ["少し", "ちょっと", "微", "すこし"]):
-                    val = -0.5236 if is_right else 0.5236
-                return {"commands": [{"type": "turn", "value": val}], "cancel": False}
+            if has_dir:
+                # 2. 旋回・右左折の判定
+                is_right = any(pat in norm_inst for pat in ["右", "migi", "みぎ", "みぎむ"])
+                is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
                 
-            # その場旋回, 一回転, 360度
-            if any(x in norm_inst for x in ["旋回", "回転", "senkai", "spin"]):
-                deg = 360.0
-                if "右" in norm_inst or "時計回り" in norm_inst:
-                    deg = -360.0
-                return {"commands": [{"type": "spin", "value": deg}], "cancel": False}
-    
-            # 3. 前進・後退の判定
-            # 後退: 後ろ下がって, usirosagatte, motto, back
-            last_cmd_was_backward = False
-            last_cmd_was_forward = False
-            with self.lock:
-                if self.chat_history:
-                    for msg in reversed(self.chat_history):
-                        if msg.get("role") == "assistant":
-                            try:
-                                # アシスタントの返答内容からコマンドを推測
-                                hist_json = json.loads(msg.get("content", "{}"))
-                                hist_cmds = hist_json.get("commands", [])
-                                if hist_cmds:
-                                    last_type = hist_cmds[-1].get("type")
-                                    if last_type == "backward":
-                                        last_cmd_was_backward = True
-                                        break
-                                    elif last_type == "forward":
-                                        last_cmd_was_forward = True
-                                        break
-                            except Exception:
-                                pass
-            
-            # 「もっと」「もうすこし」などの単体指示で直前の動作（前進/後退）を継続する場合
-            if norm_inst in ["motto", "もっと", "もうすこし", "もう少し", "もうちょっと", "さらに", "すこし", "少し", "ちょっと"]:
-                val = 1.0 if any(x in norm_inst for x in ["すこし", "少し", "ちょっと"]) else 2.0
-                if last_cmd_was_backward:
-                    return {"commands": [{"type": "backward", "value": max(1.0, val)}], "cancel": False}
-                elif last_cmd_was_forward:
-                    return {"commands": [{"type": "forward", "value": max(1.0, val)}], "cancel": False}
-    
-            if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって"]):
-                val = 1.0
-                if any(x in norm_inst for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
-                    val = 2.0
-                return {"commands": [{"type": "backward", "value": val}], "cancel": False}
-    
-            # 前進: 前に行って, 進んで, mae, forward
-            if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ"]):
-                val = 1.5
-                if any(x in norm_inst for x in ["少し", "ちょっと", "すこし"]):
+                # 「右向いて」「左向いて」「みぎむいて」「ひだりむいて」「みぎいて」「ひだりいて」「右向けて」「右無知恵」（タイポ対応）
+                if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす", "いっ"]):
+                    val = -1.5708 if is_right else 1.5708
+                    if any(x in norm_inst for x in ["少し", "ちょっと", "微", "すこし"]):
+                        val = -0.5236 if is_right else 0.5236
+                    cmd_list.append({"type": "turn", "value": val})
+                    return {"commands": cmd_list, "cancel": False}
+                    
+                # その場旋回, 一回転, 360度
+                if any(x in norm_inst for x in ["旋回", "回転", "senkai", "spin"]):
+                    deg = 360.0
+                    if "右" in norm_inst or "時計回り" in norm_inst:
+                        deg = -360.0
+                    cmd_list.append({"type": "spin", "value": deg})
+                    return {"commands": cmd_list, "cancel": False}
+        
+                # 3. 前進・後退の判定
+                # 後退: 後ろ下がって, usirosagatte, motto, back
+                last_cmd_was_backward = False
+                last_cmd_was_forward = False
+                with self.lock:
+                    if self.chat_history:
+                        for msg in reversed(self.chat_history):
+                            if msg.get("role") == "assistant":
+                                try:
+                                    # アシスタントの返答内容からコマンドを推測
+                                    hist_json = json.loads(msg.get("content", "{}"))
+                                    hist_cmds = hist_json.get("commands", [])
+                                    if hist_cmds:
+                                        last_type = hist_cmds[-1].get("type")
+                                        if last_type == "backward":
+                                            last_cmd_was_backward = True
+                                            break
+                                        elif last_type == "forward":
+                                            last_cmd_was_forward = True
+                                            break
+                                except Exception:
+                                    pass
+                
+                # 「もっと」「もうすこし」などの単体指示で直前の動作（前進/後退）を継続する場合
+                if norm_inst in ["motto", "もっと", "もうすこし", "もう少し", "もうちょっと", "さらに", "すこし", "少し", "ちょっと"]:
+                    val = 1.0 if any(x in norm_inst for x in ["すこし", "少し", "ちょっと"]) else 2.0
+                    if last_cmd_was_backward:
+                        cmd_list.append({"type": "backward", "value": max(1.0, val)})
+                        return {"commands": cmd_list, "cancel": False}
+                    elif last_cmd_was_forward:
+                        cmd_list.append({"type": "forward", "value": max(1.0, val)})
+                        return {"commands": cmd_list, "cancel": False}
+        
+                if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって"]):
                     val = 1.0
-                elif any(x in norm_inst for x in ["もっと", "大きく", "たくさん", "さらに"]):
-                    val = 2.5
-                return {"commands": [{"type": "forward", "value": val}], "cancel": False}
+                    if any(x in norm_inst for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
+                        val = 2.0
+                    cmd_list.append({"type": "backward", "value": val})
+                    return {"commands": cmd_list, "cancel": False}
+        
+                # 前進: 前に行って, 進んで, mae, forward
+                if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "いっ", "行っ"]):
+                    val = 1.5
+                    if any(x in norm_inst for x in ["少し", "ちょっと", "すこし"]):
+                        val = 1.0
+                    elif any(x in norm_inst for x in ["もっと", "大きく", "たくさん", "さらに"]):
+                        val = 2.5
+                    cmd_list.append({"type": "forward", "value": val})
+                    return {"commands": cmd_list, "cancel": False}
+            else:
+                # 方向を含まない純粋なスピード指示
+                if speed_val is not None:
+                    return {"commands": cmd_list, "cancel": False}
 
             
         # -------------------------------------------------------------------
