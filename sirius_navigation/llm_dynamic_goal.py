@@ -21,6 +21,11 @@ from nav2_msgs.action import Spin
 from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 
+try:
+    from .dialogue import CHAT_KEYWORDS, DIALOGUE_TEMPLATES
+except ImportError:
+    from dialogue import CHAT_KEYWORDS, DIALOGUE_TEMPLATES
+
 
 class LlmDynamicGoal(Node):
     def __init__(self):
@@ -112,6 +117,51 @@ class LlmDynamicGoal(Node):
         self.input_thread = threading.Thread(target=self.interactive_input_loop, daemon=True)
         self.input_thread.start()
 
+        # HTTPサーバーを別スレッドで開始して外部（Docker等）からの指示を受け付ける
+        self.start_http_instruction_server()
+
+    def start_http_instruction_server(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import json
+        
+        class InstructionHTTPHandler(BaseHTTPRequestHandler):
+            node = self
+            
+            def log_message(self, format, *args):
+                pass # Suppress logs to stdout
+
+            def do_POST(self):
+                if self.path == '/instruction':
+                    try:
+                        content_length = int(self.headers['Content-Length'])
+                        post_data = self.rfile.read(content_length)
+                        data = json.loads(post_data.decode('utf-8'))
+                        instruction = data.get('instruction', '')
+                        if instruction:
+                            self.node.get_logger().info(f'Received HTTP instruction: "{instruction}"')
+                            threading.Thread(target=self.node.process_instruction, args=(instruction,), daemon=True).start()
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'application/json')
+                            self.end_headers()
+                            self.wfile.write(json.dumps({"success": True}).encode('utf-8'))
+                            return
+                    except Exception as e:
+                        self.node.get_logger().error(f"Error handling HTTP instruction: {e}")
+                
+                self.send_response(400)
+                self.end_headers()
+
+        def run_server():
+            server_address = ('', 50060)
+            try:
+                httpd = HTTPServer(server_address, InstructionHTTPHandler)
+                self.get_logger().info("=== Instruction HTTP Server running on port 50060 ===")
+                httpd.serve_forever()
+            except Exception as e:
+                self.get_logger().error(f"Failed to start Instruction HTTP Server: {e}")
+
+        threading.Thread(target=run_server, daemon=True).start()
+
     def odom_callback(self, msg):
         """オドメトリから現在の速度を取得"""
         with self.lock:
@@ -184,9 +234,12 @@ class LlmDynamicGoal(Node):
             
         self.get_logger().info(f"Parsed {len(commands)} commands from instruction.")
         
+        # speed コマンドがあれば、移動開始前に反映されるようにキューの最優先（先頭）に並び替える
+        sorted_commands = [c for c in commands if c.get("type") == "speed"] + [c for c in commands if c.get("type") != "speed"]
+        
         with self.lock:
             # 既存のキューをクリアして新しい指示シーケンスを設定
-            self.command_queue = commands
+            self.command_queue = sorted_commands
             self.executing_command = False
             
         self.execute_next_command()
@@ -212,6 +265,7 @@ class LlmDynamicGoal(Node):
                 speed_factor = float(value)
                 self.set_controller_speed(speed_factor)
                 print(f"⚡ 速度パラメータを変更しました (factor: {speed_factor:.2f})")
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["speed_change"].format(speed=speed_factor))
             except Exception as e:
                 self.get_logger().error(f"Failed to set speed: {e}")
             self.execute_next_command()
@@ -276,6 +330,7 @@ class LlmDynamicGoal(Node):
             # ウェイポイントは最小1.0mから置くように制限
             r = max(value, 1.0)
             theta = 0.0
+            self.send_sirius_speak(DIALOGUE_TEMPLATES["forward_start"].format(distance=r))
             self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "backward":
@@ -284,11 +339,13 @@ class LlmDynamicGoal(Node):
             # ウェイポイントは最小1.0mから置くように制限
             r = max(abs(value), 1.0)
             theta = math.pi
+            self.send_sirius_speak(DIALOGUE_TEMPLATES["backward_start"].format(distance=r))
             self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "turn":
             # 旋回時: Nav2の標準ビヘイビアである /spin アクションを使用し、
             # 地図の干渉やダミーゴール座標の衝突を避け、確実かつ滑らかにその場旋回を実行する
+            self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_start"])
             self.send_spin_goal(value)
             
         elif cmd_type == "spin":
@@ -407,6 +464,18 @@ class LlmDynamicGoal(Node):
         if any(pat in norm_inst for pat in cancel_patterns):
             return {"commands": [], "cancel": True}
             
+        # 1.1 軽い会話（パースバージョン）の高速判定
+        # バッテリー情報の判定
+        if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
+            battery_msg = self.get_sirius_battery_level()
+            self.send_sirius_speak(battery_msg)
+            return {"commands": [], "cancel": False}
+            
+        for kw, reply in CHAT_KEYWORDS.items():
+            if kw in norm_inst:
+                self.send_sirius_speak(reply)
+                return {"commands": [], "cancel": False}
+                
         # 1.5 スピード調整/旋回/前進/後退の判定 (数値指定を含まない標準指示の場合にのみ高速応答)
         has_number = any(char.isdigit() for char in norm_inst) or any(x in norm_inst for x in ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "点", "度", "㍍", "メートル"])
         
@@ -742,6 +811,7 @@ class LlmDynamicGoal(Node):
                 else:
                     with self.lock:
                         self.executing_command = False
+                    self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_success"])
                     print("\n✅ 旋回完了！次の指示をどうぞ。")
                     print("Command > ", end="", flush=True)
                 return
@@ -861,6 +931,7 @@ class LlmDynamicGoal(Node):
                 })
             
             # 安全のためロックの外側でキャンセルを実行
+            self.send_sirius_speak(DIALOGUE_TEMPLATES["stuck"])
             self.cancel_navigation()
             
             print(f"\n⚠️ {stuck_msg.split(']')[-1].strip()} 目標をキャンセルして停止します。")
@@ -875,8 +946,16 @@ class LlmDynamicGoal(Node):
         # Turn アーリーキャンセル: 5Hz timer側で行うため、ここは無効化
         # -------------------------------------------------------------------
         
-        # 閾値判定 (距離0.35m以内 かつ 角度差20度以内)
-        if distance < 0.35 and yaw_diff < math.radians(20.0):
+        # 閾値判定 (距離0.50m以内 かつ 角度差30度以内、もしくは絶対座標指定 goto コマンドで距離0.50m以内の場合)
+        # Nav2の xy_goal_tolerance: 0.50, yaw_goal_tolerance: 0.50(約28.6度) に合わせて緩和
+        is_arrived = False
+        with self.lock:
+            last_type = self.last_active_cmd_type
+        
+        if (distance < 0.50 and yaw_diff < math.radians(30.0)) or (distance < 0.50 and last_type is None):
+            is_arrived = True
+            
+        if is_arrived:
             with self.lock:
                 self.goal_reached_logged = True
                 self.is_stuck = False
@@ -900,6 +979,7 @@ class LlmDynamicGoal(Node):
                 self.execute_next_command()
             else:
                 self.executing_command = False
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["arrival"])
                 print("\n🎉 全ての目標地点に到着しました！次の指示をどうぞ。")
                 print("Command > ", end="", flush=True)
 
@@ -1155,6 +1235,14 @@ class LlmDynamicGoal(Node):
     def spin_goal_result_callback(self, future):
         self.get_logger().info("Spin goal finished execution")
         
+        success = False
+        try:
+            status = future.result().status
+            if status == 4: # STATUS_SUCCEEDED in ROS 2
+                success = True
+        except Exception:
+            pass
+
         # 最終自己位置の取得と表示
         try:
             trans = self.tf_buffer.lookup_transform(
@@ -1183,8 +1271,84 @@ class LlmDynamicGoal(Node):
         if has_more:
             self.execute_next_command()
         else:
+            if success:
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_success"])
+            else:
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_failure"])
             print("\n✅ 旋回完了！次の指示をどうぞ。")
             print("Command > ", end="", flush=True)
+
+    def send_sirius_speak(self, text):
+        """sirius_face_anim2 の gRPC サーバーに音声を送信して喋らせる"""
+        try:
+            import sys
+            venv_packages = "/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages"
+            if venv_packages not in sys.path:
+                sys.path.insert(0, venv_packages)
+            stubs_path = "/home/kotantu-desktop/sirius_face_anim2/scripts/stubs"
+            if stubs_path not in sys.path:
+                sys.path.insert(0, stubs_path)
+            
+            import grpc
+            import face_control_pb2
+            import face_control_pb2_grpc
+            
+            # 発話開始に伴い、思考フラグおよびパース制御（黄色の四隅）のフラグをリセットする
+            try:
+                with grpc.insecure_channel('localhost:50051') as face_channel:
+                    face_stub = face_control_pb2_grpc.FaceServiceStub(face_channel)
+                    face_stub.UpdateParameters(face_control_pb2.ParameterRequest(values={
+                        "isThinking": 0.0,
+                        "isParseControl": 0.0
+                    }), timeout=1.0)
+            except Exception as fe:
+                self.get_logger().warn(f"Could not reset face indicator flags: {fe}")
+
+            # タイムアウト付きでチャネルを作成
+            with grpc.insecure_channel('localhost:50052') as channel:
+                stub = face_control_pb2_grpc.PythonControlServiceStub(channel)
+                req = face_control_pb2.SpeakRequest(text=text)
+                stub.Speak(req, timeout=3.0)
+                self.get_logger().info(f"Sent Speak command: {text}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to send speak to Sirius face anim server: {e}")
+
+    def get_sirius_battery_level(self):
+        """FaceService (port 50051) から現在のバッテリー状況を取得して報告用テキストを作成する"""
+        try:
+            import sys
+            venv_packages = "/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages"
+            if venv_packages not in sys.path:
+                sys.path.insert(0, venv_packages)
+            stubs_path = "/home/kotantu-desktop/sirius_face_anim2/scripts/stubs"
+            if stubs_path not in sys.path:
+                sys.path.insert(0, stubs_path)
+            
+            import grpc
+            import face_control_pb2
+            import face_control_pb2_grpc
+            from google.protobuf import empty_pb2
+            
+            # タイムアウト付きでチャネルを作成
+            with grpc.insecure_channel('localhost:50051') as channel:
+                stub = face_control_pb2_grpc.FaceServiceStub(channel)
+                status = stub.GetStatus(empty_pb2.Empty(), timeout=3.0)
+                level = status.current_parameters.get("batteryLevel", -1.0)
+                charging_val = status.current_parameters.get("batteryCharging", 0.0)
+                
+                charging_str = "未充電"
+                if charging_val == 1.0:
+                    charging_str = "充電中"
+                elif charging_val == 2.0:
+                    charging_str = "放電中（使用中）"
+                
+                if level >= 0.0:
+                    return DIALOGUE_TEMPLATES["battery_report"].format(level=level, charging_str=charging_str)
+                else:
+                    return DIALOGUE_TEMPLATES["battery_error"]
+        except Exception as e:
+            self.get_logger().error(f"Failed to query battery status: {e}")
+            return DIALOGUE_TEMPLATES["battery_fail"]
 
 def main(args=None):
     rclpy.init(args=args)
