@@ -1284,11 +1284,13 @@ class LlmDynamicGoal(Node):
     def send_sirius_speak(self, text):
         """sirius_face_anim2 の gRPC サーバーに音声を送信して喋らせる"""
         try:
+            import os
             import sys
-            venv_packages = "/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages"
+            home_dir = os.path.expanduser("~")
+            venv_packages = os.path.join(home_dir, "sirius_face_anim2/venv/lib/python3.12/site-packages")
             if venv_packages not in sys.path:
                 sys.path.insert(0, venv_packages)
-            stubs_path = "/home/kotantu-desktop/sirius_face_anim2/scripts/stubs"
+            stubs_path = os.path.join(home_dir, "sirius_face_anim2/scripts/stubs")
             if stubs_path not in sys.path:
                 sys.path.insert(0, stubs_path)
             
@@ -1319,11 +1321,13 @@ class LlmDynamicGoal(Node):
     def get_sirius_battery_level(self):
         """FaceService (port 50051) から現在のバッテリー状況を取得して報告用テキストを作成する"""
         try:
+            import os
             import sys
-            venv_packages = "/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages"
+            home_dir = os.path.expanduser("~")
+            venv_packages = os.path.join(home_dir, "sirius_face_anim2/venv/lib/python3.12/site-packages")
             if venv_packages not in sys.path:
                 sys.path.insert(0, venv_packages)
-            stubs_path = "/home/kotantu-desktop/sirius_face_anim2/scripts/stubs"
+            stubs_path = os.path.join(home_dir, "sirius_face_anim2/scripts/stubs")
             if stubs_path not in sys.path:
                 sys.path.insert(0, stubs_path)
             

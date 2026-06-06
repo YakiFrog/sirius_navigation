@@ -38,7 +38,8 @@ graph LR
 
 ホストPCのシステム環境に入っている古い `protobuf` がインポートされて `cannot import name 'runtime_version'` エラーが発生するのを防ぐため、顔アプリ側の仮想環境（`venv`）のパッケージディレクトリを検索パスの先頭に差し込んでいます。
 ```python
-venv_packages = "/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages"
+home_dir = os.path.expanduser("~")
+venv_packages = os.path.join(home_dir, "sirius_face_anim2/venv/lib/python3.12/site-packages")
 sys.path.insert(0, venv_packages)
 ```
 これにより、システムの環境を汚さずに `grpc` 通信を安定して行うことができます。

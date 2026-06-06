@@ -159,10 +159,13 @@ class TargetDetector(Node):
 
     def init_grpc(self):
         import sys
-        if '/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages' not in sys.path:
-            sys.path.insert(0, '/home/kotantu-desktop/sirius_face_anim2/venv/lib/python3.12/site-packages')
-        if '/home/kotantu-desktop/sirius_face_anim2/scripts/stubs' not in sys.path:
-            sys.path.insert(0, '/home/kotantu-desktop/sirius_face_anim2/scripts/stubs')
+        home_dir = os.path.expanduser("~")
+        venv_packages = os.path.join(home_dir, "sirius_face_anim2/venv/lib/python3.12/site-packages")
+        stubs_path = os.path.join(home_dir, "sirius_face_anim2/scripts/stubs")
+        if venv_packages not in sys.path:
+            sys.path.insert(0, venv_packages)
+        if stubs_path not in sys.path:
+            sys.path.insert(0, stubs_path)
         
         # システム側の protobuf が先に読み込まれて衝突するのを防ぐため、キャッシュをクリアする
         for key in list(sys.modules.keys()):

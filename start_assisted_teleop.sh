@@ -16,7 +16,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # ワークスペースのパス
-WS_PATH="/home/kotantu-desktop/sirius_jazzy_ws"
+WS_PATH="$HOME/sirius_jazzy_ws"
 
 # ワークスペースをソース
 echo -e "${YELLOW}ワークスペースをソース中...${NC}"

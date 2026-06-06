@@ -8,7 +8,7 @@ echo ""
 
 # ワークスペースをソース
 echo "1. ワークスペースをソース中..."
-source /home/kotantu-desktop/sirius_jazzy_ws/install/setup.bash
+source $HOME/sirius_jazzy_ws/install/setup.bash
 echo "   ✓ 完了"
 echo ""
 
