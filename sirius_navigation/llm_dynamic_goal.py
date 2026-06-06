@@ -351,6 +351,13 @@ class LlmDynamicGoal(Node):
             base_y = ty
             base_yaw = yaw_robot
         
+        # turn 以外のコマンドが実行される際は、旋回関連の監視パラメータを確実に初期化して誤作動を防ぐ
+        if cmd_type not in ["turn", "spin", "face"]:
+            with self.lock:
+                self.turn_remaining_angle = None
+                self.turn_target_yaw = None
+                self.turn_arrival_triggered = False
+
         if cmd_type == "forward":
             # ウェイポイントは最小0.3mから置くように制限
             r = max(value, 0.3)
