@@ -108,6 +108,13 @@ class LlmDynamicGoal(Node):
         self.chat_history = []
         self.history_max_turns = 10  # 最大5往復分
         
+        # 直前アクションの実行結果パラメータ
+        self.last_action_status = "none"  # "success", "failed_stuck", "failed_cancelled", "none"
+        self.last_action_type = "none"     # "forward", "backward", "turn", "spin", "goto", "none"
+        self.last_target_value = 0.0
+        self.last_final_distance_error = 0.0
+        self.last_final_yaw_error = 0.0
+        
         # 1Hzで自己位置と目標位置の距離を監視するタイマー
         self.goal_monitor_timer = self.create_timer(1.0, self.monitor_goal_distance)
         
@@ -231,9 +238,13 @@ class LlmDynamicGoal(Node):
             return
             
         commands = result.get("commands", [])
+        speak_text = result.get("speak", "")
+        if speak_text:
+            self.send_sirius_speak(speak_text)
+            
         if not commands:
             self.get_logger().warning("No commands generated from LLM.")
-            if not result.get("fast_path", False):
+            if not result.get("fast_path", False) and not speak_text:
                 self.send_sirius_speak(DIALOGUE_TEMPLATES.get("parse_failure", "[sad]失敗したのだ。"))
             return
             
@@ -264,6 +275,13 @@ class LlmDynamicGoal(Node):
             
         cmd_type = cmd.get("type", "forward")
         value = cmd.get("value", 0.0)
+        
+        with self.lock:
+            self.last_action_type = cmd_type
+            if isinstance(value, list):
+                self.last_target_value = value
+            else:
+                self.last_target_value = float(value)
         
         self.get_logger().info(f"Executing next sequence command -> type: {cmd_type}, value: {value}")
         
@@ -458,8 +476,19 @@ class LlmDynamicGoal(Node):
             queue_len = len(self.command_queue)
             executing = self.executing_command
             
+        with self.lock:
+            last_status = self.last_action_status
+            last_type = self.last_action_type
+            last_target = self.last_target_value
+            last_dist_err = self.last_final_distance_error
+            last_yaw_err = self.last_final_yaw_error
+
         if goal_x is None:
-            return "【Robot Current Hardware State Feedback】: Status=Idle. No active navigation goal. Robot is stationary."
+            state_str = (
+                "【Robot Current Hardware State Feedback】: Status=Idle. No active navigation goal. Robot is stationary.\n"
+                f"- Last Action Status: {last_status} (type: {last_type}, target: {last_target}, final distance error: {last_dist_err:.2f}m, final yaw error: {last_yaw_err:.1f}deg)"
+            )
+            return state_str
             
         # 現在位置と目標位置の差分（残差）を計算
         try:
@@ -480,7 +509,8 @@ class LlmDynamicGoal(Node):
             f"- Distance remaining to target: {distance:.2f} meters\n"
             f"- Current velocities: {vel_str}\n"
             f"- Physical obstacles / blockage state: {stuck_str}\n"
-            f"- Actions left in sequence queue: {queue_len} commands"
+            f"- Actions left in sequence queue: {queue_len} commands\n"
+            f"- Last Action Status: {last_status} (type: {last_type}, target: {last_target}, final distance error: {last_dist_err:.2f}m, final yaw error: {last_yaw_err:.1f}deg)"
         )
         return state_str
 
@@ -611,7 +641,7 @@ class LlmDynamicGoal(Node):
         # -------------------------------------------------------------------
         system_prompt = (
             "You are a robotic navigator assistant. Your task is to translate natural language directions "
-            "into a sequence of motion commands for the robot.\n\n"
+            "into a sequence of motion commands for the robot, or to answer user questions about your status, history, or errors.\n\n"
             "CRITICAL: Do not explain your reasoning. Do not output any reasoning steps, thoughts, or chain-of-thought content. "
             "You MUST output raw JSON and ONLY raw JSON directly and immediately. Do not include markdown code block syntax (like ```json).\n"
             "Output format:\n"
@@ -619,7 +649,8 @@ class LlmDynamicGoal(Node):
             "  \"commands\": [\n"
             "    {\"type\": \"forward\"|\"backward\"|\"turn\"|\"spin\"|\"face\"|\"goto\"|\"speed\", \"value\": float | [float, float]}\n"
             "  ],\n"
-            "  \"cancel\": boolean (true if user wants to stop, cancel, halt, or stand by, false otherwise)\n"
+            "  \"cancel\": boolean,\n"
+            "  \"speak\": \"optional string in Japanese (if user asks a question, complaints about action, or asks why a failure/cancellation occurred, use this field to explain why using the physical state parameters)\"\n"
             "}\n\n"
             "【Commands Definition】\n"
             "- \"type\": \"forward\": Move straight forward. \"value\": distance in meters (positive float).\n"
@@ -650,9 +681,12 @@ class LlmDynamicGoal(Node):
             "3. CRITICAL ON CONTEXT DIRECTION: If the user says 'motto' (more) or 'mottosagatte' / 'motto sagatte' after a 'backward' command, "
             "you MUST output a 'backward' command (e.g. value: 1.0). Do not output 'forward' unless they explicitly ask to go forward (e.g. 'mae'/'susunde').\n"
             "4. LOOP UNROLLING: If the user asks to repeat an action sequence (e.g., 'X回繰り返して' / 'repeat X times'), you MUST fully unroll/expand the sequence into individual commands in the JSON list.\n"
-            "5. SHAPES (e.g. Squares/四角/正方形): If the user asks to draw or move in a square of size X (e.g., 'Xmの四角を描いて' / 'square of X meters'), unroll it into 8 commands: forward Xm, turn right (-1.5708), forward Xm, turn right, forward Xm, turn right, forward Xm, turn right.\n\n"
+            "5. SHAPES (e.g. Squares/四角/正方形): If the user asks to draw or move in a square of size X (e.g., 'Xm of square' / 'square of X meters'), unroll it into 8 commands: forward Xm, turn right (-1.5708), forward Xm, turn right, forward Xm, turn right, forward Xm, turn right.\n"
+            "6. QUESTION HANDLING & REASON ENQUIRY: If the user asks 'なんで失敗したの？' (why did you fail/stop?) or similar, check the `Last Action Status` and `blockage state` from context. Explain the status in natural, character-fitting Japanese (friendly, ending with 'なのだ'), and assign it to the `\"speak\"` field. Do not generate navigation commands in this case.\n\n"
             "【Output Examples】\n"
             "- 'ちょっと前に行って' -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false}\n"
+            "- 'なんで失敗したの？' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]さっきは前進しようとしたんだけど、目の前に障害物があったりして、安全のために止まっちゃったのだ。\"}\n"
+            "- 'なんで止まった？' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]進もうとしたんだけど行く手が遮られちゃって、これ以上進めなかったのだ。\"}\n"
             "- '1.5m後退して' -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.5}], \"cancel\": false}\n"
             "- '右向いて' -> {\"commands\": [{\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
             "- 'usirosagatte' -> {\"commands\": [{\"type\": \"backward\", \"value\": 0.5}], \"cancel\": false}\n"
@@ -671,7 +705,7 @@ class LlmDynamicGoal(Node):
             "- '3m前に行って左に曲がって' -> {\"commands\": [{\"type\": \"forward\", \"value\": 3.0}, {\"type\": \"turn\", \"value\": 1.5708}], \"cancel\": false}\n"
             "- '旋回しながら前進して' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}, {\"type\": \"forward\", \"value\": 1.0}], \"cancel\": false}\n"
             "- 'ゆっくり3mすすんで' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.20}, {\"type\": \"forward\", \"value\": 3.0}], \"cancel\": false}\n"
-            "- '0.50m/sの速度で3m前進んで' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.50}, {\"type\": \"forward\", \"value\": 3.0}], \"cancel\": false}\n"
+            "- '0.50m/s of speed and go forward 3m' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.50}, {\"type\": \"forward\", \"value\": 3.0}], \"cancel\": false}\n"
             "- 'スピード上げて' -> {\"commands\": [{\"type\": \"speed\", \"value\": 1.00}], \"cancel\": false}\n"
             "- '速度を普通に戻して' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.90}], \"cancel\": false}\n"
             "- '4mの四角を描いて' -> {\"commands\": [{\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
@@ -831,6 +865,9 @@ class LlmDynamicGoal(Node):
                     self.distance_remaining_history = []
                     self.yaw_diff_history = []
                     self.turn_arrival_triggered = True
+                    self.last_action_status = "success"
+                    self.last_final_yaw_error = float(math.degrees(new_remaining))
+                    self.last_final_distance_error = 0.0
                 
                 # Nav2のゴールをキャンセルして停止 (これより spin_goal_result_callback が呼ばれる)
                 self.cancel_navigation(clear_queue=False)
@@ -945,6 +982,9 @@ class LlmDynamicGoal(Node):
             # 会話履歴にスタック状態の物理フィードバックをシステムログとして挿入し、LLMに教える
             with self.lock:
                 self.is_stuck = True
+                self.last_action_status = "failed_stuck"
+                self.last_final_distance_error = float(distance)
+                self.last_final_yaw_error = float(math.degrees(yaw_diff))
                 self.chat_history.append({
                     "role": "assistant", 
                     "content": "【System Feedback】Robot detected physical blockage/stuck state. Navigation has been automatically cancelled."
@@ -982,6 +1022,9 @@ class LlmDynamicGoal(Node):
                 self.distance_remaining_history = []
                 self.yaw_diff_history = []
                 self.turn_target_yaw = None
+                self.last_action_status = "success"
+                self.last_final_distance_error = float(distance)
+                self.last_final_yaw_error = float(math.degrees(yaw_diff))
             
             self.get_logger().info("🏆 [Goal Reached] Robot has arrived at the target waypoint.")
             self.get_logger().info(
@@ -1198,6 +1241,8 @@ class LlmDynamicGoal(Node):
             self.is_stuck = False
             self.turn_target_yaw = None
             self.turn_arrival_triggered = False
+            if self.last_action_status not in ["success", "failed_stuck"]:
+                self.last_action_status = "failed_cancelled"
             
             if clear_queue:
                 self.command_queue = []
