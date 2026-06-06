@@ -83,12 +83,14 @@ class LlmDynamicGoal(Node):
         
         self.command_queue = []
         self.executing_command = False
+        self.current_xy_tolerance = 0.50
         
         # Turn (旋回) コマンドのアーリーキャンセル用ターゲットyaw
         # None以外のとき: 現在実行中コマンドはturnで、このyaw角に近づいたらキャンセル
         self.turn_target_yaw = None
         self.turn_remaining_angle = None
         self.last_yaw_robot = 0.0
+        self.turn_arrival_triggered = False
         self.turn_goal_distance = 0.7  # xy_goal_tolerance (0.5m) より大きい値として 0.7m に設定（壁との衝突を防ぐ）
         self.turn_start_x = 0.0
         self.turn_start_y = 0.0
@@ -252,7 +254,9 @@ class LlmDynamicGoal(Node):
         with self.lock:
             if not self.command_queue:
                 self.executing_command = False
+                self.current_xy_tolerance = 0.50
                 self.get_logger().info("All commands in sequence finished.")
+                self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
                 return
             cmd = self.command_queue.pop(0)
             self.executing_command = True
@@ -330,24 +334,37 @@ class LlmDynamicGoal(Node):
             base_yaw = yaw_robot
         
         if cmd_type == "forward":
-            # ウェイポイントは最小1.0mから置くように制限
-            r = max(value, 1.0)
+            # ウェイポイントは最小0.3mから置くように制限
+            r = max(value, 0.3)
             theta = 0.0
+            tolerance = max(r * 0.3, 0.15) if r < 1.0 else 0.50
+            with self.lock:
+                self.current_xy_tolerance = tolerance
+            self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
             self.send_sirius_speak(DIALOGUE_TEMPLATES["forward_start"].format(distance=r))
             self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "backward":
             # 後退時: keyboard_dynamic_goal.py に合わせ、theta=180度(pi)として後方に移動させる
             # これによりNav2が前方向のセンサを使って安全に目的地（後方）へアプローチできるようになる
-            # ウェイポイントは最小1.0mから置くように制限
-            r = max(abs(value), 1.0)
+            # ウェイポイントは最小0.3mから置くように制限
+            r = max(abs(value), 0.3)
             theta = math.pi
+            tolerance = max(r * 0.3, 0.15) if r < 1.0 else 0.50
+            with self.lock:
+                self.current_xy_tolerance = tolerance
+            self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
             self.send_sirius_speak(DIALOGUE_TEMPLATES["backward_start"].format(distance=r))
             self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "turn":
             # 旋回時: Nav2の標準ビヘイビアである /spin アクションを使用し、
             # 地図の干渉やダミーゴール座標の衝突を避け、確実かつ滑らかにその場旋回を実行する
+            with self.lock:
+                self.turn_remaining_angle = value
+                self.last_yaw_robot = yaw_robot
+                self.turn_target_yaw = None
+                self.turn_arrival_triggered = False
             self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_start"])
             self.send_spin_goal(value)
             
@@ -407,6 +424,13 @@ class LlmDynamicGoal(Node):
                 dx = target_x - tx
                 dy = target_y - ty
                 target_yaw = math.atan2(dy, dx)
+                
+                # 直接距離を計算
+                r = math.sqrt(dx**2 + dy**2)
+                tolerance = max(r * 0.3, 0.15) if r < 1.0 else 0.50
+                with self.lock:
+                    self.current_xy_tolerance = tolerance
+                self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
                 
                 # 指示受け取り報告
                 self.send_sirius_speak(DIALOGUE_TEMPLATES["goto_start"].format(x=target_x, y=target_y))
@@ -599,10 +623,10 @@ class LlmDynamicGoal(Node):
             "}\n\n"
             "【Commands Definition】\n"
             "- \"type\": \"forward\": Move straight forward. \"value\": distance in meters (positive float).\n"
-            "  Default distance if unspecified: 1.5m. 'ちょっと'/'少し': 1.0m. '大きく'/'たくさん': 2.5m. Minimum distance is 1.0m.\n"
+            "  Default distance if unspecified: 1.5m. 'ちょっと'/'少し': 0.5m. '大きく'/'たくさん': 2.5m. Minimum distance is 0.3m.\n"
             "  Also maps to Romaji Japanese: 'mae'/'susunde'/'maeitte'/'susume'.\n"
             "- \"type\": \"backward\": Move straight backward. \"value\": distance in meters (positive float).\n"
-            "  Default distance if unspecified: 1.0m. Minimum distance is 1.0m.\n"
+            "  Default distance if unspecified: 1.0m. Minimum distance is 0.3m.\n"
             "  Also maps to Romaji Japanese: 'back'/'sagatte'/'usirosagatte'/'ushiro sagatte'.\n"
             "- \"type\": \"turn\": Rotate to face a relative angle. \"value\": angle in radians. "
             "POSITIVE=left(CCW), NEGATIVE=right(CW). Use for '右向いて'(-1.5708), '左向いて'(+1.5708), '少し右'(-0.5236).\n"
@@ -791,10 +815,10 @@ class LlmDynamicGoal(Node):
             # 残りの回転角度を更新
             new_remaining = remaining - delta_yaw
             
-            # 1. 角度誤差が 8.0度 (約0.14rad) 以下になったら到達完了
-            if abs(new_remaining) < math.radians(8.0):
+            # 1. 角度誤差が 3.0度 (約0.052rad) 以下になったら到達完了
+            if abs(new_remaining) < math.radians(3.0):
                 self.get_logger().info(
-                    f"✅ [Turn Arrived] Heading aligned: final diff={math.degrees(new_remaining):.1f}deg < 8.0deg. Stopping."
+                    f"✅ [Turn Arrived] Heading aligned: final diff={math.degrees(new_remaining):.1f}deg < 3.0deg. Stopping."
                 )
                 self.get_logger().info(
                     f"📍 [End Pose] X={trans.transform.translation.x:.3f}, Y={trans.transform.translation.y:.3f}, Yaw={math.degrees(yaw_robot):+.1f}deg"
@@ -806,20 +830,10 @@ class LlmDynamicGoal(Node):
                     self.is_stuck = False
                     self.distance_remaining_history = []
                     self.yaw_diff_history = []
-                    has_more = bool(self.command_queue)
+                    self.turn_arrival_triggered = True
                 
-                # Nav2のゴールをキャンセルして停止
+                # Nav2のゴールをキャンセルして停止 (これより spin_goal_result_callback が呼ばれる)
                 self.cancel_navigation(clear_queue=False)
-                
-                if has_more:
-                    print("↪️  旋回完了。次のアクションを開始します。")
-                    self.execute_next_command()
-                else:
-                    with self.lock:
-                        self.executing_command = False
-                    self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_success"])
-                    print("\n✅ 旋回完了！次の指示をどうぞ。")
-                    print("Command > ", end="", flush=True)
                 return
             
             # 内部の残り角度変数を最新に更新
@@ -952,13 +966,13 @@ class LlmDynamicGoal(Node):
         # Turn アーリーキャンセル: 5Hz timer側で行うため、ここは無効化
         # -------------------------------------------------------------------
         
-        # 閾値判定 (距離0.50m以内 かつ 角度差30度以内、もしくは絶対座標指定 goto コマンドで距離0.50m以内の場合)
-        # Nav2の xy_goal_tolerance: 0.50, yaw_goal_tolerance: 0.50(約28.6度) に合わせて緩和
+        # 閾値判定 (距離 tolerance 以内 かつ 角度差30度以内、もしくは絶対座標指定 goto コマンドで距離 tolerance 以内の場合)
         is_arrived = False
         with self.lock:
             last_type = self.last_active_cmd_type
+            xy_tolerance = self.current_xy_tolerance
         
-        if (distance < 0.50 and yaw_diff < math.radians(30.0)) or (distance < 0.50 and last_type is None):
+        if (distance < xy_tolerance and yaw_diff < math.radians(30.0)) or (distance < xy_tolerance and last_type is None):
             is_arrived = True
             
         if is_arrived:
@@ -984,7 +998,10 @@ class LlmDynamicGoal(Node):
                 print("🎉 ウェイポイント到達。次のアクションを開始します。")
                 self.execute_next_command()
             else:
-                self.executing_command = False
+                with self.lock:
+                    self.executing_command = False
+                    self.current_xy_tolerance = 0.50
+                self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
                 self.send_sirius_speak(DIALOGUE_TEMPLATES["arrival"])
                 print("\n🎉 全ての目標地点に到着しました！次の指示をどうぞ。")
                 print("Command > ", end="", flush=True)
@@ -1180,11 +1197,16 @@ class LlmDynamicGoal(Node):
             self.yaw_diff_history = []
             self.is_stuck = False
             self.turn_target_yaw = None
+            self.turn_arrival_triggered = False
             
             if clear_queue:
                 self.command_queue = []
                 self.executing_command = False
+                self.current_xy_tolerance = 0.50
             
+        if clear_queue:
+            self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
+
         if not self.cancel_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().warning("Navigation cancel service not available.")
             return
@@ -1249,6 +1271,11 @@ class LlmDynamicGoal(Node):
         except Exception:
             pass
 
+        with self.lock:
+            if self.turn_arrival_triggered:
+                success = True
+                self.turn_arrival_triggered = False
+
         # 最終自己位置の取得と表示
         try:
             trans = self.tf_buffer.lookup_transform(
@@ -1272,11 +1299,13 @@ class LlmDynamicGoal(Node):
         with self.lock:
             self.spin_goal_handle = None
             self.executing_command = False
+            self.current_xy_tolerance = 0.50
             has_more = bool(self.command_queue)
             
         if has_more:
             self.execute_next_command()
         else:
+            self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
             if success:
                 self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_success"])
             else:
