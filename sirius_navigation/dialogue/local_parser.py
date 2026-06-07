@@ -15,6 +15,90 @@ except ImportError:
     except ImportError:
         CHAT_KEYWORDS = {}
 
+EXPRESSION_KEYWORDS = [
+    ("ウィンク", "wink"),
+    ("ウインク", "wink"),
+    ("wink", "wink"),
+    ("笑顔", "happy"),
+    ("にこにこ", "happy"),
+    ("ニコニコ", "happy"),
+    ("怒", "angry"),
+    ("おこ", "angry"),
+    ("悲", "sad"),
+    ("泣", "sad"),
+    ("ぴえん", "pien"),
+    ("ピエン", "pien"),
+    ("驚", "surprised"),
+    ("びっくり", "surprised"),
+    ("寝", "sleeping"),
+    ("目をつぶ", "sleeping"),
+    ("おやすみ", "sleeping"),
+    ("元に戻", "normal"),
+    ("通常に戻", "normal"),
+    ("普通にして", "normal"),
+    ("リセット", "normal"),
+]
+
+
+def extract_expression_commands(part_norm):
+    commands = []
+    seen = set()
+    candidates = []
+    for kw, exp in EXPRESSION_KEYWORDS:
+        idx = part_norm.find(kw)
+        if idx != -1 and exp not in seen:
+            candidates.append((idx, kw, exp))
+            seen.add(exp)
+    for _, _, exp in sorted(candidates, key=lambda x: x[0]):
+        commands.append({"type": "expression", "value": exp})
+    return commands
+
+
+def extract_effect_commands(part_norm):
+    commands = []
+    seen = set()
+    for kw, param_name, amount in [
+        ("頬を赤らめ", "blushAmount", 1.0),
+        ("頬を赤く", "blushAmount", 1.0),
+        ("赤らめ", "blushAmount", 1.0),
+        ("赤く", "blushAmount", 1.0),
+        ("キラキラ", "sparkleAmount", 1.0),
+        ("目をキラキラ", "sparkleAmount", 1.0),
+        ("目がキラキラ", "sparkleAmount", 1.0),
+        ("キラッ", "sparkleAmount", 1.0),
+    ]:
+        if kw in part_norm and param_name not in seen:
+            commands.append({"type": "parameter", "value": {"name": param_name, "amount": amount}})
+            seen.add(param_name)
+    return commands
+
+
+def extract_face_commands(part_norm):
+    candidates = []
+    seen = set()
+    for kw, exp in EXPRESSION_KEYWORDS:
+        idx = part_norm.find(kw)
+        key = ("expression", exp)
+        if idx != -1 and key not in seen:
+            candidates.append((idx, {"type": "expression", "value": exp}))
+            seen.add(key)
+    for kw, param_name, amount in [
+        ("頬を赤らめ", "blushAmount", 1.0),
+        ("頬を赤く", "blushAmount", 1.0),
+        ("赤らめ", "blushAmount", 1.0),
+        ("赤く", "blushAmount", 1.0),
+        ("目をキラキラ", "sparkleAmount", 1.0),
+        ("目がキラキラ", "sparkleAmount", 1.0),
+        ("キラキラ", "sparkleAmount", 1.0),
+        ("キラッ", "sparkleAmount", 1.0),
+    ]:
+        idx = part_norm.find(kw)
+        key = ("parameter", param_name)
+        if idx != -1 and key not in seen:
+            candidates.append((idx, {"type": "parameter", "value": {"name": param_name, "amount": amount}}))
+            seen.add(key)
+    return [cmd for _, cmd in sorted(candidates, key=lambda x: x[0])]
+
 # テンプレート群
 DIALOGUE_TEMPLATES = {
     "arrival": "[happy]目的地に到着したのだ！",
@@ -162,18 +246,10 @@ def parse_no_number_part(part_raw):
             return {"type": "face", "value": angle}
 
     # 2. Expression control rules
-    expression_map = {
-        "笑": "happy", "喜": "happy", "笑顔": "happy", "にこにこ": "happy", "ニコニコ": "happy",
-        "怒": "angry", "おこ": "angry",
-        "悲": "sad", "泣": "sad", "ぴえん": "pien", "ピエン": "pien",
-        "驚": "surprised", "びっくり": "surprised",
-        "ウィンク": "wink", "ウインク": "wink",
-        "寝": "sleeping", "目をつぶ": "sleeping", "おやすみ": "sleeping",
-        "元に戻": "normal", "通常に戻": "normal", "普通にして": "normal", "リセット": "normal"
-    }
-    for kw, exp in expression_map.items():
-        if kw in part_norm and ("顔" in part_norm or "表情" in part_norm or "しよ" in part_norm or "して" in part_norm or "むいて" in part_norm or "になって" in part_norm or "戻" in part_norm or "通常" in part_norm or "普通" in part_norm):
-            return {"type": "expression", "value": exp}
+    if any(x in part_norm for x in ["顔", "表情", "しよ", "して", "むいて", "になって", "戻", "通常", "普通", "目", "頬", "キラキラ", "ウインク", "ウィンク", "wink"]):
+        face_cmds = extract_face_commands(part_norm)
+        if face_cmds:
+            return face_cmds[0] if len(face_cmds) == 1 else {"type": "face_sequence", "value": face_cmds}
 
     is_right = any(pat in part_norm for pat in ["右", "migi", "みぎ", "みぎむ"])
     is_left = any(pat in part_norm for pat in ["左", "hidari", "ひだり", "ひだりむ"])
@@ -233,6 +309,13 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
             battery_msg = battery_callback()
             return {"commands": [], "cancel": False, "fast_path": True, "speak": battery_msg}
         return {"commands": [], "cancel": False, "fast_path": True}
+
+    # 2.5 表情・演出の高速判定
+    face_cmds = extract_face_commands(norm_inst)
+    if face_cmds:
+        cmds = face_cmds
+        speak_msg = "[happy]表情を変えるのだ！" if len(cmds) == 1 else "[happy]表情を順番に変えるのだ！"
+        return {"commands": cmds, "cancel": False, "fast_path": True, "speak": speak_msg}
         
     # 3. 雑談・キャラクター紹介の高速応答
     for kw, reply in CHAT_KEYWORDS.items():
@@ -374,7 +457,12 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
         for part in parts:
             parsed_cmd = parse_any_part(part)
             if parsed_cmd:
-                base_cmds.append(parsed_cmd)
+                if isinstance(parsed_cmd, dict) and parsed_cmd.get("type") in ["effect_sequence", "face_sequence"]:
+                    base_cmds.extend(parsed_cmd.get("value", []))
+                elif isinstance(parsed_cmd, dict) and parsed_cmd.get("type") == "expression_sequence":
+                    base_cmds.extend(parsed_cmd.get("value", []))
+                else:
+                    base_cmds.append(parsed_cmd)
         if base_cmds:
             cmds = base_cmds * times
             return {"commands": cmds, "cancel": False, "speak": f"[happy]指示された動きを{times}回繰り返すのだ！"}
@@ -387,7 +475,12 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
         for part in parts:
             cmd = parse_any_part(part)
             if cmd:
-                parsed_cmds.append(cmd)
+                if isinstance(cmd, dict) and cmd.get("type") in ["effect_sequence", "face_sequence"]:
+                    parsed_cmds.extend(cmd.get("value", []))
+                elif isinstance(cmd, dict) and cmd.get("type") == "expression_sequence":
+                    parsed_cmds.extend(cmd.get("value", []))
+                else:
+                    parsed_cmds.append(cmd)
         if parsed_cmds:
             return {"commands": parsed_cmds, "cancel": False}
 
@@ -410,7 +503,10 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
         
     no_num_cmd = parse_no_number_part(norm_inst)
     if no_num_cmd:
-        cmd_list.append(no_num_cmd)
+        if isinstance(no_num_cmd, dict) and no_num_cmd.get("type") in ["expression_sequence", "face_sequence", "effect_sequence"]:
+            cmd_list.extend(no_num_cmd.get("value", []))
+        else:
+            cmd_list.append(no_num_cmd)
         return {"commands": cmd_list, "cancel": False}
 
     has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい", "後ろ", "うしろ", "ushiro", "裏", "うら"])

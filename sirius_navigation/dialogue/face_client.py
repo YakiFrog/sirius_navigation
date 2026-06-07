@@ -76,13 +76,76 @@ class FaceClient:
                 req = face_control_pb2.ExpressionRequest(state=expression_state)
                 stub.SetExpression(req, timeout=1.0)
                 self.face_server_active = True
+                if expression_state == "normal":
+                    return self.reset_face()
+                return True
+        except Exception as e:
+            self.logger.warning(f"Face SetExpression failed for '{expression_state}': {e}")
+            if expression_state == "wink":
+                return self.set_styles(eye_style="wink", mouth_style="wink")
+            if expression_state == "normal":
+                return self.reset_face()
+            self.face_server_active = False
+            self.last_connect_retry = time.time()
+            return False
+
+    def update_parameters(self, values):
+        """頬の赤みやキラキラなどのパラメータを変更する (gRPC ポート 50051)"""
+        if not self._should_attempt_connection():
+            return False
+
+        try:
+            import grpc
+            import face_control_pb2
+            import face_control_pb2_grpc
+
+            with grpc.insecure_channel('localhost:50051') as channel:
+                stub = face_control_pb2_grpc.FaceServiceStub(channel)
+                req = face_control_pb2.ParameterRequest(values=values)
+                stub.UpdateParameters(req, timeout=1.0)
+                self.face_server_active = True
                 return True
         except Exception as e:
             if self.face_server_active:
-                self.logger.warning(f"Face parameters server offline (gRPC port 50051): {e}")
+                self.logger.warning(f"Face parameters update failed (gRPC port 50051): {e}")
                 self.face_server_active = False
                 self.last_connect_retry = time.time()
             return False
+
+    def set_styles(self, eye_style=None, mouth_style=None):
+        """目・口のスタイルを直接変更する (gRPC ポート 50051)"""
+        if not self._should_attempt_connection():
+            return False
+
+        try:
+            import grpc
+            import face_control_pb2
+            import face_control_pb2_grpc
+
+            with grpc.insecure_channel('localhost:50051') as channel:
+                stub = face_control_pb2_grpc.FaceServiceStub(channel)
+                req = face_control_pb2.StyleRequest()
+                if eye_style is not None:
+                    req.eye_style = eye_style
+                if mouth_style is not None:
+                    req.mouth_style = mouth_style
+                stub.SetStyles(req, timeout=1.0)
+                self.face_server_active = True
+                return True
+        except Exception as e:
+            self.logger.warning(f"Face SetStyles failed: {e}")
+            self.face_server_active = False
+            self.last_connect_retry = time.time()
+            return False
+
+    def reset_face(self):
+        """表情・スタイル・演出パラメータを通常状態へ戻す"""
+        ok = self.set_styles(eye_style="standard", mouth_style="standard")
+        ok = self.update_parameters({
+            "blushAmount": 0.0,
+            "sparkleAmount": 0.0
+        }) and ok
+        return ok
 
     def reset_indicators(self):
         """思考状態(Thinking)などの表示フラグをクリアする (gRPC ポート 50051)"""

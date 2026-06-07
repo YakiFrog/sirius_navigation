@@ -407,6 +407,33 @@ class LlmDynamicGoal(Node):
             self.execute_next_command()
             return
 
+        if cmd_type == "parameter":
+            try:
+                if isinstance(value, dict):
+                    param_name = value.get("name")
+                    param_amount = float(value.get("amount", 1.0))
+                else:
+                    param_name = None
+                    param_amount = 1.0
+
+                if param_name not in ["blushAmount", "sparkleAmount"]:
+                    self.get_logger().warning(f"[Parameter] Unsupported parameter: {param_name}")
+                else:
+                    ok = self.face_client.update_parameters({param_name: param_amount})
+                    if ok:
+                        self.get_logger().info(f"[Parameter] Set {param_name}={param_amount}")
+                        if should_speak:
+                            if param_name == "blushAmount":
+                                self.send_sirius_speak("[happy]照れを足したのだ！")
+                            elif param_name == "sparkleAmount":
+                                self.send_sirius_speak("[happy]キラキラを足したのだ！")
+                    else:
+                        self.get_logger().warning(f"[Parameter] Failed to set {param_name} (face server offline)")
+            except Exception as e:
+                self.get_logger().error(f"[Parameter] Failed to apply effect: {e}")
+            self.execute_next_command()
+            return
+
         # 1. 現在の位置 (TF) を取得 (gotoコマンドや回転計算に必要)
         try:
             trans = self.tf_buffer.lookup_transform(
@@ -763,7 +790,7 @@ class LlmDynamicGoal(Node):
             "Output format:\n"
             "{\n"
             "  \"commands\": [\n"
-            "    {\"type\": \"forward\"|\"backward\"|\"turn\"|\"spin\"|\"face\"|\"goto\"|\"speed\", \"value\": float | [float, float]}\n"
+            "    {\"type\": \"forward\"|\"backward\"|\"turn\"|\"spin\"|\"face\"|\"goto\"|\"speed\"|\"expression\"|\"parameter\", \"value\": float | [float, float] | string | object}\n"
             "  ],\n"
             "  \"cancel\": boolean,\n"
             "  \"speak\": \"optional string in Japanese (if user asks a question, complaints about action, or asks why a failure/cancellation occurred, use this field to explain why using the physical state parameters)\"\n"
@@ -787,6 +814,12 @@ class LlmDynamicGoal(Node):
             "- \"type\": \"goto\": Navigate to absolute map coordinates. \"value\": [x_coord, y_coord] (array of two floats).\n"
             "- \"type\": \"speed\": Change the robot movement speed. \"value\": speed factor or absolute speed in m/s "
             "(mapped to slow [0.20], safe [0.40], normal [0.90], fast [1.00]).\n\n"
+            "- \"type\": \"expression\": Change the robot's facial expression. \"value\": one of "
+            "\"normal\", \"happy\", \"sad\", \"angry\", \"surprised\", \"wink\", \"sleeping\", \"pien\".\n"
+            "- \"type\": \"parameter\": Change face visual parameters. Use "
+            "{\"name\": \"blushAmount\", \"amount\": 0.0-1.0} for blushing cheeks and "
+            "{\"name\": \"sparkleAmount\", \"amount\": 0.0-1.0} for sparkling eyes. "
+            "Use this instead of expression for blush/sparkle.\n"
             "【Conversational Context & Embodied Feedback Rules】\n"
             "You will receive feedback from both the user's conversation AND the robot's physical sensors "
             "(the system message labeled 【Robot Current Hardware State Feedback】).\n"
@@ -837,6 +870,10 @@ class LlmDynamicGoal(Node):
             "- '0.50m/s of speed and go forward 3m' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.50}, {\"type\": \"forward\", \"value\": 3.0}], \"cancel\": false}\n"
             "- 'スピード上げて' -> {\"commands\": [{\"type\": \"speed\", \"value\": 1.00}], \"cancel\": false}\n"
             "- '速度を普通に戻して' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.90}], \"cancel\": false}\n"
+            "- 'ウインクして' -> {\"commands\": [{\"type\": \"expression\", \"value\": \"wink\"}], \"cancel\": false}\n"
+            "- '頬を赤らめて' -> {\"commands\": [{\"type\": \"parameter\", \"value\": {\"name\": \"blushAmount\", \"amount\": 1.0}}], \"cancel\": false}\n"
+            "- '目をキラキラさせて' -> {\"commands\": [{\"type\": \"parameter\", \"value\": {\"name\": \"sparkleAmount\", \"amount\": 1.0}}], \"cancel\": false}\n"
+            "- 'ウインクして、頬を赤らめて、目をキラキラさせて' -> {\"commands\": [{\"type\": \"expression\", \"value\": \"wink\"}, {\"type\": \"parameter\", \"value\": {\"name\": \"blushAmount\", \"amount\": 1.0}}, {\"type\": \"parameter\", \"value\": {\"name\": \"sparkleAmount\", \"amount\": 1.0}}], \"cancel\": false}\n"
             "- '4mの四角を描いて' -> {\"commands\": [{\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
             "- '1m進んで右に曲がるのを4回繰り返して' -> {\"commands\": [{\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
             "- '危ない、止まって！' -> {\"commands\": [], \"cancel\": true}"
