@@ -101,6 +101,7 @@ class LlmDynamicGoal(Node):
         self.command_queue = []
         self.executing_command = False
         self.current_xy_tolerance = 0.50
+        self.suppress_step_speech = False
         
         # Turn (旋回) コマンドのアーリーキャンセル用ターゲットyaw
         # None以外のとき: 現在実行中コマンドはturnで、このyaw角に近づいたらキャンセル
@@ -305,6 +306,19 @@ class LlmDynamicGoal(Node):
 
         self.get_logger().info(f"Parsed {len(commands)} commands from instruction.")
         
+        # もし速度変更コマンドのみであれば、既存の移動キューをクリアせず、その場で速度変更を適用する
+        only_speed = all(c.get("type") == "speed" for c in commands)
+        if only_speed:
+            for c in commands:
+                try:
+                    speed_factor = float(c.get("value", 0.9))
+                    self.set_controller_speed(speed_factor)
+                    print(f"⚡ 走行中に速度パラメータを変更しました (factor: {speed_factor:.2f})")
+                    self.send_sirius_speak(DIALOGUE_TEMPLATES["speed_change"].format(speed=speed_factor))
+                except Exception as e:
+                    self.get_logger().error(f"Failed to set speed: {e}")
+            return
+
         # speed コマンドがあれば、移動開始前に反映されるようにキューの最優先（先頭）に並び替える
         sorted_commands = [c for c in commands if c.get("type") == "speed"] + [c for c in commands if c.get("type") != "speed"]
         
@@ -321,12 +335,17 @@ class LlmDynamicGoal(Node):
             if not self.command_queue:
                 self.executing_command = False
                 self.current_xy_tolerance = 0.50
+                self.suppress_step_speech = False
                 self.get_logger().info("All commands in sequence finished.")
                 self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
                 return
             cmd = self.command_queue.pop(0)
             self.executing_command = True
             self.command_start_time = self.get_clock().now()
+            
+            should_speak = not self.suppress_step_speech
+            if self.command_queue:
+                self.suppress_step_speech = True
             
         cmd_type = cmd.get("type", "forward")
         value = cmd.get("value", 0.0)
@@ -345,7 +364,8 @@ class LlmDynamicGoal(Node):
                 speed_factor = float(value)
                 self.set_controller_speed(speed_factor)
                 print(f"⚡ 速度パラメータを変更しました (factor: {speed_factor:.2f})")
-                self.send_sirius_speak(DIALOGUE_TEMPLATES["speed_change"].format(speed=speed_factor))
+                if should_speak:
+                    self.send_sirius_speak(DIALOGUE_TEMPLATES["speed_change"].format(speed=speed_factor))
             except Exception as e:
                 self.get_logger().error(f"Failed to set speed: {e}")
             self.execute_next_command()
@@ -425,7 +445,8 @@ class LlmDynamicGoal(Node):
             with self.lock:
                 self.current_xy_tolerance = tolerance
             self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
-            self.send_sirius_speak(DIALOGUE_TEMPLATES["forward_start"].format(distance=r))
+            if should_speak:
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["forward_start"].format(distance=r))
             self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "backward":
@@ -438,7 +459,8 @@ class LlmDynamicGoal(Node):
             with self.lock:
                 self.current_xy_tolerance = tolerance
             self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
-            self.send_sirius_speak(DIALOGUE_TEMPLATES["backward_start"].format(distance=r))
+            if should_speak:
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["backward_start"].format(distance=r))
             self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "turn":
@@ -449,7 +471,16 @@ class LlmDynamicGoal(Node):
                 self.last_yaw_robot = yaw_robot
                 self.turn_target_yaw = None
                 self.turn_arrival_triggered = False
-            self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_start"])
+            
+            if should_speak:
+                deg_val = round(math.degrees(abs(value)))
+                if abs(deg_val - 180) < 15:
+                    turn_msg = "[wink]後ろを向くのだ！"
+                elif abs(deg_val - 90) < 15:
+                    turn_msg = f"[wink]{'右' if value < 0 else '左'}に90度回るのだ！"
+                else:
+                    turn_msg = f"[wink]{'右' if value < 0 else '左'}を向くのだ！"
+                self.send_sirius_speak(turn_msg)
             self.send_spin_goal(value)
             
         elif cmd_type == "spin":
@@ -614,157 +645,432 @@ class LlmDynamicGoal(Node):
 
     def query_lm_studio(self, instruction):
         """LM StudioのOpenAI互換APIを呼び出し、会話履歴と現在の物理状況（状態フィードバック）を含めて指示を変換する"""
-        
+        import re
         norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
         
-        # 0. ユーザーの是正・訂正キーワードの検出 (この場合はルールベースをスキップしてLLMに判断を委ねる)
-        # 「〜のに」「〜すぎ」「反対」「戻って」「じゃなくて」「違う」「逆」などの是正パターンを広くカバー
-        correction_keywords = [
-            "違う", "ちがう", "違って", "ちがって", "間違", "まちが",
-            "そうじゃなく", "そうじゃない", "ではなく", "じゃない",
-            "逆", "ぎゃく", "反対", "はんたい",
-            "行き過ぎ", "いきすぎ", "回りすぎ", "まわりすぎ", "進みすぎ", "すすみすぎ",
-            "下がりすぎ", "さがりすぎ", "動きすぎ", "うごきすぎ", "すぎだ", "すぎよ",
-            "足りない", "たりない", "不足", "ふそく",
-            "戻って", "もどって", "やり直し", "やりなおし",
-            "のに", # 例：「〜って言ったのに」「〜なのに」
-            "ちぐはぐ", "おかしい", "変だな", "へんだな"
-        ]
-        is_recalculation = any(kw in norm_inst for kw in correction_keywords)
-        
-        if is_recalculation:
-            print("\033[93m🔄 [LLM Recalculation] User requested correction/adjustment. LLM is recalculating next move based on history...\033[0m")
-            self.get_logger().info("🔄 [LLM Recalculation] User requested correction/adjustment. Bypassing rule-based quick return.")
-
-        # Janomeを使用した高精度な形態素解析（利用可能な場合）
-        has_speak_verb = False
-        if self.tokenizer:
-            try:
-                tokens = list(self.tokenizer.tokenize(instruction))
-                for t in tokens:
-                    base = t.base_form
-                    # 「言う」「話す」「喋る」などの発話動詞を検出
-                    if base in ["言う", "話す", "喋る", "しゃべる", "歌う", "ささやく", "伝える", "応える", "答える"]:
-                        has_speak_verb = True
-            except Exception as e:
-                self.get_logger().error(f"Janome tokenization failed: {e}")
-
-        # 1. 停止・キャンセルの判定 (是正時はキャンセル判定はスキップ)
-        if not is_recalculation:
-            cancel_patterns = ["止ま", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
-            if any(pat in norm_inst for pat in cancel_patterns):
-                return {"commands": [], "cancel": True}
+        def normalize_kanji_numbers(s):
+            s = s.replace("点", ".")
+            comp_map = {
+                "二十": "2", "三十": "3", "四十": "4", "五十": "5", "六十": "6", "七十": "7", "八十": "8", "九十": "9"
+            }
+            for k, v in comp_map.items():
+                s = s.replace(k + "〇", v + "0")
+                s = s.replace(k + "一", v + "1")
+                s = s.replace(k + "二", v + "2")
+                s = s.replace(k + "三", v + "3")
+                s = s.replace(k + "四", v + "4")
+                s = s.replace(k + "五", v + "5")
+                s = s.replace(k + "六", v + "6")
+                s = s.replace(k + "七", v + "7")
+                s = s.replace(k + "八", v + "8")
+                s = s.replace(k + "九", v + "9")
+                s = s.replace(k, v + "0")
             
-            # 1.1 軽い会話（パースバージョン）の高速判定
-            # バッテリー情報の判定
-            if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
-                battery_msg = self.get_sirius_battery_level()
-                self.send_sirius_speak(battery_msg)
+            teens_map = {
+                "十一": "11", "十二": "12", "十三": "13", "十四": "14", "十五": "15",
+                "十六": "16", "十七": "17", "十八": "18", "十九": "19", "十": "10"
+            }
+            for k, v in teens_map.items():
+                s = s.replace(k, v)
+                
+            singles = {
+                "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+                "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"
+            }
+            for k, v in singles.items():
+                s = s.replace(k, v)
+            return s
+
+        def parse_part(part_raw):
+            part_norm = normalize_kanji_numbers(part_raw.strip().lower())
+            
+            # 1. Goto coordinates
+            coord_match = re.search(r"(?:goto|go\s*to|座標指定|座標|目標座標)?\s*\(?\s*(-?\d+(?:\.\d+)?)\s*[,，\s]\s*(-?\d+(?:\.\d+)?)\s*\)?", part_norm)
+            if coord_match and ("座標" in part_norm or "goto" in part_norm or "," in part_norm):
+                try:
+                    x = float(coord_match.group(1))
+                    y = float(coord_match.group(2))
+                    return {"type": "goto", "value": [x, y]}
+                except ValueError:
+                    pass
+
+            # 2. Speed
+            speed_match = re.search(r"(?:速度|スピード|speed)\s*(\d+(?:\.\d+)?)", part_norm)
+            if speed_match:
+                return {"type": "speed", "value": float(speed_match.group(1))}
+            speed_unit_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:m/s|の速度)", part_norm)
+            if speed_unit_match:
+                return {"type": "speed", "value": float(speed_unit_match.group(1))}
+
+            # 3. Compass face directions
+            face_map = {
+                "北": 90.0, "kita": 90.0,
+                "東": 0.0, "higashi": 0.0,
+                "南": -90.0, "minami": -90.0,
+                "西": 180.0, "nishi": 180.0
+            }
+            for d_name, angle in face_map.items():
+                if d_name in part_norm and ("向" in part_norm or "向き" in part_norm or "face" in part_norm):
+                    return {"type": "face", "value": angle}
+
+            # 4. Turn/Spin with numbers
+            angle_match = re.search(r"(\d+(?:\.\d+)?)\s*(度|deg|°|rad|ラジアン|回転|旋回)", part_norm)
+            if not angle_match:
+                angle_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:に)?\s*(右|左|migi|hidari|旋回|回転|時計回り|反時計回り)", part_norm)
+                
+            if angle_match:
+                val_str = angle_match.group(1)
+                val = float(val_str)
+                
+                is_right = any(x in part_norm for x in ["右", "migi", "時計回り", "cw"])
+                is_left = any(x in part_norm for x in ["左", "hidari", "反時計回り", "ccw"])
+                direction_sign = -1.0 if is_right else 1.0
+                
+                is_spin = any(x in part_norm for x in ["旋回", "回転", "spin"])
+                
+                if "rad" in part_norm or "ラジアン" in part_norm:
+                    rad_val = val * direction_sign
+                    if is_spin:
+                        return {"type": "spin", "value": math.degrees(rad_val)}
+                    else:
+                        return {"type": "turn", "value": rad_val}
+                else:
+                    unit_str = angle_match.group(2) if len(angle_match.groups()) > 1 else ""
+                    if unit_str in ["回転", "旋回"]:
+                        deg_val = val * 360.0 * direction_sign
+                        return {"type": "spin", "value": deg_val}
+                    
+                    deg_val = val * direction_sign
+                    if is_spin:
+                        return {"type": "spin", "value": deg_val}
+                    else:
+                        return {"type": "turn", "value": math.radians(deg_val)}
+
+            # 5. Forward/Backward with numbers
+            dist_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:m|メートル|cm|センチ)?", part_norm)
+            if dist_match:
+                val = float(dist_match.group(1))
+                if "cm" in part_norm or "センチ" in part_norm:
+                    val = val / 100.0
+                    
+                is_backward = any(x in part_norm for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro", "backward"])
+                is_forward = any(x in part_norm for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"])
+                
+                if is_backward:
+                    return {"type": "backward", "value": val}
+                elif is_forward:
+                    return {"type": "forward", "value": val}
+            return None
+
+        def parse_no_number_part(part_raw):
+            part_norm = part_raw.strip().lower()
+            is_right = any(pat in part_norm for pat in ["右", "migi", "みぎ", "みぎむ"])
+            is_left = any(pat in part_norm for pat in ["左", "hidari", "ひだり", "ひだりむ"])
+            is_back = any(pat in part_norm for pat in ["後ろ", "うしろ", "ushiro", "裏", "うら"])
+            
+            if (is_right or is_left or is_back) and not any(x in part_norm for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす"]):
+                if is_back:
+                    val = 3.14159
+                else:
+                    val = -1.5708 if is_right else 1.5708
+                    if any(x in part_norm for x in ["少し", "ちょっと", "微", "すこし"]):
+                        val = -0.5236 if is_right else 0.5236
+                return {"type": "turn", "value": val}
+                
+            if any(x in part_norm for x in ["旋回", "回転", "senkai", "spin"]):
+                deg = 360.0
+                if "右" in part_norm or "時計回り" in part_norm:
+                    deg = -360.0
+                return {"type": "spin", "value": deg}
+
+            if any(x in part_norm for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro"]):
+                val = 1.0
+                if any(x in part_norm for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
+                    val = 2.0
+                return {"type": "backward", "value": val}
+
+            if any(x in part_norm for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"]):
+                val = 1.5
+                if any(x in part_norm for x in ["少し", "ちょっと", "すこし"]):
+                    val = 1.0
+                elif any(x in part_norm for x in ["もっと", "大きく", "たくさん", "さらに"]):
+                    val = 2.5
+                return {"type": "forward", "value": val}
+            return None
+
+        def parse_any_part(part_raw):
+            cmd = parse_part(part_raw)
+            if cmd is None:
+                cmd = parse_no_number_part(part_raw)
+            return cmd
+
+        # 1. 停止・キャンセルの判定
+        cancel_patterns = ["止ま", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
+        if any(pat in norm_inst for pat in cancel_patterns):
+            return {"commands": [], "cancel": True}
+        
+        # 2. バッテリー情報の判定
+        if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
+            battery_msg = self.get_sirius_battery_level()
+            self.send_sirius_speak(battery_msg)
+            return {"commands": [], "cancel": False, "fast_path": True}
+            
+        # 3. 軽い会話（パースバージョン）の高速判定
+        for kw, reply in CHAT_KEYWORDS.items():
+            if kw in norm_inst:
+                self.send_sirius_speak(reply)
                 return {"commands": [], "cancel": False, "fast_path": True}
-                
-            for kw, reply in CHAT_KEYWORDS.items():
-                if kw in norm_inst:
-                    self.send_sirius_speak(reply)
-                    return {"commands": [], "cancel": False, "fast_path": True}
-                
-        # 1.5 スピード調整/旋回/前進/後退の判定 (数値指定を含まない標準指示の場合にのみ高速応答。是正時はスキップ)
-        has_number = any(char.isdigit() for char in norm_inst) or any(x in norm_inst for x in ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "点", "度", "㍍", "メートル"])
-        
-        if not has_number and not is_recalculation and not has_speak_verb:
-            slow_patterns = ["ゆっくり", "遅く", "おそく", "おそい", "遅い", "スピード下げ", "スピード落と", "速度下げ", "yukkuri", "slow", "下げて", "スピードおと"]
-            normal_patterns = ["ふつう", "普通", "通常", "normal"]
-            fast_patterns = ["早く", "急いで", "スピード上げ", "速度上げ", "fast", "speedup", "上げて"]
-            
-            # スピード変更の抽出
-            speed_val = None
-            if any(pat in norm_inst for pat in slow_patterns):
-                speed_val = 0.2
-            elif any(pat in norm_inst for pat in normal_patterns):
-                speed_val = 0.9
-            elif any(pat in norm_inst for pat in fast_patterns):
-                speed_val = 1.0
 
-            # 方向指示が含まれているかチェック
-            has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい"])
+        # 4. 状況・エラーの確認クエリの判定
+        status_queries = ["状況", "状態", "ステータス", "どうなってる", "何してる", "どこにいる"]
+        error_queries = ["なんで失敗", "何で失敗", "なぜ失敗", "なぜ止まった", "なんで止まった", "何で止まった", "失敗した理由", "止まった理由"]
+        is_status_query = any(q in norm_inst for q in status_queries)
+        is_error_query = any(q in norm_inst for q in error_queries)
+        
+        if is_status_query or is_error_query:
+            current_x, current_y, current_yaw_deg = 0.0, 0.0, 0.0
+            try:
+                trans = self.tf_buffer.lookup_transform('map', 'sirius3/base_footprint', rclpy.time.Time())
+                current_x = trans.transform.translation.x
+                current_y = trans.transform.translation.y
+                q = trans.transform.rotation
+                siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+                cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+                current_yaw_deg = math.degrees(math.atan2(siny_cosp, cosy_cosp))
+            except Exception:
+                pass
+                
+            speak_msg = ""
+            if is_status_query:
+                with self.lock:
+                    executing = self.executing_command
+                    queue_len = len(self.command_queue)
+                    stuck = self.is_stuck
+                if stuck:
+                    speak_msg = "[sad]今は障害物に遮られて立ち往生している状態なのだ。進路が塞がれているみたいなのだ。"
+                elif executing:
+                    speak_msg = f"[happy]今は目標地点に向かって移動中なのだ！キューにはあと{queue_len}個のアクションが残っているのだ。"
+                else:
+                    speak_msg = f"[happy]今は停止中で、次の指示を待っている状態なのだ！現在位置は X={current_x:.2f}, Y={current_y:.2f} なのだ。"
+            else:
+                with self.lock:
+                    last_status = self.last_action_status
+                    last_type = self.last_action_type
+                if last_status == "failed_stuck":
+                    speak_msg = "[sad]さっきは進もうとしたんだけど、行く手が障害物で遮られちゃって、これ以上進めなくて停止したのだ。"
+                elif last_status in ["failed_cancelled", "cancelled"]:
+                    speak_msg = "[happy]さっきはユーザー指示で動作を途中でキャンセルしたのだ。"
+                elif last_type == "turn" and last_status == "failed":
+                    speak_msg = "[sad]さっきは旋回しようとしたんだけど、目標の角度まで回りきれずに途中で止まっちゃったのだ。"
+                else:
+                    speak_msg = "[happy]直前のアクションは正常に完了しているか、まだエラーは発生していないのだ！"
             
+            self.send_sirius_speak(speak_msg)
+            return {"commands": [], "cancel": False, "fast_path": True, "speak": speak_msg}
+
+        # 5.是正・訂正・相対調整のルールベース判定
+        correction_patterns_map = {
+            "行き過ぎ": "overshot", "いきすぎ": "overshot", "回りすぎ": "overshot", "まわりすぎ": "overshot",
+            "進みすぎ": "overshot", "すすみすぎ": "overshot", "下がりすぎ": "overshot", "さがりすぎ": "overshot",
+            "動きすぎ": "overshot", "うごきすぎ": "overshot", "すぎだ": "overshot", "すぎよ": "overshot",
+            "逆": "opposite", "ぎゃく": "opposite", "反対": "opposite", "はんたい": "opposite",
+            "足りない": "more", "たりない": "more", "不足": "more", "ふそく": "more",
+            "戻って": "goback", "もどって": "goback", "やり直し": "goback", "やりなおし": "goback"
+        }
+        correction_type = None
+        for kw, c_t in correction_patterns_map.items():
+            if kw in norm_inst:
+                correction_type = c_t
+                break
+                
+        if correction_type is not None:
+            with self.lock:
+                last_type = self.last_action_type
+                last_target = self.last_target_value
+                start_x = self.last_action_start_x
+                start_y = self.last_action_start_y
+                start_yaw = self.last_action_start_yaw
+                
             cmd_list = []
-            if speed_val is not None:
-                cmd_list.append({"type": "speed", "value": speed_val})
-                
-            if has_dir:
-                # 2. 旋回・右左折の判定
-                is_right = any(pat in norm_inst for pat in ["右", "migi", "みぎ", "みぎむ"])
-                is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
-                
-                # 「右向いて」「左向いて」「みぎむいて」「ひだりむいて」「みぎいて」「ひだりいて」「右向けて」「右無知恵」（タイポ対応）
-                if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす"]):
+            speak_msg = ""
+            
+            if correction_type == "overshot":
+                if last_type == "forward":
+                    val = max(0.3, last_target * 0.3 if isinstance(last_target, (int, float)) else 0.5)
+                    cmd_list.append({"type": "backward", "value": val})
+                    speak_msg = f"[sad]ごめんなさい、ちょっと進みすぎちゃったのだ！{val:.1f}メートル下がるのだ。"
+                elif last_type == "backward":
+                    val = max(0.3, last_target * 0.3 if isinstance(last_target, (int, float)) else 0.5)
+                    cmd_list.append({"type": "forward", "value": val})
+                    speak_msg = f"[sad]ごめんなさい、ちょっと下がりすぎちゃったのだ！{val:.1f}メートル進むのだ。"
+                elif last_type in ["turn", "spin"]:
+                    val = -last_target * 0.3 if isinstance(last_target, (int, float)) else -0.5
+                    cmd_list.append({"type": last_type, "value": val})
+                    dir_str = "右" if val < 0 else "左"
+                    speak_msg = f"[sad]ごめんなさい、ちょっと回りすぎちゃったのだ！少し{dir_str}に戻るのだ。"
+                    
+            elif correction_type == "opposite":
+                if last_type == "forward":
+                    cmd_list.append({"type": "backward", "value": last_target if isinstance(last_target, (int, float)) else 1.0})
+                    speak_msg = "[surprised]あ、逆向きだったのだ！反対側に進むのだ。"
+                elif last_type == "backward":
+                    cmd_list.append({"type": "forward", "value": last_target if isinstance(last_target, (int, float)) else 1.0})
+                    speak_msg = "[surprised]あ、逆向きだったのだ！反対側に進むのだ。"
+                elif last_type in ["turn", "spin"]:
+                    val = -last_target if isinstance(last_target, (int, float)) else -1.57
+                    cmd_list.append({"type": last_type, "value": val})
+                    speak_msg = "[surprised]あ、逆向きだったのだ！反対側を向くのだ。"
+                    
+            elif correction_type == "more":
+                if last_type in ["forward", "backward"]:
+                    val = max(0.5, last_target * 0.5 if isinstance(last_target, (int, float)) else 1.0)
+                    cmd_list.append({"type": last_type, "value": val})
+                    speak_msg = f"[happy]もう少し動かすのだ！追加で {val:.1f}メートル移動するのだ。"
+                elif last_type in ["turn", "spin"]:
+                    val = last_target * 0.5 if isinstance(last_target, (int, float)) else 0.5
+                    cmd_list.append({"type": last_type, "value": val})
+                    speak_msg = "[happy]もう少し回るのだ！追加で旋回するのだ。"
+                    
+            elif correction_type == "goback":
+                if last_type in ["forward", "backward", "goto"]:
+                    cmd_list.append({"type": "goto", "value": [start_x, start_y]})
+                    cmd_list.append({"type": "face", "value": math.degrees(start_yaw)})
+                    speak_msg = "[happy]元いた場所に戻るのだ！"
+                elif last_type in ["turn", "spin"]:
+                    cmd_list.append({"type": "face", "value": math.degrees(start_yaw)})
+                    speak_msg = "[happy]元の向きに戻るのだ！"
+                    
+            if cmd_list:
+                self.send_sirius_speak(speak_msg)
+                return {"commands": cmd_list, "cancel": False, "speak": speak_msg, "fast_path": True}
+
+        # 6. 四角・正方形などの図形描画
+        shape_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:m|メートル)?の(?:四角|正方形|スクエア)", norm_inst)
+        if shape_match:
+            size = float(shape_match.group(1))
+            cmds = []
+            for _ in range(4):
+                cmds.append({"type": "forward", "value": size})
+                cmds.append({"type": "turn", "value": -1.5708})
+            return {"commands": cmds, "cancel": False, "speak": f"[happy]一辺{size}メートルの正方形を描くように移動するのだ！"}
+
+        # 7. 繰り返し（ループ）
+        loop_match = re.search(r"(\d+)\s*(?:回|回繰り返して|回繰り返し)", norm_inst)
+        if loop_match:
+            times = int(loop_match.group(1))
+            base_part = re.sub(r"(?:のを)?\d+\s*(?:回|回繰り返して|回繰り返し).*", "", norm_inst).strip()
+            base_cmds = []
+            parts = [p.strip() for p in re.split(r"して|て|、|そして", base_part) if p.strip()]
+            for part in parts:
+                parsed_cmd = parse_part(part)
+                if parsed_cmd:
+                    base_cmds.append(parsed_cmd)
+            if base_cmds:
+                cmds = base_cmds * times
+                return {"commands": cmds, "cancel": False, "speak": f"[happy]指示された動きを{times}回繰り返すのだ！"}
+
+        # 8. 一般的な数値指定コマンドのパース（複数コマンドの連結に対応）
+        # 例：「3m進んで右に90度曲がる」など
+        has_number = any(char.isdigit() for char in norm_inst) or any(x in norm_inst for x in ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "点", "度", "㍍", "メートル"])
+        if has_number:
+            parts = [p.strip() for p in re.split(r"して|て|、|そして", norm_inst) if p.strip()]
+            parsed_cmds = []
+            for part in parts:
+                cmd = parse_part(part)
+                if cmd:
+                    parsed_cmds.append(cmd)
+            if parsed_cmds:
+                return {"commands": parsed_cmds, "cancel": False}
+
+        # 9. 数値指定を含まない標準的な指示（簡易前進・後退・旋回・スピード変更）
+        # (元々の1.5番目のロジックとほぼ同様)
+        slow_patterns = ["ゆっくり", "遅く", "おそく", "おそい", "遅い", "スピード下げ", "スピード落と", "速度下げ", "yukkuri", "slow", "下げて", "スピードおと"]
+        normal_patterns = ["ふつう", "普通", "通常", "normal"]
+        fast_patterns = ["早く", "急いで", "スピード上げ", "速度上げ", "fast", "speedup", "上げて"]
+        
+        speed_val = None
+        if any(pat in norm_inst for pat in slow_patterns):
+            speed_val = 0.2
+        elif any(pat in norm_inst for pat in normal_patterns):
+            speed_val = 0.9
+        elif any(pat in norm_inst for pat in fast_patterns):
+            speed_val = 1.0
+
+        has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい", "後ろ", "うしろ", "ushiro", "裏", "うら"])
+        
+        cmd_list = []
+        if speed_val is not None:
+            cmd_list.append({"type": "speed", "value": speed_val})
+            
+        if has_dir:
+            is_right = any(pat in norm_inst for pat in ["右", "migi", "みぎ", "みぎむ"])
+            is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
+            is_back = any(pat in norm_inst for pat in ["後ろ", "うしろ", "ushiro", "裏", "うら"])
+            
+            if (is_right or is_left or is_back) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす"]):
+                if is_back:
+                    val = 3.14159
+                else:
                     val = -1.5708 if is_right else 1.5708
                     if any(x in norm_inst for x in ["少し", "ちょっと", "微", "すこし"]):
                         val = -0.5236 if is_right else 0.5236
-                    cmd_list.append({"type": "turn", "value": val})
-                    return {"commands": cmd_list, "cancel": False}
-                    
-                # その場旋回, 一回転, 360度
-                if any(x in norm_inst for x in ["旋回", "回転", "senkai", "spin"]):
-                    deg = 360.0
-                    if "右" in norm_inst or "時計回り" in norm_inst:
-                        deg = -360.0
-                    cmd_list.append({"type": "spin", "value": deg})
-                    return {"commands": cmd_list, "cancel": False}
-        
-                # 3. 前進・後退の判定
-                # 後退: 後ろ下がって, usirosagatte, motto, back
-                last_cmd_was_backward = False
-                last_cmd_was_forward = False
-                with self.lock:
-                    if self.chat_history:
-                        for msg in reversed(self.chat_history):
-                            if msg.get("role") == "assistant":
-                                try:
-                                    # アシスタントの返答内容からコマンドを推測
-                                    hist_json = json.loads(msg.get("content", "{}"))
-                                    hist_cmds = hist_json.get("commands", [])
-                                    if hist_cmds:
-                                        last_type = hist_cmds[-1].get("type")
-                                        if last_type == "backward":
-                                            last_cmd_was_backward = True
-                                            break
-                                        elif last_type == "forward":
-                                            last_cmd_was_forward = True
-                                            break
-                                except Exception:
-                                    pass
+                cmd_list.append({"type": "turn", "value": val})
+                return {"commands": cmd_list, "cancel": False}
                 
-                # 「もっと」「もうすこし」などの単体指示で直前の動作（前進/後退）を継続する場合
-                if norm_inst in ["motto", "もっと", "もうすこし", "もう少し", "もうちょっと", "さらに", "すこし", "少し", "ちょっと"]:
-                    val = 1.0 if any(x in norm_inst for x in ["すこし", "少し", "ちょっと"]) else 2.0
-                    if last_cmd_was_backward:
-                        cmd_list.append({"type": "backward", "value": max(1.0, val)})
-                        return {"commands": cmd_list, "cancel": False}
-                    elif last_cmd_was_forward:
-                        cmd_list.append({"type": "forward", "value": max(1.0, val)})
-                        return {"commands": cmd_list, "cancel": False}
-        
-                if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro"]):
+            if any(x in norm_inst for x in ["旋回", "回転", "senkai", "spin"]):
+                deg = 360.0
+                if "右" in norm_inst or "時計回り" in norm_inst:
+                    deg = -360.0
+                cmd_list.append({"type": "spin", "value": deg})
+                return {"commands": cmd_list, "cancel": False}
+    
+            last_cmd_was_backward = False
+            last_cmd_was_forward = False
+            with self.lock:
+                if self.chat_history:
+                    for msg in reversed(self.chat_history):
+                        if msg.get("role") == "assistant":
+                            try:
+                                hist_json = json.loads(msg.get("content", "{}"))
+                                hist_cmds = hist_json.get("commands", [])
+                                if hist_cmds:
+                                    last_type = hist_cmds[-1].get("type")
+                                    if last_type == "backward":
+                                        last_cmd_was_backward = True
+                                        break
+                                    elif last_type == "forward":
+                                        last_cmd_was_forward = True
+                                        break
+                            except Exception:
+                                pass
+            
+            if norm_inst in ["motto", "もっと", "もうすこし", "もう少し", "もうちょっと", "さらに", "すこし", "少し", "ちょっと"]:
+                val = 1.0 if any(x in norm_inst for x in ["すこし", "少し", "ちょっと"]) else 2.0
+                if last_cmd_was_backward:
+                    cmd_list.append({"type": "backward", "value": max(1.0, val)})
+                    return {"commands": cmd_list, "cancel": False}
+                elif last_cmd_was_forward:
+                    cmd_list.append({"type": "forward", "value": max(1.0, val)})
+                    return {"commands": cmd_list, "cancel": False}
+    
+            if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro"]):
+                val = 1.0
+                if any(x in norm_inst for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
+                    val = 2.0
+                cmd_list.append({"type": "backward", "value": val})
+                return {"commands": cmd_list, "cancel": False}
+    
+            if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"]):
+                val = 1.5
+                if any(x in norm_inst for x in ["少し", "ちょっと", "すこし"]):
                     val = 1.0
-                    if any(x in norm_inst for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
-                        val = 2.0
-                    cmd_list.append({"type": "backward", "value": val})
-                    return {"commands": cmd_list, "cancel": False}
-        
-                # 前進: 前に行って, 進んで, mae, forward
-                if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"]):
-                    val = 1.5
-                    if any(x in norm_inst for x in ["少し", "ちょっと", "すこし"]):
-                        val = 1.0
-                    elif any(x in norm_inst for x in ["もっと", "大きく", "たくさん", "さらに"]):
-                        val = 2.5
-                    cmd_list.append({"type": "forward", "value": val})
-                    return {"commands": cmd_list, "cancel": False}
-            else:
-                # 方向を含まない純粋なスピード指示
-                if speed_val is not None:
-                    return {"commands": cmd_list, "cancel": False}
+                elif any(x in norm_inst for x in ["もっと", "大きく", "たくさん", "さらに"]):
+                    val = 2.5
+                cmd_list.append({"type": "forward", "value": val})
+                return {"commands": cmd_list, "cancel": False}
+        else:
+            if speed_val is not None:
+                return {"commands": cmd_list, "cancel": False}
 
             
         # -------------------------------------------------------------------
@@ -1384,7 +1690,8 @@ class LlmDynamicGoal(Node):
             self.yaw_diff_history = []
             self.is_stuck = False
             self.turn_target_yaw = None
-            self.turn_arrival_triggered = False
+            if not self.turn_arrival_triggered:
+                self.turn_arrival_triggered = False
             if self.last_action_status not in ["success", "failed_stuck"]:
                 self.last_action_status = "failed_cancelled"
             
