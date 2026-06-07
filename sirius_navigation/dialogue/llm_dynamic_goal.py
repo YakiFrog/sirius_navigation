@@ -22,9 +22,17 @@ from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 
 try:
-    from .dialogue import CHAT_KEYWORDS, DIALOGUE_TEMPLATES
+    from . import CHAT_KEYWORDS, DIALOGUE_TEMPLATES
 except ImportError:
-    from dialogue import CHAT_KEYWORDS, DIALOGUE_TEMPLATES
+    try:
+        from dialogue import CHAT_KEYWORDS, DIALOGUE_TEMPLATES
+    except ImportError:
+        from chat import CHAT_KEYWORDS
+        from navigation import NAVIGATION_TEMPLATES
+        from system import SYSTEM_TEMPLATES
+        DIALOGUE_TEMPLATES = {}
+        DIALOGUE_TEMPLATES.update(NAVIGATION_TEMPLATES)
+        DIALOGUE_TEMPLATES.update(SYSTEM_TEMPLATES)
 
 
 class LlmDynamicGoal(Node):
@@ -61,6 +69,15 @@ class LlmDynamicGoal(Node):
         self.cancel_client = self.create_client(CancelGoal, '/navigate_to_pose/_action/cancel_goal')
         self.spin_client = ActionClient(self, Spin, 'spin')
         self.param_client = self.create_client(SetParameters, '/controller_server/set_parameters')
+
+        # Janome トークナイザーの初期化
+        try:
+            from janome.tokenizer import Tokenizer
+            self.tokenizer = Tokenizer()
+            self.get_logger().info("Janome tokenizer successfully loaded for high-precision parsing.")
+        except Exception as e:
+            self.tokenizer = None
+            self.get_logger().warning(f"Failed to load Janome: {e}. Falling back to simple substring matching.")
 
         
         # 自然言語指示トピックのサブスクライバー
@@ -114,6 +131,9 @@ class LlmDynamicGoal(Node):
         self.last_target_value = 0.0
         self.last_final_distance_error = 0.0
         self.last_final_yaw_error = 0.0
+        self.last_action_start_x = 0.0
+        self.last_action_start_y = 0.0
+        self.last_action_start_yaw = 0.0
         
         # 1Hzで自己位置と目標位置の距離を監視するタイマー
         self.goal_monitor_timer = self.create_timer(1.0, self.monitor_goal_distance)
@@ -248,6 +268,41 @@ class LlmDynamicGoal(Node):
                 self.send_sirius_speak(DIALOGUE_TEMPLATES.get("parse_failure", "[sad]失敗したのだ。"))
             return
             
+        # Programmatic sanitization to resolve LLM confusion between 'face', 'turn', and 'spin'
+        sanitized_commands = []
+        for cmd in commands:
+            c_type = cmd.get("type")
+            c_value = cmd.get("value")
+            
+            if c_type == "face" and isinstance(c_value, (int, float)):
+                # Detect if 'face' is accidentally used with radian values or relative instructions
+                relative_words = ["右", "左", "migi", "hidari", "turn", "曲が"]
+                absolute_words = ["北", "南", "東", "西", "kita", "minami", "higashi", "nishi", "map", "絶対"]
+                has_relative = any(w in instruction.lower() for w in relative_words)
+                has_absolute = any(w in instruction.lower() for w in absolute_words)
+                is_radian_like = abs(c_value) <= 3.15 and not float(c_value).is_integer()
+                
+                if (has_relative and not has_absolute) or is_radian_like:
+                    self.get_logger().warning(f"Sanitizer: Detected potential confusion. Converting command 'face' with value {c_value} to relative 'turn'.")
+                    cmd = {"type": "turn", "value": c_value}
+                    
+            elif c_type == "turn" and isinstance(c_value, (int, float)):
+                # If 'turn' is specified with large values (assumed degrees), convert to radians
+                if abs(c_value) >= 15.0:
+                    rad_value = math.radians(c_value)
+                    self.get_logger().warning(f"Sanitizer: Detected 'turn' with large value {c_value}. Converting degrees to radians: {rad_value:.4f}.")
+                    cmd = {"type": "turn", "value": rad_value}
+                    
+            elif c_type == "spin" and isinstance(c_value, (int, float)):
+                # If 'spin' (which expects degrees) is specified with small radian floats, convert to degrees
+                if abs(c_value) <= 6.3 and not float(c_value).is_integer():
+                    deg_value = math.degrees(c_value)
+                    self.get_logger().warning(f"Sanitizer: Detected 'spin' with small float value {c_value}. Converting radians to degrees: {deg_value:.1f}.")
+                    cmd = {"type": "spin", "value": deg_value}
+                    
+            sanitized_commands.append(cmd)
+        commands = sanitized_commands
+
         self.get_logger().info(f"Parsed {len(commands)} commands from instruction.")
         
         # speed コマンドがあれば、移動開始前に反映されるようにキューの最優先（先頭）に並び替える
@@ -316,6 +371,10 @@ class LlmDynamicGoal(Node):
             cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
             yaw_robot = math.atan2(siny_cosp, cosy_cosp)
             self.get_logger().info(f"📍 [Start Pose] X={tx:.3f}, Y={ty:.3f}, Yaw={math.degrees(yaw_robot):+.1f}deg")
+            with self.lock:
+                self.last_action_start_x = tx
+                self.last_action_start_y = ty
+                self.last_action_start_yaw = yaw_robot
         except Exception as e:
             self.get_logger().warning(f"Failed to lookup TF (map -> sirius3/base_footprint) during execution: {e}")
             self.execute_next_command()
@@ -489,22 +548,52 @@ class LlmDynamicGoal(Node):
             last_target = self.last_target_value
             last_dist_err = self.last_final_distance_error
             last_yaw_err = self.last_final_yaw_error
+            last_start_x = self.last_action_start_x
+            last_start_y = self.last_action_start_y
+            last_start_yaw = self.last_action_start_yaw
+
+        # 現在位置とヘディング（角度）をTFから取得
+        current_x, current_y, current_yaw_deg = 0.0, 0.0, 0.0
+        current_yaw = 0.0
+        try:
+            trans = self.tf_buffer.lookup_transform('map', 'sirius3/base_footprint', rclpy.time.Time())
+            current_x = trans.transform.translation.x
+            current_y = trans.transform.translation.y
+            q = trans.transform.rotation
+            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+            current_yaw = math.atan2(siny_cosp, cosy_cosp)
+            current_yaw_deg = math.degrees(current_yaw)
+        except Exception:
+            pass
+
+        # 直前のアクションにおける実際の移動距離・回転量を計算
+        last_move_str = "N/A"
+        if last_type in ["forward", "backward"]:
+            dist_moved = math.sqrt((current_x - last_start_x)**2 + (current_y - last_start_y)**2)
+            last_move_str = f"Moved linear distance of {dist_moved:.2f} meters (Start: X={last_start_x:.2f}, Y={last_start_y:.2f} -> End: X={current_x:.2f}, Y={current_y:.2f})"
+        elif last_type in ["turn", "spin", "face"]:
+            diff_rad = current_yaw - last_start_yaw
+            # -pi から pi の範囲に正規化
+            diff_rad = (diff_rad + math.pi) % (2 * math.pi) - math.pi
+            diff_deg = math.degrees(diff_rad)
+            last_move_str = f"Rotated angle of {diff_deg:+.1f} degrees (Start: {math.degrees(last_start_yaw):+.1f}deg -> End: {current_yaw_deg:+.1f}deg)"
 
         if goal_x is None:
             state_str = (
                 "【Robot Current Hardware State Feedback】: Status=Idle. No active navigation goal. Robot is stationary.\n"
-                f"- Last Action Status: {last_status} (type: {last_type}, target: {last_target}, final distance error: {last_dist_err:.2f}m, final yaw error: {last_yaw_err:.1f}deg)"
+                f"- Current Robot Pose: X={current_x:.2f}, Y={current_y:.2f}, Yaw={current_yaw_deg:+.1f}deg\n"
+                f"- Last Action Status: {last_status} (type: {last_type}, target: {last_target}, final distance error: {last_dist_err:.2f}m, final yaw error: {last_yaw_err:.1f}deg)\n"
+                f"- Last Action Actual Execution Result: {last_move_str}"
             )
             return state_str
             
         # 現在位置と目標位置の差分（残差）を計算
+        distance = -1.0
         try:
-            trans = self.tf_buffer.lookup_transform('map', 'sirius3/base_footprint', rclpy.time.Time())
-            tx = trans.transform.translation.x
-            ty = trans.transform.translation.y
-            distance = math.sqrt((goal_x - tx)**2 + (goal_y - ty)**2)
+            distance = math.sqrt((goal_x - current_x)**2 + (goal_y - current_y)**2)
         except Exception:
-            distance = -1.0
+            pass
             
         stuck_str = "BLOCKED / STUCK (Robot is command-active but linear velocity is zero. An obstacle likely blocks the way.)" if stuck else "Moving normally towards target"
         vel_str = f"linear={vel_x:.2f}m/s, angular={vel_theta:.2f}rad/s"
@@ -512,12 +601,14 @@ class LlmDynamicGoal(Node):
         state_str = (
             f"【Robot Current Hardware State Feedback】\n"
             f"- Status: {'Executing Sequence' if executing else 'Idle/Ready'}\n"
+            f"- Current Robot Pose: X={current_x:.2f}, Y={current_y:.2f}, Yaw={current_yaw_deg:+.1f}deg\n"
             f"- Target Waypoint: X={goal_x:.2f}, Y={goal_y:.2f}, Yaw={math.degrees(goal_yaw):+.1f}deg\n"
             f"- Distance remaining to target: {distance:.2f} meters\n"
             f"- Current velocities: {vel_str}\n"
             f"- Physical obstacles / blockage state: {stuck_str}\n"
             f"- Actions left in sequence queue: {queue_len} commands\n"
-            f"- Last Action Status: {last_status} (type: {last_type}, target: {last_target}, final distance error: {last_dist_err:.2f}m, final yaw error: {last_yaw_err:.1f}deg)"
+            f"- Last Action Status: {last_status} (type: {last_type}, target: {last_target}, final distance error: {last_dist_err:.2f}m, final yaw error: {last_yaw_err:.1f}deg)\n"
+            f"- Last Action Actual Execution Result: {last_move_str}"
         )
         return state_str
 
@@ -526,27 +617,60 @@ class LlmDynamicGoal(Node):
         
         norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
         
-        # 1. 停止・キャンセルの判定
-        cancel_patterns = ["止ま", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
-        if any(pat in norm_inst for pat in cancel_patterns):
-            return {"commands": [], "cancel": True}
+        # 0. ユーザーの是正・訂正キーワードの検出 (この場合はルールベースをスキップしてLLMに判断を委ねる)
+        # 「〜のに」「〜すぎ」「反対」「戻って」「じゃなくて」「違う」「逆」などの是正パターンを広くカバー
+        correction_keywords = [
+            "違う", "ちがう", "違って", "ちがって", "間違", "まちが",
+            "そうじゃなく", "そうじゃない", "ではなく", "じゃない",
+            "逆", "ぎゃく", "反対", "はんたい",
+            "行き過ぎ", "いきすぎ", "回りすぎ", "まわりすぎ", "進みすぎ", "すすみすぎ",
+            "下がりすぎ", "さがりすぎ", "動きすぎ", "うごきすぎ", "すぎだ", "すぎよ",
+            "足りない", "たりない", "不足", "ふそく",
+            "戻って", "もどって", "やり直し", "やりなおし",
+            "のに", # 例：「〜って言ったのに」「〜なのに」
+            "ちぐはぐ", "おかしい", "変だな", "へんだな"
+        ]
+        is_recalculation = any(kw in norm_inst for kw in correction_keywords)
+        
+        if is_recalculation:
+            print("\033[93m🔄 [LLM Recalculation] User requested correction/adjustment. LLM is recalculating next move based on history...\033[0m")
+            self.get_logger().info("🔄 [LLM Recalculation] User requested correction/adjustment. Bypassing rule-based quick return.")
+
+        # Janomeを使用した高精度な形態素解析（利用可能な場合）
+        has_speak_verb = False
+        if self.tokenizer:
+            try:
+                tokens = list(self.tokenizer.tokenize(instruction))
+                for t in tokens:
+                    base = t.base_form
+                    # 「言う」「話す」「喋る」などの発話動詞を検出
+                    if base in ["言う", "話す", "喋る", "しゃべる", "歌う", "ささやく", "伝える", "応える", "答える"]:
+                        has_speak_verb = True
+            except Exception as e:
+                self.get_logger().error(f"Janome tokenization failed: {e}")
+
+        # 1. 停止・キャンセルの判定 (是正時はキャンセル判定はスキップ)
+        if not is_recalculation:
+            cancel_patterns = ["止ま", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
+            if any(pat in norm_inst for pat in cancel_patterns):
+                return {"commands": [], "cancel": True}
             
-        # 1.1 軽い会話（パースバージョン）の高速判定
-        # バッテリー情報の判定
-        if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
-            battery_msg = self.get_sirius_battery_level()
-            self.send_sirius_speak(battery_msg)
-            return {"commands": [], "cancel": False, "fast_path": True}
-            
-        for kw, reply in CHAT_KEYWORDS.items():
-            if kw in norm_inst:
-                self.send_sirius_speak(reply)
+            # 1.1 軽い会話（パースバージョン）の高速判定
+            # バッテリー情報の判定
+            if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
+                battery_msg = self.get_sirius_battery_level()
+                self.send_sirius_speak(battery_msg)
                 return {"commands": [], "cancel": False, "fast_path": True}
                 
-        # 1.5 スピード調整/旋回/前進/後退の判定 (数値指定を含まない標準指示の場合にのみ高速応答)
+            for kw, reply in CHAT_KEYWORDS.items():
+                if kw in norm_inst:
+                    self.send_sirius_speak(reply)
+                    return {"commands": [], "cancel": False, "fast_path": True}
+                
+        # 1.5 スピード調整/旋回/前進/後退の判定 (数値指定を含まない標準指示の場合にのみ高速応答。是正時はスキップ)
         has_number = any(char.isdigit() for char in norm_inst) or any(x in norm_inst for x in ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "点", "度", "㍍", "メートル"])
         
-        if not has_number:
+        if not has_number and not is_recalculation and not has_speak_verb:
             slow_patterns = ["ゆっくり", "遅く", "おそく", "おそい", "遅い", "スピード下げ", "スピード落と", "速度下げ", "yukkuri", "slow", "下げて", "スピードおと"]
             normal_patterns = ["ふつう", "普通", "通常", "normal"]
             fast_patterns = ["早く", "急いで", "スピード上げ", "速度上げ", "fast", "speedup", "上げて"]
@@ -561,7 +685,7 @@ class LlmDynamicGoal(Node):
                 speed_val = 1.0
 
             # 方向指示が含まれているかチェック
-            has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "いっ", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい"])
+            has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい"])
             
             cmd_list = []
             if speed_val is not None:
@@ -573,7 +697,7 @@ class LlmDynamicGoal(Node):
                 is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
                 
                 # 「右向いて」「左向いて」「みぎむいて」「ひだりむいて」「みぎいて」「ひだりいて」「右向けて」「右無知恵」（タイポ対応）
-                if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす", "いっ"]):
+                if (is_right or is_left) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす"]):
                     val = -1.5708 if is_right else 1.5708
                     if any(x in norm_inst for x in ["少し", "ちょっと", "微", "すこし"]):
                         val = -0.5236 if is_right else 0.5236
@@ -621,7 +745,7 @@ class LlmDynamicGoal(Node):
                         cmd_list.append({"type": "forward", "value": max(1.0, val)})
                         return {"commands": cmd_list, "cancel": False}
         
-                if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって"]):
+                if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro"]):
                     val = 1.0
                     if any(x in norm_inst for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
                         val = 2.0
@@ -629,7 +753,7 @@ class LlmDynamicGoal(Node):
                     return {"commands": cmd_list, "cancel": False}
         
                 # 前進: 前に行って, 進んで, mae, forward
-                if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "いっ", "行っ"]):
+                if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"]):
                     val = 1.5
                     if any(x in norm_inst for x in ["少し", "ちょっと", "すこし"]):
                         val = 1.0
@@ -689,9 +813,22 @@ class LlmDynamicGoal(Node):
             "you MUST output a 'backward' command (e.g. value: 1.0). Do not output 'forward' unless they explicitly ask to go forward (e.g. 'mae'/'susunde').\n"
             "4. LOOP UNROLLING: If the user asks to repeat an action sequence (e.g., 'X回繰り返して' / 'repeat X times'), you MUST fully unroll/expand the sequence into individual commands in the JSON list.\n"
             "5. SHAPES (e.g. Squares/四角/正方形): If the user asks to draw or move in a square of size X (e.g., 'Xm of square' / 'square of X meters'), unroll it into 8 commands: forward Xm, turn right (-1.5708), forward Xm, turn right, forward Xm, turn right, forward Xm, turn right.\n"
-            "6. QUESTION HANDLING & REASON ENQUIRY: If the user asks 'なんで失敗したの？' (why did you fail/stop?) or similar, check the `Last Action Status` and `blockage state` from context. Explain the status in natural, character-fitting Japanese (friendly, ending with 'なのだ'), and assign it to the `\"speak\"` field. Do not generate navigation commands in this case.\n\n"
+            "7. USER CORRECTION & RECALIBRATION: If the user complains about the last action (e.g. 'ちょっと行き過ぎ', '回りすぎ', '逆だよ', 'もっと右', '足りない', or complaining '後ろ向いてって言ってるのに1周した' / '右って言ったのに左に回った'), inspect the `Last Action Status` (type, target value) and the dialogue history. Generate a corrective/compensatory command. Crucially, if the last action was a rotation (turn, spin, or face) and the user says '行き過ぎ' (overshot) or '回りすぎ', you MUST output a turn in the OPPOSITE direction (e.g., if last action was a turn of 1.5708 and user says '行き過ぎ', output a turn of -0.5236). Do NOT output forward or backward linear translation commands if the last action was a rotation.\n"
+            "8. CURRENT STATUS / GENERAL SITUATION QUESTIONS: If the user asks about the current status, situation, or what the robot is doing (e.g. '今の状況は？', 'どういう状態？', '今のステータスを教えて', 'どういう状況'), you MUST explain the current state in Japanese in the 'speak' field, using the details from 【Robot Current Hardware State Feedback】 (e.g., whether the robot is Idle/Ready or Executing, the current target coordinate, remaining distance, or obstacle blockage). Do not return any commands unless they explicitly command a new movement.\n"
+            "9. UNRELATED / GENERAL CONVERSATION: If the user says something unrelated to robot control or navigation status (e.g., general chatter, joking, questions about weather, food, personal comments like '頭使って', '今日の天気は？'), do NOT generate any commands (set 'commands' to `[]`) and do NOT set cancel. Instead, respond naturally/politely in Japanese in the 'speak' field as a friendly navigator assistant.\n\n"
             "【Output Examples】\n"
             "- 'ちょっと前に行って' -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false}\n"
+            "- 'ちょっと行き過ぎ' (when last action was backward 1.0) -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false, \"speak\": \"[sad]ごめんなさい、ちょっと下がりすぎちゃったのだ！少し前に戻るのだ。\"}\n"
+            "- '行き過ぎ' (when last action was turn with value 1.5708) -> {\"commands\": [{\"type\": \"turn\", \"value\": -0.5236}], \"cancel\": false, \"speak\": \"[sad]ごめんなさい、ちょっと左に回りすぎちゃったのだ！少し右に戻るのだ。\"}\n"
+            "- '逆だよ' (when last action was turn with value -1.5708) -> {\"commands\": [{\"type\": \"turn\", \"value\": 1.5708}], \"cancel\": false, \"speak\": \"[surprised]あ、逆向きだったのだ！反対側を向くのだ。\"}\n"
+            "- '後ろ向いてって言ってるのに1周した' (when last action was spin 360) -> {\"commands\": [{\"type\": \"turn\", \"value\": 3.1415}], \"cancel\": false, \"speak\": \"[sad]ごめんなさい！一周するんじゃなくて、後ろを向くのだったのだ。半周（180度）回って後ろを向くのだ。\"}\n"
+            "- '今の状況は？' (when Status is Idle/Ready) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]今は停止中で、次の指示を待っている状態なのだ！\"}\n"
+            "- '今の状況を教えて' (when Status is Executing Sequence and remaining distance is 1.2 meters) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]今は目標地点に向かって移動中なのだ！目的地まではあと1.2メートルほどなのだ。\"}\n"
+            "- 'どういう状況' (when obstacle blocks the way) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]今は障害物に阻まれて立ち往生している状態なのだ。進路が塞がれているみたいなのだ。\"}\n"
+            "- '今日の天気は？' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]ごめんなさい、私はナビゲーション用のアシスタントなので、お天気の情報は持っていないのだ。お外が見たいのだ！\"}\n"
+            "- 'システムの説明をして' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]ボクは音声やテキストの指示を理解して自律移動するナビゲーションシステムなのだ！「3m前に行って」や「右向いて」のように話しかけてほしいのだ！\"}\n"
+            "- '何ができるの？' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]ボクは「前に進んで」や「右を向いて」といった移動の指示を理解して動くことができるのだ！今の状態やエラーの説明もできるのだ！\"}\n"
+            "- '頭使って' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]うう、もっと頭を柔らかくして賢く考えられるように頑張るのだ！\"}\n"
             "- 'なんで失敗したの？' (when last action was turn with error) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]さっきは旋回しようとしたんだけど、目標の角度まで回りきれずに途中で止まっちゃったのだ。\"}\n"
             "- 'なんで止まった？' (when last action was forward and got stuck) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]進もうとしたんだけど、行く手が遮られちゃって、これ以上進めなかったのだ。\"}\n"
             "- '1.5m後退して' -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.5}], \"cancel\": false}\n"
