@@ -1,0 +1,433 @@
+# -*- coding: utf-8 -*-
+import re
+import math
+import json
+import urllib.request
+import urllib.error
+import unicodedata
+
+# 雑談・自己紹介用キーワード
+try:
+    from .chat import CHAT_KEYWORDS
+except ImportError:
+    try:
+        from dialogue.chat import CHAT_KEYWORDS
+    except ImportError:
+        CHAT_KEYWORDS = {}
+
+# テンプレート群
+DIALOGUE_TEMPLATES = {
+    "arrival": "[happy]目的地に到着したのだ！",
+    "stuck": "[sad]進めなくなっちゃったのだ！障害物があるかもしれないのだ。",
+    "parse_failure": "[sad]指示の理解に失敗したのだ。",
+    "forward_start": "[happy]{distance:.1f}メートル前進するのだ！",
+    "backward_start": "[happy]{distance:.1f}メートル後退するのだ！",
+    "turn_success": "[happy]旋回が完了したのだ！",
+    "turn_failure": "[sad]旋回に失敗したのだ。",
+    "speed_change": "[happy]速度を {speed:.2f} に変更するのだ！",
+    "goto_start": "[happy]座標 ({x:.2f}, {y:.2f}) に向かうのだ！",
+    "battery_report": "[happy]現在のバッテリー残量は {level:.1f}% なのだ！状態は {charging_str} なのだ。",
+    "battery_error": "[sad]バッテリー残量データが不正なのだ。",
+    "battery_fail": "[sad]バッテリー状態が確認できないのだ。",
+}
+
+def normalize_kanji_numbers(s):
+    s = s.replace("点", ".")
+    comp_map = {
+        "二十": "2", "thirty": "3", "三十": "3", "四十": "4", "五十": "5",
+        "六十": "6", "七十": "7", "八十": "8", "九十": "9"
+    }
+    for k, v in comp_map.items():
+        s = s.replace(k + "〇", v + "0")
+        s = s.replace(k + "一", v + "1")
+        s = s.replace(k + "二", v + "2")
+        s = s.replace(k + "三", v + "3")
+        s = s.replace(k + "四", v + "4")
+        s = s.replace(k + "五", v + "5")
+        s = s.replace(k + "六", v + "6")
+        s = s.replace(k + "七", v + "7")
+        s = s.replace(k + "八", v + "8")
+        s = s.replace(k + "九", v + "9")
+        s = s.replace(k, v + "0")
+    
+    teens_map = {
+        "十一": "11", "十二": "12", "十三": "13", "十四": "14", "十五": "15",
+        "十六": "16", "十七": "17", "十八": "18", "十九": "19", "十": "10"
+    }
+    for k, v in teens_map.items():
+        s = s.replace(k, v)
+        
+    singles = {
+        "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+        "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"
+    }
+    for k, v in singles.items():
+        s = s.replace(k, v)
+    return s
+
+def parse_part(part_raw):
+    part_norm = normalize_kanji_numbers(part_raw.strip().lower())
+    
+    # 1. Goto coordinates
+    coord_match = re.search(r"(?:goto|go\s*to|座標指定|座標|目標座標)?\s*\(?\s*(-?\d+(?:\.\d+)?)\s*[,，\s]\s*(-?\d+(?:\.\d+)?)\s*\)?", part_norm)
+    if coord_match and ("座標" in part_norm or "goto" in part_norm or "," in part_norm):
+        try:
+            x = float(coord_match.group(1))
+            y = float(coord_match.group(2))
+            return {"type": "goto", "value": [x, y]}
+        except ValueError:
+            pass
+
+    # 2. Speed
+    speed_match = re.search(r"(?:速度|スピード|speed)\s*(\d+(?:\.\d+)?)", part_norm)
+    if speed_match:
+        return {"type": "speed", "value": float(speed_match.group(1))}
+    speed_unit_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:m/s|の速度)", part_norm)
+    if speed_unit_match:
+        return {"type": "speed", "value": float(speed_unit_match.group(1))}
+
+    # 3. Compass face directions
+    face_map = {
+        "北": 90.0, "kita": 90.0,
+        "東": 0.0, "higashi": 0.0,
+        "南": -90.0, "minami": -90.0,
+        "西": 180.0, "nishi": 180.0,
+        "前": 0.0, "正面": 0.0, "mae": 0.0, "shoumen": 0.0
+    }
+    for d_name, angle in face_map.items():
+        if d_name in part_norm and ("向" in part_norm or "向き" in part_norm or "むい" in part_norm or "むく" in part_norm or "face" in part_norm):
+            return {"type": "face", "value": angle}
+
+    # 4. Turn/Spin with numbers
+    angle_match = re.search(r"(\d+(?:\.\d+)?)\s*(度|deg|°|rad|ラジアン|回転|旋回)", part_norm)
+    if not angle_match:
+        angle_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:に)?\s*(右|左|migi|hidari|旋回|回転|時計回り|反時計回り)", part_norm)
+        
+    if angle_match:
+        val_str = angle_match.group(1)
+        val = float(val_str)
+        
+        is_right = any(x in part_norm for x in ["右", "migi", "時計回り", "cw"])
+        is_left = any(x in part_norm for x in ["左", "hidari", "反時計回り", "ccw"])
+        direction_sign = -1.0 if is_right else 1.0
+        is_spin = any(x in part_norm for x in ["旋回", "回転", "spin"])
+        
+        if "rad" in part_norm or "ラジアン" in part_norm:
+            rad_val = val * direction_sign
+            if is_spin:
+                return {"type": "spin", "value": math.degrees(rad_val)}
+            else:
+                return {"type": "turn", "value": rad_val}
+        else:
+            unit_str = angle_match.group(2) if len(angle_match.groups()) > 1 else ""
+            if unit_str in ["回転", "旋回"]:
+                deg_val = val * 360.0 * direction_sign
+                return {"type": "spin", "value": deg_val}
+            
+            deg_val = val * direction_sign
+            if is_spin:
+                return {"type": "spin", "value": deg_val}
+            else:
+                return {"type": "turn", "value": math.radians(deg_val)}
+
+    # 5. Forward/Backward with numbers
+    dist_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:m|メートル|cm|センチ)?", part_norm)
+    if dist_match:
+        val = float(dist_match.group(1))
+        if "cm" in part_norm or "センチ" in part_norm:
+            val = val / 100.0
+            
+        is_backward = any(x in part_norm for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro", "backward"])
+        is_forward = any(x in part_norm for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"])
+        
+        if is_backward:
+            return {"type": "backward", "value": val}
+        elif is_forward:
+            return {"type": "forward", "value": val}
+    return None
+
+def parse_no_number_part(part_raw):
+    part_norm = part_raw.strip().lower()
+    
+    # 1. Compass/Face directions
+    face_map = {
+        "北": 90.0, "kita": 90.0,
+        "東": 0.0, "higashi": 0.0,
+        "南": -90.0, "minami": -90.0,
+        "西": 180.0, "nishi": 180.0,
+        "前": 0.0, "正面": 0.0, "mae": 0.0, "shoumen": 0.0
+    }
+    for d_name, angle in face_map.items():
+        if d_name in part_norm and ("向" in part_norm or "向き" in part_norm or "むい" in part_norm or "むく" in part_norm or "face" in part_norm):
+            return {"type": "face", "value": angle}
+
+    # 2. Expression control rules
+    expression_map = {
+        "笑": "happy", "喜": "happy", "笑顔": "happy", "にこにこ": "happy", "ニコニコ": "happy",
+        "怒": "angry", "おこ": "angry",
+        "悲": "sad", "泣": "sad", "ぴえん": "pien", "ピエン": "pien",
+        "驚": "surprised", "びっくり": "surprised",
+        "ウィンク": "wink", "ウインク": "wink",
+        "寝": "sleeping", "目をつぶ": "sleeping", "おやすみ": "sleeping",
+        "元に戻": "normal", "通常に戻": "normal", "普通にして": "normal", "リセット": "normal"
+    }
+    for kw, exp in expression_map.items():
+        if kw in part_norm and ("顔" in part_norm or "表情" in part_norm or "しよ" in part_norm or "して" in part_norm or "むいて" in part_norm or "になって" in part_norm or "戻" in part_norm or "通常" in part_norm or "普通" in part_norm):
+            return {"type": "expression", "value": exp}
+
+    is_right = any(pat in part_norm for pat in ["右", "migi", "みぎ", "みぎむ"])
+    is_left = any(pat in part_norm for pat in ["左", "hidari", "ひだり", "ひだりむ"])
+    is_back = any(pat in part_norm for pat in ["後ろ", "うしろ", "ushiro", "裏", "うら"])
+    
+    if (is_right or is_left or is_back) and not any(x in part_norm for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす"]):
+        if is_back:
+            val = 3.14159
+        else:
+            val = -1.5708 if is_right else 1.5708
+            if any(x in part_norm for x in ["少し", "ちょっと", "微", "すこし"]):
+                val = -0.5236 if is_right else 0.5236
+        return {"type": "turn", "value": val}
+        
+    if any(x in part_norm for x in ["旋回", "回転", "senkai", "spin"]):
+        deg = 360.0
+        if "右" in part_norm or "時計回り" in part_norm:
+            deg = -360.0
+        return {"type": "spin", "value": deg}
+
+    if any(x in part_norm for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro"]):
+        val = 1.0
+        if any(x in part_norm for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
+            val = 2.0
+        return {"type": "backward", "value": val}
+
+    if any(x in part_norm for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"]):
+        val = 1.5
+        if any(x in part_norm for x in ["少し", "ちょっと", "すこし"]):
+            val = 1.0
+        elif any(x in part_norm for x in ["もっと", "大きく", "たくさん", "さらに"]):
+            val = 2.5
+        return {"type": "forward", "value": val}
+    return None
+
+def parse_any_part(part_raw):
+    cmd = parse_part(part_raw)
+    if cmd is None:
+        cmd = parse_no_number_part(part_raw)
+    return cmd
+
+def parse_local_rules(instruction, state_info, battery_callback=None):
+    """
+    ローカルルールベース判定。LLMを呼び出す前に、シンプルな表現をルールベースで直接解析する。
+    返り値: dict (成功時), None (マッチせずLLMへフォールバックが必要な場合)
+    """
+    norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
+    
+    # 1. 停止・キャンセルの判定
+    cancel_patterns = ["止ま", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
+    if any(pat in norm_inst for pat in cancel_patterns):
+        return {"commands": [], "cancel": True}
+    
+    # 2. バッテリー情報の判定
+    if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
+        if battery_callback:
+            battery_msg = battery_callback()
+            return {"commands": [], "cancel": False, "fast_path": True, "speak": battery_msg}
+        return {"commands": [], "cancel": False, "fast_path": True}
+        
+    # 3. 雑談・キャラクター紹介の高速応答
+    for kw, reply in CHAT_KEYWORDS.items():
+        if kw in norm_inst:
+            return {"commands": [], "cancel": False, "fast_path": True, "speak": reply}
+
+    # 4. 状況・エラー確認クエリの判定
+    status_queries = ["状況", "状態", "ステータス", "どうなってる", "何してる", "どこにいる"]
+    error_queries = ["なんで失敗", "何で失敗", "なぜ失敗", "なぜ止まった", "なんで止まった", "何で止まった", "失敗した理由", "止まった理由"]
+    is_status_query = any(q in norm_inst for q in status_queries)
+    is_error_query = any(q in norm_inst for q in error_queries)
+    
+    if is_status_query or is_error_query:
+        current_x = state_info.get("current_x", 0.0)
+        current_y = state_info.get("current_y", 0.0)
+        executing = state_info.get("executing", False)
+        queue_len = state_info.get("queue_len", 0)
+        stuck = state_info.get("stuck", False)
+        people_count = state_info.get("people_count", 0)
+        face_active = state_info.get("face_active", False)
+        current_expression = state_info.get("current_expression", "normal")
+        
+        speak_msg = ""
+        if is_status_query:
+            face_state_str = f"表情は「{current_expression}」、画面は{'接続中' if face_active else '切断状態'}なのだ。"
+            people_str = f"周りには {people_count} 人の人が検知されているのだ！"
+            
+            if stuck:
+                speak_msg = f"[sad]今は障害物に遮られて立ち往生している状態なのだ。進路が塞がれているみたいなのだ。{people_str}"
+            elif executing:
+                speak_msg = f"[happy]今は目標地点に向かって移動中なのだ！キューにはあと{queue_len}個のアクションが残っているのだ。{people_str}"
+            else:
+                speak_msg = f"[happy]今は停止中で、次の指示を待っている状態なのだ！現在位置は X={current_x:.2f}, Y={current_y:.2f} なのだ。{face_state_str} {people_str}"
+        else:
+            last_status = state_info.get("last_action_status", "")
+            last_type = state_info.get("last_action_type", "")
+            if last_status == "failed_stuck":
+                speak_msg = "[sad]さっきは進もうとしたんだけど、行く手が障害物で遮られちゃって、これ以上進めなくて停止したのだ。"
+            elif last_status in ["failed_cancelled", "cancelled"]:
+                speak_msg = "[happy]さっきはユーザー指示で動作を途中でキャンセルしたのだ。"
+            elif last_type == "turn" and last_status == "failed":
+                speak_msg = "[sad]さっきは旋回しようとしたんだけど、目標の角度まで回りきれずに途中で止まっちゃったのだ。"
+            else:
+                speak_msg = "[happy]直前のアクションは正常に完了しているか、まだエラーは発生していないのだ！"
+        
+        return {"commands": [], "cancel": False, "fast_path": True, "speak": speak_msg}
+
+    # 5. 是正・訂正・相対調整のルールベース判定
+    correction_patterns_map = {
+        "行き過ぎ": "overshot", "いきすぎ": "overshot", "回りすぎ": "overshot", "まわりすぎ": "overshot",
+        "進みすぎ": "overshot", "すすみすぎ": "overshot", "下がりすぎ": "overshot", "さがりすぎ": "overshot",
+        "動きすぎ": "overshot", "うごきすぎ": "overshot", "すぎだ": "overshot", "すぎよ": "overshot",
+        "逆": "opposite", "ぎゃく": "opposite", "反対": "opposite", "はんたい": "opposite",
+        "足りない": "more", "たりない": "more", "不足": "more", "ふそく": "more",
+        "戻って": "goback", "もどって": "goback", "やり直し": "goback", "やりなおし": "goback"
+    }
+    correction_type = None
+    for kw, c_t in correction_patterns_map.items():
+        if kw in norm_inst:
+            correction_type = c_t
+            break
+            
+    if correction_type is not None:
+        last_type = state_info.get("last_action_type", "")
+        last_target = state_info.get("last_target_value", 0.0)
+        start_x = state_info.get("last_action_start_x", 0.0)
+        start_y = state_info.get("last_action_start_y", 0.0)
+        start_yaw = state_info.get("last_action_start_yaw", 0.0)
+        
+        cmd_list = []
+        speak_msg = ""
+        
+        if correction_type == "overshot":
+            if last_type == "forward":
+                val = max(0.3, last_target * 0.3 if isinstance(last_target, (int, float)) else 0.5)
+                cmd_list.append({"type": "backward", "value": val})
+                speak_msg = f"[sad]ごめんなさい、ちょっと進みすぎちゃったのだ！{val:.1f}メートル下がるのだ。"
+            elif last_type == "backward":
+                val = max(0.3, last_target * 0.3 if isinstance(last_target, (int, float)) else 0.5)
+                cmd_list.append({"type": "forward", "value": val})
+                speak_msg = f"[sad]ごめんなさい、ちょっと下がりすぎちゃったのだ！{val:.1f}メートル進むのだ。"
+            elif last_type in ["turn", "spin"]:
+                val = -last_target * 0.3 if isinstance(last_target, (int, float)) else -0.5
+                cmd_list.append({"type": last_type, "value": val})
+                dir_str = "右" if val < 0 else "左"
+                speak_msg = f"[sad]ごめんなさい、ちょっと回りすぎちゃったのだ！少し{dir_str}に戻るのだ。"
+                
+        elif correction_type == "opposite":
+            if last_type == "forward":
+                cmd_list.append({"type": "backward", "value": last_target if isinstance(last_target, (int, float)) else 1.0})
+                speak_msg = "[surprised]あ、逆向きだったのだ！反対側に進むのだ。"
+            elif last_type == "backward":
+                cmd_list.append({"type": "forward", "value": last_target if isinstance(last_target, (int, float)) else 1.0})
+                speak_msg = "[surprised]あ、逆向きだったのだ！反対側に進むのだ。"
+            elif last_type in ["turn", "spin"]:
+                val = -last_target if isinstance(last_target, (int, float)) else -1.57
+                cmd_list.append({"type": last_type, "value": val})
+                speak_msg = "[surprised]あ、逆向きだったのだ！反対側を向くのだ。"
+                
+        elif correction_type == "more":
+            if last_type in ["forward", "backward"]:
+                val = max(0.5, last_target * 0.5 if isinstance(last_target, (int, float)) else 1.0)
+                cmd_list.append({"type": last_type, "value": val})
+                speak_msg = f"[happy]もう少し動かすのだ！追加で {val:.1f}メートル移動するのだ。"
+            elif last_type in ["turn", "spin"]:
+                val = last_target * 0.5 if isinstance(last_target, (int, float)) else 0.5
+                cmd_list.append({"type": last_type, "value": val})
+                speak_msg = "[happy]もう少し回るのだ！追加で旋回するのだ。"
+                
+        elif correction_type == "goback":
+            if last_type in ["forward", "backward", "goto"]:
+                cmd_list.append({"type": "goto", "value": [start_x, start_y]})
+                cmd_list.append({"type": "face", "value": math.degrees(start_yaw)})
+                speak_msg = "[happy]元いた場所に戻るのだ！"
+            elif last_type in ["turn", "spin"]:
+                cmd_list.append({"type": "face", "value": math.degrees(start_yaw)})
+                speak_msg = "[happy]元の向きに戻るのだ！"
+                
+        if cmd_list:
+            return {"commands": cmd_list, "cancel": False, "speak": speak_msg, "fast_path": True}
+
+    # 6. 四角・正方形などの図形描画
+    shape_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:m|メートル)?の(?:四角|正方形|スクエア)", norm_inst)
+    if shape_match:
+        size = float(shape_match.group(1))
+        cmds = []
+        for _ in range(4):
+            cmds.append({"type": "forward", "value": size})
+            cmds.append({"type": "turn", "value": -1.5708})
+        return {"commands": cmds, "cancel": False, "speak": f"[happy]一辺{size}メートルの正方形を描くように移動するのだ！"}
+
+    # 7. 繰り返し（ループ）
+    loop_match = re.search(r"(\d+)\s*(?:回|回繰り返して|回繰り返し)", norm_inst)
+    if loop_match:
+        times = int(loop_match.group(1))
+        base_part = re.sub(r"(?:のを)?\d+\s*(?:回|回繰り返して|回繰り返し).*", "", norm_inst).strip()
+        base_cmds = []
+        parts = [p.strip() for p in re.split(r"して|て|、|そして", base_part) if p.strip()]
+        for part in parts:
+            parsed_cmd = parse_any_part(part)
+            if parsed_cmd:
+                base_cmds.append(parsed_cmd)
+        if base_cmds:
+            cmds = base_cmds * times
+            return {"commands": cmds, "cancel": False, "speak": f"[happy]指示された動きを{times}回繰り返すのだ！"}
+
+    # 8. 一般的な数値指定コマンドのパース（複数コマンドの連結に対応）
+    has_number = any(char.isdigit() for char in norm_inst) or any(x in norm_inst for x in ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "点", "度", "㍍", "メートル"])
+    if has_number:
+        parts = [p.strip() for p in re.split(r"して|て|、|そして", norm_inst) if p.strip()]
+        parsed_cmds = []
+        for part in parts:
+            cmd = parse_any_part(part)
+            if cmd:
+                parsed_cmds.append(cmd)
+        if parsed_cmds:
+            return {"commands": parsed_cmds, "cancel": False}
+
+    # 9. 数値指定を含まない標準的な指示（簡易前進・後退・旋回・スピード変更）
+    slow_patterns = ["ゆっくり", "遅く", "おそく", "おそい", "遅い", "スピード下げ", "スピード落と", "速度下げ", "yukkuri", "slow", "下げて", "スピードおと"]
+    normal_patterns = ["ふつう", "普通", "通常", "normal"]
+    fast_patterns = ["早く", "急いで", "スピード上げ", "速度上げ", "fast", "speedup", "上げて"]
+    
+    speed_val = None
+    if any(pat in norm_inst for pat in slow_patterns):
+        speed_val = 0.2
+    elif any(pat in norm_inst for pat in normal_patterns):
+        speed_val = 0.9
+    elif any(pat in norm_inst for pat in fast_patterns):
+        speed_val = 1.0
+
+    cmd_list = []
+    if speed_val is not None:
+        cmd_list.append({"type": "speed", "value": speed_val})
+        
+    no_num_cmd = parse_no_number_part(norm_inst)
+    if no_num_cmd:
+        cmd_list.append(no_num_cmd)
+        return {"commands": cmd_list, "cancel": False}
+
+    has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい", "後ろ", "うしろ", "ushiro", "裏", "うら"])
+    if has_dir:
+        last_cmd_was_backward = state_info.get("last_cmd_was_backward", False)
+        last_cmd_was_forward = state_info.get("last_cmd_was_forward", False)
+        
+        if norm_inst in ["motto", "もっと", "もうすこし", "もう少し", "もうちょっと", "さらに", "すこし", "少し", "ちょっと"]:
+            val = 1.0 if any(x in norm_inst for x in ["すこし", "少し", "ちょっと"]) else 2.0
+            if last_cmd_was_backward:
+                cmd_list.append({"type": "backward", "value": max(1.0, val)})
+                return {"commands": cmd_list, "cancel": False}
+            elif last_cmd_was_forward:
+                cmd_list.append({"type": "forward", "value": max(1.0, val)})
+                return {"commands": cmd_list, "cancel": False}
+    else:
+        if speed_val is not None:
+            return {"commands": cmd_list, "cancel": False}
+
+    return None
