@@ -322,6 +322,9 @@ class LlmDynamicGoal(Node):
         # speed コマンドがあれば、移動開始前に反映されるようにキューの最優先（先頭）に並び替える
         sorted_commands = [c for c in commands if c.get("type") == "speed"] + [c for c in commands if c.get("type") != "speed"]
         
+        # 進行中の動作があれば、新しいコマンドを開始する前に一度キャンセルして停止させる（割り込み処理）
+        self.cancel_navigation(clear_queue=False)
+        
         with self.lock:
             # 既存のキューをクリアして新しい指示シーケンスを設定
             self.command_queue = sorted_commands
