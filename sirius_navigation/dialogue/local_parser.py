@@ -109,7 +109,7 @@ DIALOGUE_TEMPLATES = {
     "turn_success": "[happy]旋回が完了したのだ！",
     "turn_failure": "[sad]旋回に失敗したのだ。",
     "speed_change": "[happy]速度を {speed:.2f} に変更するのだ！",
-    "goto_start": "[happy]座標 ({x:.2f}, {y:.2f}) に向かうのだ！",
+    "goto_start": "[happy]座標 X{x:.1f}、Y{y:.1f} に向かうのだ！",
     "battery_report": "[happy]現在のバッテリー残量は {level:.1f}% なのだ！状態は {charging_str} なのだ。",
     "battery_error": "[sad]バッテリー残量データが不正なのだ。",
     "battery_fail": "[sad]バッテリー状態が確認できないのだ。",
@@ -311,7 +311,7 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
     
     # 1. 停止・キャンセルの判定
-    cancel_patterns = ["止ま", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
+    cancel_patterns = ["止ま", "とまれ", "止め", "とめ", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
     if any(pat in norm_inst for pat in cancel_patterns):
         return {"commands": [], "cancel": True}
     
@@ -321,6 +321,16 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
             battery_msg = battery_callback()
             return {"commands": [], "cancel": False, "fast_path": True, "speak": battery_msg}
         return {"commands": [], "cancel": False, "fast_path": True}
+
+    # 2.2 原点復帰は「直前動作の取り消し」より優先して、map座標(0,0)への移動として扱う
+    if any(x in norm_inst for x in ["原点", "げんてん", "origin", "ホーム", "home"]):
+        if any(x in norm_inst for x in ["戻", "もど", "行", "い", "移動", "向か", "帰", "かえ"]):
+            return {
+                "commands": [{"type": "goto", "value": [0.0, 0.0]}],
+                "cancel": False,
+                "fast_path": True,
+                "speak": "[happy]原点、Xゼロ、Yゼロに向かうのだ！"
+            }
 
     # 2.5 表情・演出の高速判定
     face_cmds = extract_face_commands(norm_inst)

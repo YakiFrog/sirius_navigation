@@ -250,10 +250,11 @@ class LlmDynamicGoal(Node):
         instruction = unicodedata.normalize('NFKC', instruction)
         
         # 1. 停止・キャンセル指示の簡易キーワード判定（高速応答のため）
-        stop_keywords = ["止まれ", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機"]
+        stop_keywords = ["止ま", "とまれ", "止め", "とめ", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機"]
         if any(kw in instruction.lower() for kw in stop_keywords):
             self.get_logger().warning("Stop/Cancel keyword detected. Canceling active goal.")
             self.cancel_navigation()
+            self.send_sirius_speak("[surprised]了解、止まるのだ！")
             return
 
         # 2. LM Studio にリクエストを投げる
@@ -269,6 +270,7 @@ class LlmDynamicGoal(Node):
         if is_cancel:
             self.get_logger().warning("LLM interpreted instruction as STOP/CANCEL.")
             self.cancel_navigation()
+            self.send_sirius_speak("[surprised]了解、止まるのだ！")
             return
             
         commands = result.get("commands", [])
@@ -618,8 +620,11 @@ class LlmDynamicGoal(Node):
                     self.current_xy_tolerance = tolerance
                 self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
                 
-                # 指示受け取り報告
-                self.send_sirius_speak(DIALOGUE_TEMPLATES["goto_start"].format(x=target_x, y=target_y))
+                # 指示受け取り報告。原点は TTS で聞き取りやすいように専用表現にする。
+                if abs(target_x) < 0.001 and abs(target_y) < 0.001:
+                    self.send_sirius_speak("[happy]原点、Xゼロ、Yゼロに向かうのだ！")
+                else:
+                    self.send_sirius_speak(DIALOGUE_TEMPLATES["goto_start"].format(x=target_x, y=target_y))
                 
                 # 直接 map 座標系でゴールを発行する
                 self.publish_direct_map_goal(target_x, target_y, target_yaw)
