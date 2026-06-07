@@ -365,6 +365,7 @@ class LlmDynamicGoal(Node):
             
         cmd_type = cmd.get("type", "forward")
         value = cmd.get("value", 0.0)
+        speak_override = cmd.get("speak")
         
         with self.lock:
             self.last_action_type = cmd_type
@@ -536,13 +537,18 @@ class LlmDynamicGoal(Node):
                 self.turn_arrival_triggered = False
             
             if should_speak:
-                deg_val = round(math.degrees(abs(value)))
-                if abs(deg_val - 180) < 15:
-                    turn_msg = "[wink]後ろを向くのだ！"
-                elif abs(deg_val - 90) < 15:
-                    turn_msg = f"[wink]{'右' if value < 0 else '左'}に90度回るのだ！"
+                if speak_override:
+                    turn_msg = speak_override
                 else:
-                    turn_msg = f"[wink]{'右' if value < 0 else '左'}を向くのだ！"
+                    deg_val = round(math.degrees(abs(value)))
+                    if abs(deg_val - 180) < 15:
+                        turn_msg = "[wink]後ろを向くのだ！"
+                    elif abs(deg_val - 90) < 15:
+                        turn_msg = f"[wink]{'右' if value < 0 else '左'}に90度回るのだ！"
+                    elif deg_val >= 300:
+                        turn_msg = f"[wink]{'右' if value < 0 else '左'}にその場旋回するのだ！"
+                    else:
+                        turn_msg = f"[wink]{'右' if value < 0 else '左'}を向くのだ！"
                 self.send_sirius_speak(turn_msg)
             self.send_spin_goal(value)
             
@@ -555,8 +561,10 @@ class LlmDynamicGoal(Node):
             rad_value = math.radians(total_deg)
             self.get_logger().info(f"[Spin] Converting {total_deg:+.0f}deg to turn command ({rad_value:+.3f} rad).")
             # キューの先頭に turn コマンドを挿入して再実行
+            direction = "右" if rad_value < 0 else "左"
+            spin_speak = f"[wink]{direction}にその場旋回するのだ！"
             with self.lock:
-                self.command_queue.insert(0, {"type": "turn", "value": rad_value})
+                self.command_queue.insert(0, {"type": "turn", "value": rad_value, "speak": spin_speak})
             self.execute_next_command()
             return
             

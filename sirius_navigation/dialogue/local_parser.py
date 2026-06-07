@@ -266,6 +266,12 @@ def parse_no_number_part(part_raw):
     is_right = any(pat in part_norm for pat in ["右", "migi", "みぎ", "みぎむ"])
     is_left = any(pat in part_norm for pat in ["左", "hidari", "ひだり", "ひだりむ"])
     is_back = any(pat in part_norm for pat in ["後ろ", "うしろ", "ushiro", "裏", "うら"])
+
+    if any(x in part_norm for x in ["旋回", "回転", "senkai", "spin"]):
+        deg = 360.0
+        if is_right or "時計回り" in part_norm:
+            deg = -360.0
+        return {"type": "spin", "value": deg}
     
     if (is_right or is_left or is_back) and not any(x in part_norm for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす"]):
         if is_back:
@@ -275,12 +281,6 @@ def parse_no_number_part(part_raw):
             if any(x in part_norm for x in ["少し", "ちょっと", "微", "すこし"]):
                 val = -0.5236 if is_right else 0.5236
         return {"type": "turn", "value": val}
-        
-    if any(x in part_norm for x in ["旋回", "回転", "senkai", "spin"]):
-        deg = 360.0
-        if "右" in part_norm or "時計回り" in part_norm:
-            deg = -360.0
-        return {"type": "spin", "value": deg}
 
     if any(x in part_norm for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro"]):
         val = 1.0
