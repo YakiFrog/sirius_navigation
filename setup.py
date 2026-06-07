@@ -40,6 +40,7 @@ setup(
             'sam3_colored_map_loader = sirius_navigation.sam3_colored_map_loader:main',
             'sam3_grid_visualizer = sirius_navigation.sam3_grid_visualizer:main',
             'twist_mux_monitor = sirius_navigation.twist_mux_monitor:main',
+            'status_monitor = sirius_navigation.dialogue.status_monitor:main',
             'odom_path_publisher = sirius_navigation.odom_path_publisher:main',
         ],
     },

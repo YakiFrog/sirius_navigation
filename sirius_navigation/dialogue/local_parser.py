@@ -110,7 +110,7 @@ DIALOGUE_TEMPLATES = {
     "turn_failure": "[sad]旋回に失敗したのだ。",
     "speed_change": "[happy]速度を {speed:.2f} に変更するのだ！",
     "goto_start": "[happy]座標 X{x:.1f}、Y{y:.1f} に向かうのだ！",
-    "battery_report": "[happy]現在のバッテリー残量は {level:.1f}% なのだ！状態は {charging_str} なのだ。",
+    "battery_report": "[happy]現在のバッテリー残量は {level:.1f}パーセントなのだ！状態は {charging_str} なのだ。",
     "battery_error": "[sad]バッテリー残量データが不正なのだ。",
     "battery_fail": "[sad]バッテリー状態が確認できないのだ。",
 }
@@ -267,7 +267,7 @@ def parse_no_number_part(part_raw):
     is_left = any(pat in part_norm for pat in ["左", "hidari", "ひだり", "ひだりむ"])
     is_back = any(pat in part_norm for pat in ["後ろ", "うしろ", "ushiro", "裏", "うら"])
 
-    if any(x in part_norm for x in ["旋回", "回転", "senkai", "spin"]):
+    if any(x in part_norm for x in ["旋回", "回転", "senkai", "spin", "まわ", "回っ", "回って"]):
         deg = 360.0
         if is_right or "時計回り" in part_norm:
             deg = -360.0
@@ -344,15 +344,51 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
         if kw in norm_inst:
             return {"commands": [], "cancel": False, "fast_path": True, "speak": reply}
 
+    # 3.5 機能説明・能力質問の高速応答
+    capability_queries = ["なにができる", "何ができる", "何ができるの", "なにができるの", "できること", "何が可能", "できる?", "できる？", "何が得意"]
+    if any(q in norm_inst for q in capability_queries):
+        speak_msg = (
+            "[happy]ボクは前進、後退、右向き、左向き、その場旋回、座標への移動、速度変更、"
+            "表情変更、停止、再開、キャンセルができるのだ！"
+        )
+        return {"commands": [], "cancel": False, "fast_path": True, "speak": speak_msg}
+
+    smalltalk_queries = [
+        "じゃんけん", "あっち向いて", "なぞなぞ", "クイズ", "冗談", "ジョーク",
+        "何が見える", "なにが見える", "周りに何が見える", "周囲に何が見える"
+    ]
+    if any(q in norm_inst for q in smalltalk_queries):
+        return {
+            "commands": [],
+            "cancel": False,
+            "fast_path": True,
+            "speak": "[happy]ごめんなさい、ボクはナビゲーション用のロボットなのだ。周りの人やバッテリー、位置や状態の説明はできるけれど、遊びや視覚の判定はできないのだ。"
+        }
+
+    weather_queries = ["今日の天気", "天気は", "天気どう", "天気", "weather"]
+    if any(q in norm_inst for q in weather_queries):
+        return {
+            "commands": [],
+            "cancel": False,
+            "fast_path": True,
+            "speak": "[sad]ごめんなさい、私はナビゲーション用のアシスタントなので、お天気の情報は持っていないのだ。"
+        }
+
     # 4. 状況・気分・エラー確認クエリの判定
     status_queries = ["状況", "状態", "ステータス", "どうなってる", "何してる", "どこにいる"]
+    people_queries = [
+        "何人", "何にん", "人数", "人の数", "周りの人", "周囲の人", "周囲に人",
+        "周りに何人", "周りに何にん", "何人いる", "何人いるか", "人数は", "人が何人",
+        "教えて", "いるか"
+    ]
     mood_queries = ["気分", "機嫌", "きぶん", "きげん", "調子どう", "調子は", "元気", "げんき"]
     error_queries = ["なんで失敗", "何で失敗", "なぜ失敗", "なぜ止まった", "なんで止まった", "何で止まった", "失敗した理由", "止まった理由"]
     is_status_query = any(q in norm_inst for q in status_queries)
+    is_people_query = any(q in norm_inst for q in people_queries)
     is_mood_query = any(q in norm_inst for q in mood_queries)
     is_error_query = any(q in norm_inst for q in error_queries)
     
-    if is_status_query or is_mood_query or is_error_query:
+    if is_status_query or is_people_query or is_mood_query or is_error_query:
         current_x = state_info.get("current_x", 0.0)
         current_y = state_info.get("current_y", 0.0)
         executing = state_info.get("executing", False)
@@ -371,16 +407,15 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
                 speak_msg = f"[happy]今は{mood_str}なのだ！移動中だから、ちょっと集中しているのだ。"
             else:
                 speak_msg = f"[happy]今は{mood_str}なのだ！いつでも次の指示を待っているのだ。"
-        elif is_status_query:
-            face_state_str = f"表情は「{current_expression}」、画面は{'接続中' if face_active else '切断状態'}なのだ。"
-            people_str = f"周りには {people_count} 人の人が検知されているのだ！"
+        elif is_status_query or is_people_query:
+            people_str = f"ゼロ人" if people_count == 0 else f"{people_count}人"
             
             if stuck:
-                speak_msg = f"[sad]今は障害物に遮られて立ち往生している状態なのだ。進路が塞がれているみたいなのだ。{people_str}"
+                speak_msg = f"[sad]周りには {people_str} の人が検知されているのだ。"
             elif executing:
-                speak_msg = f"[happy]今は目標地点に向かって移動中なのだ！キューにはあと{queue_len}個のアクションが残っているのだ。{people_str}"
+                speak_msg = f"[happy]周りには {people_str} の人が検知されているのだ。"
             else:
-                speak_msg = f"[happy]今は停止中で、次の指示を待っている状態なのだ！現在位置は X={current_x:.2f}, Y={current_y:.2f} なのだ。{face_state_str} {people_str}"
+                speak_msg = f"[happy]周りには {people_str} の人が検知されているのだ。"
         else:
             last_status = state_info.get("last_action_status", "")
             last_type = state_info.get("last_action_type", "")

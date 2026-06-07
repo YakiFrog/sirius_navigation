@@ -2,6 +2,7 @@
 import sys
 import math
 import json
+import time
 import urllib.request
 import urllib.error
 import threading
@@ -147,7 +148,7 @@ class LlmDynamicGoal(Node):
         
         # 10Hz (0.1秒周期)で旋回中の角度監視を行うタイマー（preemptionを防ぐため再発行は行わない）
         self.dynamic_goal_timer = self.create_timer(0.1, self.timer_goal_publisher)
-        
+
         # 対話型コマンドライン入力を別スレッドで開始
         self.running = True
         self.input_thread = threading.Thread(target=self.interactive_input_loop, daemon=True)
@@ -802,6 +803,17 @@ class LlmDynamicGoal(Node):
         import re
         norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
 
+        def _extract_jsonish_speak(text):
+            if not text:
+                return None
+            m = re.search(r'"speak"\s*:\s*"([^"]{1,400})', text)
+            if m:
+                return m.group(1)
+            m = re.search(r'"response"\s*:\s*"([^"]{1,400})', text)
+            if m:
+                return m.group(1)
+            return None
+
         # --- ローカルルールベース判定 ---
         state_info = self._build_state_info()
         local_result = parse_local_rules(
@@ -819,100 +831,12 @@ class LlmDynamicGoal(Node):
         # ルールベースで一致しなかった複雑な指示は LLM (LM Studio) へ問い合わせる
         # -------------------------------------------------------------------
         system_prompt = (
-            "You are a robotic navigator assistant. Your task is to translate natural language directions "
-            "into a sequence of motion commands for the robot, or to answer user questions about your status, history, or errors.\n\n"
-            "CRITICAL: Do not explain your reasoning. Do not output any reasoning steps, thoughts, or chain-of-thought content. "
-            "You MUST output raw JSON and ONLY raw JSON directly and immediately. Do not include markdown code block syntax (like ```json).\n"
-            "Output format:\n"
-            "{\n"
-            "  \"commands\": [\n"
-            "    {\"type\": \"forward\"|\"backward\"|\"turn\"|\"spin\"|\"face\"|\"goto\"|\"speed\"|\"expression\"|\"parameter\", \"value\": float | [float, float] | string | object}\n"
-            "  ],\n"
-            "  \"cancel\": boolean,\n"
-            "  \"speak\": \"optional string in Japanese (if user asks a question, complaints about action, or asks why a failure/cancellation occurred, use this field to explain why using the physical state parameters)\"\n"
-            "}\n\n"
-            "【Commands Definition】\n"
-            "- \"type\": \"forward\": Move straight forward. \"value\": distance in meters (positive float).\n"
-            "  Default distance if unspecified: 1.5m. 'ちょっと'/'少し': 0.5m. '大きく'/'たくさん': 2.5m. Minimum distance is 0.3m.\n"
-            "  Also maps to Romaji Japanese: 'mae'/'susunde'/'maeitte'/'susume'.\n"
-            "- \"type\": \"backward\": Move straight backward. \"value\": distance in meters (positive float).\n"
-            "  Default distance if unspecified: 1.0m. Minimum distance is 0.3m.\n"
-            "  Also maps to Romaji Japanese: 'back'/'sagatte'/'usirosagatte'/'ushiro sagatte'.\n"
-            "- \"type\": \"turn\": Rotate to face a relative angle. \"value\": angle in radians. "
-            "POSITIVE=left(CCW), NEGATIVE=right(CW). Use for '右向いて'(-1.5708), '左向いて'(+1.5708), '少し右'(-0.5236).\n"
-            "  Also maps to Romaji Japanese: 'migimuite'/'migi muite'(-1.5708), 'hidarimuite'/'hidari muite'(+1.5708).\n"
-            "- \"type\": \"spin\": Rotate in place by specified degrees without translating. "
-            "\"value\": total rotation angle in DEGREES. POSITIVE=left(CCW), NEGATIVE=right(CW), 0=full 360deg spin.\n"
-            "  Use for: 'その場旋回'(0), '一回転'(360), '右に半回転'(-180), '時計回りに90度'(-90), 'sonobasenkai'(360).\n"
-            "- \"type\": \"face\": Turn to face an absolute map direction. "
-            "\"value\": target yaw angle in DEGREES in map frame (0=+X axis, 90=+Y axis, 180/-180=-X axis, -90=-Y axis).\n"
-            "  Use when user says a compass direction like '北を向いて'(90), '南向き'(-90), '東向き'(0), '西向き'(180).\n"
-            "- \"type\": \"goto\": Navigate to absolute map coordinates. \"value\": [x_coord, y_coord] (array of two floats).\n"
-            "- \"type\": \"speed\": Change the robot movement speed. \"value\": speed factor or absolute speed in m/s "
-            "(mapped to slow [0.20], safe [0.40], normal [0.90], fast [1.00]).\n\n"
-            "- \"type\": \"expression\": Change the robot's facial expression. \"value\": one of "
-            "\"normal\", \"happy\", \"sad\", \"angry\", \"surprised\", \"wink\", \"sleeping\", \"pien\".\n"
-            "- \"type\": \"parameter\": Change face visual parameters. Use "
-            "{\"name\": \"blushAmount\", \"amount\": 0.0-1.0} for blushing cheeks and "
-            "{\"name\": \"sparkleAmount\", \"amount\": 0.0-1.0} for sparkling eyes. "
-            "Use this instead of expression for blush/sparkle.\n"
-            "【Conversational Context & Embodied Feedback Rules】\n"
-            "You will receive feedback from both the user's conversation AND the robot's physical sensors "
-            "(the system message labeled 【Robot Current Hardware State Feedback】).\n"
-            "1. If the user complains about the last action (e.g. '全然進んでいない' / 'Not moving at all'), "
-            "look at the robot's physical state. If velocity=0.0m/s with BLOCKED status, "
-            "generate a corrective sequence (detour turn or reverse).\n"
-            "2. If a command value was too small and robot arrived safely, amplify the value in the next command.\n"
-            "3. CRITICAL ON CONTEXT DIRECTION: If the user says 'motto' (more) or 'mottosagatte' / 'motto sagatte' after a 'backward' command, "
-            "you MUST output a 'backward' command (e.g. value: 1.0). Do not output 'forward' unless they explicitly ask to go forward (e.g. 'mae'/'susunde').\n"
-            "4. LOOP UNROLLING: If the user asks to repeat an action sequence (e.g., 'X回繰り返して' / 'repeat X times'), you MUST fully unroll/expand the sequence into individual commands in the JSON list.\n"
-            "5. SHAPES (e.g. Squares/四角/正方形): If the user asks to draw or move in a square of size X (e.g., 'Xm of square' / 'square of X meters'), unroll it into 8 commands: forward Xm, turn right (-1.5708), forward Xm, turn right, forward Xm, turn right, forward Xm, turn right.\n"
-            "7. USER CORRECTION & RECALIBRATION: If the user complains about the last action (e.g. 'ちょっと行き過ぎ', '回りすぎ', '逆だよ', 'もっと右', '足りない', or complaining '後ろ向いてって言ってるのに1周した' / '右って言ったのに左に回った'), inspect the `Last Action Status` (type, target value) and the dialogue history. Generate a corrective/compensatory command. Crucially, if the last action was a rotation (turn, spin, or face) and the user says '行き過ぎ' (overshot) or '回りすぎ', you MUST output a turn in the OPPOSITE direction (e.g., if last action was a turn of 1.5708 and user says '行き過ぎ', output a turn of -0.5236). Do NOT output forward or backward linear translation commands if the last action was a rotation.\n"
-            "8. CURRENT STATUS / GENERAL SITUATION QUESTIONS: If the user asks about the current status, situation, or what the robot is doing (e.g. '今の状況は？', 'どういう状態？', '今のステータスを教えて', 'どういう状況'), you MUST explain the current state in Japanese in the 'speak' field, using the details from 【Robot Current Hardware State Feedback】 (e.g., whether the robot is Idle/Ready or Executing, the current target coordinate, remaining distance, or obstacle blockage). Do not return any commands unless they explicitly command a new movement.\n"
-            "9. UNRELATED / GENERAL CONVERSATION: If the user says something unrelated to robot control or navigation status (e.g., general chatter, joking, questions about weather, food, personal comments like '頭使って', '今日の天気は？'), do NOT generate any commands (set 'commands' to `[]`) and do NOT set cancel. Instead, respond naturally/politely in Japanese in the 'speak' field as a friendly navigator assistant.\n\n"
-            "【Output Examples】\n"
-            "- 'ちょっと前に行って' -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false}\n"
-            "- 'ちょっと行き過ぎ' (when last action was backward 1.0) -> {\"commands\": [{\"type\": \"forward\", \"value\": 0.5}], \"cancel\": false, \"speak\": \"[sad]ごめんなさい、ちょっと下がりすぎちゃったのだ！少し前に戻るのだ。\"}\n"
-            "- '行き過ぎ' (when last action was turn with value 1.5708) -> {\"commands\": [{\"type\": \"turn\", \"value\": -0.5236}], \"cancel\": false, \"speak\": \"[sad]ごめんなさい、ちょっと左に回りすぎちゃったのだ！少し右に戻るのだ。\"}\n"
-            "- '逆だよ' (when last action was turn with value -1.5708) -> {\"commands\": [{\"type\": \"turn\", \"value\": 1.5708}], \"cancel\": false, \"speak\": \"[surprised]あ、逆向きだったのだ！反対側を向くのだ。\"}\n"
-            "- '後ろ向いてって言ってるのに1周した' (when last action was spin 360) -> {\"commands\": [{\"type\": \"turn\", \"value\": 3.1415}], \"cancel\": false, \"speak\": \"[sad]ごめんなさい！一周するんじゃなくて、後ろを向くのだったのだ。半周（180度）回って後ろを向くのだ。\"}\n"
-            "- '今の状況は？' (when Status is Idle/Ready) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]今は停止中で、次の指示を待っている状態なのだ！\"}\n"
-            "- '今の状況を教えて' (when Status is Executing Sequence and remaining distance is 1.2 meters) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]今は目標地点に向かって移動中なのだ！目的地まではあと1.2メートルほどなのだ。\"}\n"
-            "- 'どういう状況' (when obstacle blocks the way) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]今は障害物に阻まれて立ち往生している状態なのだ。進路が塞がれているみたいなのだ。\"}\n"
-            "- '今日の天気は？' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]ごめんなさい、私はナビゲーション用のアシスタントなので、お天気の情報は持っていないのだ。お外が見たいのだ！\"}\n"
-            "- 'システムの説明をして' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]ボクは音声やテキストの指示を理解して自律移動するナビゲーションシステムなのだ！「3m前に行って」や「右向いて」のように話しかけてほしいのだ！\"}\n"
-            "- '何ができるの？' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]ボクは「前に進んで」や「右を向いて」といった移動の指示を理解して動くことができるのだ！今の状態やエラーの説明もできるのだ！\"}\n"
-            "- '頭使って' -> {\"commands\": [], \"cancel\": false, \"speak\": \"[happy]うう、もっと頭を柔らかくして賢く考えられるように頑張るのだ！\"}\n"
-            "- 'なんで失敗したの？' (when last action was turn with error) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]さっきは旋回しようとしたんだけど、目標の角度まで回りきれずに途中で止まっちゃったのだ。\"}\n"
-            "- 'なんで止まった？' (when last action was forward and got stuck) -> {\"commands\": [], \"cancel\": false, \"speak\": \"[sad]進もうとしたんだけど、行く手が遮られちゃって、これ以上進めなかったのだ。\"}\n"
-            "- '1.5m後退して' -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.5}], \"cancel\": false}\n"
-            "- '右向いて' -> {\"commands\": [{\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
-            "- 'usirosagatte' -> {\"commands\": [{\"type\": \"backward\", \"value\": 0.5}], \"cancel\": false}\n"
-            "- 'motto' (when last command was backward) -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.0}], \"cancel\": false}\n"
-            "- 'mottosagatte' -> {\"commands\": [{\"type\": \"backward\", \"value\": 1.5}], \"cancel\": false}\n"
-            "- 'mae itte' -> {\"commands\": [{\"type\": \"forward\", \"value\": 1.0}], \"cancel\": false}\n"
-            "- 'migimuite' -> {\"commands\": [{\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
-            "- 'sonobasenkai' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}], \"cancel\": false}\n"
-            "- '少し左に向いて' -> {\"commands\": [{\"type\": \"turn\", \"value\": 0.5236}], \"cancel\": false}\n"
-            "- 'その場で旋回して' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}], \"cancel\": false}\n"
-            "- '右に一回転' -> {\"commands\": [{\"type\": \"spin\", \"value\": -360}], \"cancel\": false}\n"
-            "- '時計回りに半回転' -> {\"commands\": [{\"type\": \"spin\", \"value\": -180}], \"cancel\": false}\n"
-            "- '北向きになって' -> {\"commands\": [{\"type\": \"face\", \"value\": 90}], \"cancel\": false}\n"
-            "- '東を向いて' -> {\"commands\": [{\"type\": \"face\", \"value\": 0}], \"cancel\": false}\n"
-            "- '座標(1.5, 2.0)に向かって' -> {\"commands\": [{\"type\": \"goto\", \"value\": [1.5, 2.0]}], \"cancel\": false}\n"
-            "- '3m前に行って左に曲がって' -> {\"commands\": [{\"type\": \"forward\", \"value\": 3.0}, {\"type\": \"turn\", \"value\": 1.5708}], \"cancel\": false}\n"
-            "- '旋回しながら前進して' -> {\"commands\": [{\"type\": \"spin\", \"value\": 360}, {\"type\": \"forward\", \"value\": 1.0}], \"cancel\": false}\n"
-            "- 'ゆっくり3mすすんで' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.20}, {\"type\": \"forward\", \"value\": 3.0}], \"cancel\": false}\n"
-            "- '0.50m/s of speed and go forward 3m' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.50}, {\"type\": \"forward\", \"value\": 3.0}], \"cancel\": false}\n"
-            "- 'スピード上げて' -> {\"commands\": [{\"type\": \"speed\", \"value\": 1.00}], \"cancel\": false}\n"
-            "- '速度を普通に戻して' -> {\"commands\": [{\"type\": \"speed\", \"value\": 0.90}], \"cancel\": false}\n"
-            "- 'ウインクして' -> {\"commands\": [{\"type\": \"expression\", \"value\": \"wink\"}], \"cancel\": false}\n"
-            "- '頬を赤らめて' -> {\"commands\": [{\"type\": \"parameter\", \"value\": {\"name\": \"blushAmount\", \"amount\": 1.0}}], \"cancel\": false}\n"
-            "- '目をキラキラさせて' -> {\"commands\": [{\"type\": \"parameter\", \"value\": {\"name\": \"sparkleAmount\", \"amount\": 1.0}}], \"cancel\": false}\n"
-            "- 'ウインクして、頬を赤らめて、目をキラキラさせて' -> {\"commands\": [{\"type\": \"expression\", \"value\": \"wink\"}, {\"type\": \"parameter\", \"value\": {\"name\": \"blushAmount\", \"amount\": 1.0}}, {\"type\": \"parameter\", \"value\": {\"name\": \"sparkleAmount\", \"amount\": 1.0}}], \"cancel\": false}\n"
-            "- '4mの四角を描いて' -> {\"commands\": [{\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 4.0}, {\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
-            "- '1m進んで右に曲がるのを4回繰り返して' -> {\"commands\": [{\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}, {\"type\": \"forward\", \"value\": 1.0}, {\"type\": \"turn\", \"value\": -1.5708}], \"cancel\": false}\n"
-            "- '危ない、止まって！' -> {\"commands\": [], \"cancel\": true}"
+            "You are a robotic navigator assistant. Output raw JSON only, no markdown, no reasoning, no extra text.\n"
+            "Schema: {\"commands\": [ {\"type\": one_of(forward, backward, turn, spin, face, goto, speed, expression, parameter), \"value\": any } ], \"cancel\": boolean, \"speak\": string?}\n"
+            "If the user asks a question, explain briefly in Japanese in speak and keep commands empty.\n"
+            "If the user requests movement, output the exact command sequence.\n"
+            "Use the robot state context for current status, remaining distance, blockage, people count, battery, and last action.\n"
+            "Always prefer a valid minimal JSON object. Do not wrap in code fences."
         )
         
         headers = {
@@ -924,8 +848,8 @@ class LlmDynamicGoal(Node):
         
         # メッセージリストを構築（システムプロンプト + 過去の会話履歴 + リアルタイム状態 + 現在の指示）
         with self.lock:
-            if len(self.chat_history) > self.history_max_turns:
-                self.chat_history = self.chat_history[-self.history_max_turns:]
+            if len(self.chat_history) > 4:
+                self.chat_history = self.chat_history[-4:]
             
             messages = [{"role": "system", "content": system_prompt}]
             messages.extend(self.chat_history)
@@ -938,8 +862,63 @@ class LlmDynamicGoal(Node):
             "model": self.model_name,
             "messages": messages,
             "temperature": 0.0,
-            "max_tokens": 1000
+            "max_tokens": 2048,
+            "top_p": 1.0
         }
+
+        def _fallback_short_query(reason_hint=""):
+            """長いプロンプトで失敗したときに、短い再問い合わせを行う"""
+            fallback_prompt = (
+                "You are a robotic navigator assistant. Reply with raw JSON only. "
+                "If the user asks a general question, answer briefly in Japanese in speak. "
+                "Do not reason. Do not use markdown."
+            )
+            fallback_messages = [
+                {"role": "system", "content": fallback_prompt},
+                {"role": "system", "content": state_context},
+                {"role": "user", "content": instruction},
+            ]
+            fallback_payload = {
+                "model": self.model_name,
+                "messages": fallback_messages,
+                "temperature": 0.0,
+                "max_tokens": 256,
+                "top_p": 1.0
+            }
+            try:
+                req2 = urllib.request.Request(
+                    self.lm_studio_url,
+                    data=json.dumps(fallback_payload).encode('utf-8'),
+                    headers=headers,
+                    method='POST'
+                )
+                with urllib.request.urlopen(req2, timeout=15.0) as response2:
+                    res_body2 = response2.read().decode('utf-8')
+                    res_json2 = json.loads(res_body2)
+                    content2 = res_json2['choices'][0]['message']['content'].strip()
+                    if content2.startswith("```"):
+                        lines2 = content2.splitlines()
+                        if len(lines2) >= 3:
+                            content2 = "\n".join(lines2[1:-1])
+                    try:
+                        parsed_json2 = json.loads(content2)
+                    except Exception:
+                        speak_hint2 = _extract_jsonish_speak(content2)
+                        if speak_hint2:
+                            self.get_logger().warning("Fallback JSON was broken, but speak text was recoverable.")
+                            parsed_json2 = {"commands": [], "cancel": False, "speak": speak_hint2}
+                        else:
+                            raise
+                    self.get_logger().info(f"LLM Fallback Raw Output: '{content2}'")
+                    with self.lock:
+                        self.chat_history.append({"role": "user", "content": instruction})
+                        self.chat_history.append({"role": "assistant", "content": content2})
+                    return parsed_json2
+            except Exception as e2:
+                self.get_logger().error(f"Fallback LLM call also failed ({reason_hint}): {e2}")
+                if 'res_body2' in locals():
+                    self.get_logger().error(f"Fallback Raw Response: {res_body2}")
+            return None
         
         try:
             req = urllib.request.Request(
@@ -952,14 +931,27 @@ class LlmDynamicGoal(Node):
             with urllib.request.urlopen(req, timeout=15.0) as response:
                 res_body = response.read().decode('utf-8')
                 res_json = json.loads(res_body)
+                finish_reason = res_json['choices'][0].get('finish_reason')
+                if finish_reason == "length":
+                    self.get_logger().warning("LLM response was truncated by token limit; JSON may be incomplete.")
                 content = res_json['choices'][0]['message']['content'].strip()
+                if not content:
+                    self.get_logger().warning("LLM returned empty content; retrying with a shorter prompt.")
+                    return _fallback_short_query("empty_content")
                 
                 if content.startswith("```"):
                     lines = content.splitlines()
                     if len(lines) >= 3:
                         content = "\n".join(lines[1:-1])
-                        
-                parsed_json = json.loads(content)
+                try:
+                    parsed_json = json.loads(content)
+                except Exception:
+                    speak_hint = _extract_jsonish_speak(content)
+                    if speak_hint:
+                        self.get_logger().warning("LLM JSON was broken, but speak text was recoverable.")
+                        parsed_json = {"commands": [], "cancel": False, "speak": speak_hint}
+                    else:
+                        raise
                 self.get_logger().info(f"LLM Raw Output: '{content}'")
                 
                 # 正常にパースできたら履歴に追加
@@ -971,10 +963,12 @@ class LlmDynamicGoal(Node):
         except urllib.error.URLError as e:
             self.get_logger().error(f"LM Studio API connection failed: {e}")
             self.get_logger().error("Make sure LM Studio is running on port 1234.")
+            return _fallback_short_query("primary_url_error")
         except Exception as e:
             self.get_logger().error(f"Error calling LLM: {e}")
             if 'res_body' in locals():
                 self.get_logger().error(f"Raw Response: {res_body}")
+            return _fallback_short_query("primary_parse_failed")
         return None
         
     def publish_goal_pose(self, tx, ty, yaw_robot, r, theta):

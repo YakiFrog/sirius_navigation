@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import logging
+import re
 
 class FaceClient:
     """sirius_face_anim2 の gRPC サーバーと通信するクライアントラッパー。
@@ -35,6 +36,8 @@ class FaceClient:
 
     def send_speak(self, text):
         """指定したテキストを喋らせる (gRPC ポート 50052)"""
+        # TTSが「0人」を不自然に読むことがあるので、読み上げ用にだけ整形する
+        text = re.sub(r"0\s*人", "ゼロ人", text)
         print(f"Command > [Speech] {text}")
         if not self._should_attempt_connection():
             return False
@@ -193,7 +196,7 @@ class FaceClient:
                     charging_str = "放電中（使用中）"
                 
                 if level >= 0.0:
-                    return f"[happy]現在のバッテリー残量は {level:.1f}% なのだ！状態は {charging_str} なのだ。"
+                    return f"[happy]現在のバッテリー残量は {level:.1f}パーセントなのだ！状態は {charging_str} なのだ。"
                 else:
                     return "[sad]バッテリー残量データが不正なのだ。"
         except Exception as e:
