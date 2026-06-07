@@ -108,6 +108,7 @@ class LlmDynamicGoal(Node):
         self.command_queue = []
         self.executing_command = False
         self.current_xy_tolerance = 0.50
+        self.current_speed_setting = 0.90
         self.suppress_step_speech = False
         
         # Turn (旋回) コマンドのアーリーキャンセル用ターゲットyaw
@@ -288,6 +289,12 @@ class LlmDynamicGoal(Node):
             self.get_logger().error("Failed to parse command from LLM.")
             self.send_sirius_speak(DIALOGUE_TEMPLATES.get("parse_failure", "[sad]失敗したのだ。"))
             return
+
+        if "commands" not in result:
+            if "speed" in result:
+                result = {"commands": [{"type": "speed", "value": result.get("speed")}], "cancel": False}
+            elif "speak" in result or "response" in result:
+                result = {"commands": [], "cancel": False, "speak": result.get("speak", result.get("response", ""))}
             
         is_cancel = result.get("cancel", False)
         if is_cancel:
@@ -788,6 +795,9 @@ class LlmDynamicGoal(Node):
             "people_count": self.surrounding_people_count,
             "face_active": self.face_client.face_server_active,
             "current_expression": self.current_expression,
+            "current_speed_setting": self.current_speed_setting,
+            "current_vel_x": self.current_vel_x,
+            "current_vel_theta": self.current_vel_theta,
             "last_action_status": last_action_status,
             "last_action_type": last_action_type,
             "last_target_value": last_target_value,
@@ -907,6 +917,9 @@ class LlmDynamicGoal(Node):
                         if speak_hint2:
                             self.get_logger().warning("Fallback JSON was broken, but speak text was recoverable.")
                             parsed_json2 = {"commands": [], "cancel": False, "speak": speak_hint2}
+                        elif content2:
+                            self.get_logger().warning("Fallback returned plain text; wrapping it as speak.")
+                            parsed_json2 = {"commands": [], "cancel": False, "speak": content2[:400]}
                         else:
                             raise
                     self.get_logger().info(f"LLM Fallback Raw Output: '{content2}'")
@@ -950,6 +963,9 @@ class LlmDynamicGoal(Node):
                     if speak_hint:
                         self.get_logger().warning("LLM JSON was broken, but speak text was recoverable.")
                         parsed_json = {"commands": [], "cancel": False, "speak": speak_hint}
+                    elif content:
+                        self.get_logger().warning("LLM returned plain text; wrapping it as speak.")
+                        parsed_json = {"commands": [], "cancel": False, "speak": content[:400]}
                     else:
                         raise
                 self.get_logger().info(f"LLM Raw Output: '{content}'")
@@ -1342,6 +1358,13 @@ class LlmDynamicGoal(Node):
             mode = 'normal'
             
         self.get_logger().info(f"Applying navigation mode config: '{mode}'")
+        with self.lock:
+            self.current_speed_setting = {
+                "slow": 0.20,
+                "safe": 0.40,
+                "normal": 0.90,
+                "fast": 1.00,
+            }.get(mode, 0.90)
         
         cfg = nav_modes[mode]
         for node_name, params in cfg.items():

@@ -309,11 +309,37 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     返り値: dict (成功時), None (マッチせずLLMへフォールバックが必要な場合)
     """
     norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
+
+    # 0. 現在の速度確認
+    speed_queries = ["今の速度", "現在の速度", "速度を教えて", "スピード教えて", "すぴーど教えて", "スピードは", "速度は"]
+    if any(q in norm_inst for q in speed_queries):
+        speed_setting = state_info.get("current_speed_setting", 0.90)
+        vel_x = state_info.get("current_vel_x", 0.0)
+        vel_theta = state_info.get("current_vel_theta", 0.0)
+        return {
+            "commands": [],
+            "cancel": False,
+            "fast_path": True,
+            "speak": f"[happy]現在の速度設定は {speed_setting:.2f}、実速度は前後 {vel_x:.2f} メートル毎秒、回転 {vel_theta:.2f} ラジアン毎秒なのだ。"
+        }
+
+    speed_set_match = re.search(r"(?:速度|スピード|すぴーど)?(?:を)?(\d+(?:\.\d+)?)(?:にして|に変更|へ変更)?$", norm_inst)
+    if speed_set_match and (
+        any(x in norm_inst for x in ["速度", "スピード", "すぴーど"])
+        or ("にして" in norm_inst and not any(x in norm_inst for x in ["m", "メートル", "前", "後", "右", "左", "座標"]))
+    ):
+        speed_val = float(speed_set_match.group(1))
+        return {"commands": [{"type": "speed", "value": speed_val}], "cancel": False}
     
     # 1. 停止・キャンセルの判定
     cancel_patterns = ["止ま", "とまれ", "止め", "とめ", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機", "だめ", "無理", "おわり"]
     if any(pat in norm_inst for pat in cancel_patterns):
         return {"commands": [], "cancel": True}
+
+    # 1.5 直前の目標・一時停止からの再開
+    resume_goal_queries = ["前回の目的地", "さっきの目的地", "前の目的地", "続き", "続行", "再開", "もう一回同じ", "同じ目的地"]
+    if any(q in norm_inst for q in resume_goal_queries):
+        return {"commands": [], "cancel": False, "fast_path": True, "speak": "[happy]前回の目標が残っていれば、再開できるのだ。再開して、と言ってほしいのだ。"}
     
     # 2. バッテリー情報の判定
     if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
@@ -379,10 +405,14 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     people_queries = [
         "何人", "何にん", "人数", "人の数", "周りの人", "周囲の人", "周囲に人",
         "周りに何人", "周りに何にん", "何人いる", "何人いるか", "人数は", "人が何人",
-        "教えて", "いるか"
+        "人いる", "人がいる", "いる人"
     ]
     mood_queries = ["気分", "機嫌", "きぶん", "きげん", "調子どう", "調子は", "元気", "げんき"]
-    error_queries = ["なんで失敗", "何で失敗", "なぜ失敗", "なぜ止まった", "なんで止まった", "何で止まった", "失敗した理由", "止まった理由"]
+    error_queries = [
+        "なんで失敗", "何で失敗", "なぜ失敗", "なぜ止まった", "なんで止まった", "何で止まった",
+        "失敗した理由", "止まった理由", "なぜ曲がれない", "なんで曲がれない", "曲がれない理由",
+        "なんでだよ", "なぜだよ", "どうして"
+    ]
     is_status_query = any(q in norm_inst for q in status_queries)
     is_people_query = any(q in norm_inst for q in people_queries)
     is_mood_query = any(q in norm_inst for q in mood_queries)
@@ -435,7 +465,8 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
         "行き過ぎ": "overshot", "いきすぎ": "overshot", "回りすぎ": "overshot", "まわりすぎ": "overshot",
         "進みすぎ": "overshot", "すすみすぎ": "overshot", "下がりすぎ": "overshot", "さがりすぎ": "overshot",
         "動きすぎ": "overshot", "うごきすぎ": "overshot", "すぎだ": "overshot", "すぎよ": "overshot",
-        "逆": "opposite", "ぎゃく": "opposite", "反対": "opposite", "はんたい": "opposite",
+        "逆": "opposite", "ぎゃく": "opposite", "反対": "opposite", "はんたい": "opposite", "違う": "opposite", "ちがう": "opposite",
+        "そっちじゃない": "opposite", "そっちじゃ無い": "opposite", "方向違う": "opposite",
         "足りない": "more", "たりない": "more", "不足": "more", "ふそく": "more",
         "戻って": "goback", "もどって": "goback", "やり直し": "goback", "やりなおし": "goback"
     }
@@ -481,6 +512,10 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
                 val = -last_target if isinstance(last_target, (int, float)) else -1.57
                 cmd_list.append({"type": last_type, "value": val})
                 speak_msg = "[surprised]あ、逆向きだったのだ！反対側を向くのだ。"
+            elif last_type == "goto":
+                cmd_list.append({"type": "goto", "value": [start_x, start_y]})
+                cmd_list.append({"type": "face", "value": math.degrees(start_yaw)})
+                speak_msg = "[surprised]了解、違ったのだ！元いた場所に戻るのだ。"
                 
         elif correction_type == "more":
             if last_type in ["forward", "backward"]:
@@ -552,9 +587,9 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
             return {"commands": parsed_cmds, "cancel": False}
 
     # 9. 数値指定を含まない標準的な指示（簡易前進・後退・旋回・スピード変更）
-    slow_patterns = ["ゆっくり", "遅く", "おそく", "おそい", "遅い", "スピード下げ", "スピード落と", "速度下げ", "yukkuri", "slow", "下げて", "スピードおと"]
-    normal_patterns = ["ふつう", "普通", "通常", "normal"]
-    fast_patterns = ["早く", "急いで", "スピード上げ", "速度上げ", "fast", "speedup", "上げて"]
+    slow_patterns = ["ゆっくり", "遅く", "おそく", "おそい", "遅い", "はやすぎ", "速すぎ", "早すぎ", "スピード下げ", "すぴーど下げ", "スピード落と", "すぴーど落と", "速度下げ", "速度落と", "yukkuri", "slow", "下げて", "スピードおと", "すぴーどおと", "低速", "安全速度"]
+    normal_patterns = ["ふつう", "普通", "通常", "normal", "標準速度", "いつもの速度", "速度戻", "スピード戻", "すぴーど戻"]
+    fast_patterns = ["早く", "はやく", "速く", "急いで", "いそいで", "おそすぎ", "遅すぎ", "スピード上げ", "すぴーど上げ", "速度上げ", "速度アップ", "スピードアップ", "すぴーどあっぷ", "すぴーどあげ", "はやくうご", "もっとはやく", "もっと速く", "fast", "speedup", "上げて", "高速"]
     
     speed_val = None
     if any(pat in norm_inst for pat in slow_patterns):
