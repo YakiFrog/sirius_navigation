@@ -48,6 +48,7 @@ class LlmDynamicGoal(Node):
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         self.marker_pub = self.create_publisher(Marker, '/dynamic_goal_marker', 10)
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
+        self.nav_control_pub = self.create_publisher(String, '/nav_control', 10)
         
         # オドメトリサブスクライバー（リアルタイム速度取得用）
         self.odom_sub = self.create_subscription(
@@ -101,6 +102,7 @@ class LlmDynamicGoal(Node):
         self.active_goal_y = None
         self.active_goal_yaw = None
         self.goal_reached_logged = True
+        self.paused_goal_snapshot = None
         
         self.command_queue = []
         self.executing_command = False
@@ -250,11 +252,31 @@ class LlmDynamicGoal(Node):
         instruction = unicodedata.normalize('NFKC', instruction)
         
         # 1. 停止・キャンセル指示の簡易キーワード判定（高速応答のため）
-        stop_keywords = ["止ま", "とまれ", "止め", "とめ", "ストップ", "停止", "stop", "cancel", "キャンセル", "とまって", "待機"]
+        cancel_keywords = ["キャンセル", "cancel", "中止", "取り消", "とりけし"]
+        if any(kw in instruction.lower() for kw in cancel_keywords):
+            self.get_logger().warning("Cancel keyword detected. Clearing active goal.")
+            self.publish_nav_control("cancel")
+            self.cancel_navigation(clear_queue=True, preserve_current_goal=False)
+            self.send_sirius_speak("[sad]了解、目標を取り消したのだ。")
+            return
+
+        stop_keywords = ["止ま", "とまれ", "止め", "とめ", "ストップ", "停止", "stop", "とまって", "待機"]
         if any(kw in instruction.lower() for kw in stop_keywords):
-            self.get_logger().warning("Stop/Cancel keyword detected. Canceling active goal.")
-            self.cancel_navigation()
+            self.get_logger().warning("Stop keyword detected. Pausing active goal.")
+            self.publish_nav_control("pause")
+            self.cancel_navigation(preserve_current_goal=True)
             self.send_sirius_speak("[surprised]了解、止まるのだ！")
+            return
+
+        resume_keywords = ["再開", "再スタート", "続けて", "つづけて", "resume", "reopen", "再び", "動かして", "移動を再開", "続行"]
+        if any(kw in instruction.lower() for kw in resume_keywords):
+            self.get_logger().info("Resume keyword detected.")
+            self.publish_nav_control("resume")
+            if self.resume_navigation():
+                self.send_sirius_speak("[happy]了解、再開するのだ！")
+            else:
+                # move_goal 側の pause を再開する用途では、こちらのスナップショットが無くても成立する
+                self.send_sirius_speak("[happy]了解、再開命令を送ったのだ！")
             return
 
         # 2. LM Studio にリクエストを投げる
@@ -269,8 +291,9 @@ class LlmDynamicGoal(Node):
         is_cancel = result.get("cancel", False)
         if is_cancel:
             self.get_logger().warning("LLM interpreted instruction as STOP/CANCEL.")
-            self.cancel_navigation()
-            self.send_sirius_speak("[surprised]了解、止まるのだ！")
+            self.publish_nav_control("cancel")
+            self.cancel_navigation(clear_queue=True, preserve_current_goal=False)
+            self.send_sirius_speak("[sad]了解、目標を取り消したのだ。")
             return
             
         commands = result.get("commands", [])
@@ -1397,7 +1420,7 @@ class LlmDynamicGoal(Node):
         marker.action = Marker.DELETE
         self.marker_pub.publish(marker)
 
-    def cancel_navigation(self, clear_queue=True):
+    def cancel_navigation(self, clear_queue=True, preserve_current_goal=False):
         """実行中のナビゲーションをキャンセル"""
         self.delete_marker()
         
@@ -1411,6 +1434,18 @@ class LlmDynamicGoal(Node):
             spin_handle.cancel_goal_async()
             
         with self.lock:
+            if preserve_current_goal and self.active_goal_x is not None and self.active_goal_y is not None:
+                self.paused_goal_snapshot = {
+                    "active_goal_x": self.active_goal_x,
+                    "active_goal_y": self.active_goal_y,
+                    "active_goal_yaw": self.active_goal_yaw,
+                    "last_action_type": self.last_action_type,
+                    "last_target_value": self.last_target_value,
+                    "turn_remaining_angle": self.turn_remaining_angle,
+                    "turn_target_yaw": self.turn_target_yaw,
+                }
+            elif not preserve_current_goal:
+                self.paused_goal_snapshot = None
             self.active_goal_x = None
             self.active_goal_y = None
             self.active_goal_yaw = None
@@ -1428,6 +1463,11 @@ class LlmDynamicGoal(Node):
                 self.command_queue = []
                 self.executing_command = False
                 self.current_xy_tolerance = 0.50
+        self.get_logger().info(
+            "Navigation state updated: "
+            f"{'pause' if preserve_current_goal else 'cancel'} "
+            f"(clear_queue={clear_queue})"
+        )
             
         if clear_queue:
             self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
@@ -1449,6 +1489,32 @@ class LlmDynamicGoal(Node):
             msg.data = False
             self.stop_pub.publish(msg)
         threading.Timer(1.0, reset_stop).start()
+
+    def publish_nav_control(self, command: str):
+        """move_goal.py へ明示的な制御コマンドを送る"""
+        msg = String()
+        msg.data = command
+        self.nav_control_pub.publish(msg)
+
+    def resume_navigation(self):
+        """停止前の目標を再開する"""
+        with self.lock:
+            snapshot = self.paused_goal_snapshot
+
+        if not snapshot:
+            return False
+
+        if snapshot.get("active_goal_x") is not None and snapshot.get("active_goal_y") is not None:
+            self.publish_direct_map_goal(
+                snapshot["active_goal_x"],
+                snapshot["active_goal_y"],
+                snapshot["active_goal_yaw"] if snapshot.get("active_goal_yaw") is not None else 0.0,
+            )
+            with self.lock:
+                self.paused_goal_snapshot = None
+            return True
+
+        return False
 
     def send_spin_goal(self, relative_yaw):
         if not self.spin_client.wait_for_server(timeout_sec=2.0):

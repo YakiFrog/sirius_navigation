@@ -8,7 +8,7 @@ from tf2_ros import Buffer, TransformListener, LookupException
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped, Quaternion, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 import yaml
 import math
 import time
@@ -39,6 +39,7 @@ class Nav2GoalClient(Node):
         self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         
         self.stop_publisher = self.create_publisher(Bool, '/stop', 10)
+        self.nav_control_sub = self.create_subscription(String, '/nav_control', self.nav_control_callback, 10)
         self.odom_publisher = self.create_publisher(Odometry, 'target_odom', 10)
         self.initial_pose_publisher = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10
@@ -63,6 +64,8 @@ class Nav2GoalClient(Node):
         self.positions_list = []
         self.current_goal_index = None
         self._waiting_until = None  # 待機終了時刻
+        self._paused_by_user = False
+        self._cancelled_by_user = False
         self.timer = self.create_timer(0.1, self.get_position)  # 10Hz (0.1秒周期) に変更して応答性を向上
         
     def load_waypoints(self, file_path: str) -> List[Waypoint]:
@@ -109,6 +112,10 @@ class Nav2GoalClient(Node):
         ]
         
     def send_goal(self):
+        if self._paused_by_user or self._cancelled_by_user:
+            self.get_logger().info("Goal dispatch suppressed because navigation is paused/cancelled.")
+            return
+
         if self.count >= len(self.waypoints):
             if self.loop:
                 self.get_logger().info("Loop mode active: returning to the first waypoint.")
@@ -203,6 +210,9 @@ class Nav2GoalClient(Node):
         stop_msg = Bool()
         stop_msg.data = should_stop
         self.stop_publisher.publish(stop_msg)
+        self._paused_by_user = should_stop
+        if not should_stop:
+            self._cancelled_by_user = False
         if should_stop == True:
             time.sleep(5)
             stop_msg.data = False
@@ -212,9 +222,39 @@ class Nav2GoalClient(Node):
             wp = self.waypoints[goal_index]
         prefix = f"[WP:{wp.number}] " if wp else "[WP:?] "
         if should_stop:
-            self.get_logger().info(prefix + "STOP sent")
+            self.get_logger().info(prefix + "PAUSE sent")
         else:
             self.get_logger().info(prefix + "RESUME sent")
+
+    def nav_control_callback(self, msg: String):
+        """LLM側やUI側からの明示制御を受ける"""
+        cmd = msg.data.strip().lower()
+        if cmd in ["pause", "stop", "hold"]:
+            self.get_logger().info(f"nav_control received: {cmd}")
+            self._paused_by_user = True
+            self.publish_stop_command(True, self.count)
+        elif cmd in ["resume", "start", "continue"]:
+            self.get_logger().info(f"nav_control received: {cmd}")
+            self.resume_current_goal()
+        elif cmd in ["cancel", "abort", "clear"]:
+            self.get_logger().info(f"nav_control received: {cmd}")
+            self.cancel_current_goal()
+
+    def cancel_current_goal(self):
+        """現在の経路を完全に取り消し、再送も止める"""
+        self._paused_by_user = False
+        self._cancelled_by_user = True
+        self.publish_stop_command(True, self.count)
+        self.get_logger().info("Current waypoint goal cancelled; future goal resend disabled.")
+
+    def resume_current_goal(self):
+        """停止中の経路を再開する"""
+        if self._cancelled_by_user:
+            self.get_logger().warning("Resume ignored because current goal was cancelled.")
+            return
+        self._paused_by_user = False
+        self.publish_stop_command(False, self.count)
+        self.send_goal()
     
     def publish_initial_pose(self, x: float, y: float, yaw: float, prefix: str = ""):
         """
@@ -363,6 +403,15 @@ class Nav2GoalClient(Node):
                 self.distance = math.sqrt(x_distance**2 + y_distance**2)
                 # Log the current distance to the active goal with formatting (throttle log to prevent console flood)
                 current_wp_info = f"[WP:{current_wp.number}] ({self.count + 1}/{len(self.waypoints)})"
+
+                if self._cancelled_by_user:
+                    self.get_logger().info(f"{current_wp_info} navigation cancelled; holding position.")
+                    return
+
+                if self._paused_by_user:
+                    self.get_logger().info(f"{current_wp_info} navigation paused; holding position.", throttle_duration_sec=2.0)
+                    return
+
                 self.get_logger().info(f"{current_wp_info} dist={self.distance:.2f}m", throttle_duration_sec=1.0)
                 
                 # stop/wait/change_mapまたは個別のしきい値設定によって判定距離を変更
@@ -410,8 +459,11 @@ class Nav2GoalClient(Node):
                 
                 # 定期的にゴールを再送信 (10Hzのため100ループ=10秒毎)
                 elif self.loop_count % 100 == 0:
-                    self.get_logger().info(f"{current_wp_info} Resending...")
-                    self.send_goal()
+                    if self._paused_by_user or self._cancelled_by_user:
+                        self.get_logger().info(f"{current_wp_info} resend skipped because navigation is paused/cancelled.", throttle_duration_sec=5.0)
+                    else:
+                        self.get_logger().info(f"{current_wp_info} Resending...")
+                        self.send_goal()
                 
                 self.loop_count += 1
 
