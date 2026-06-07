@@ -115,6 +115,18 @@ DIALOGUE_TEMPLATES = {
     "battery_fail": "[sad]バッテリー状態が確認できないのだ。",
 }
 
+EXPRESSION_JA = {
+    "normal": "落ち着いた普通の気分",
+    "happy": "うれしい気分",
+    "angry": "ちょっと怒っている気分",
+    "sad": "少ししょんぼりした気分",
+    "surprised": "びっくりしている気分",
+    "cat": "少し得意げな気分",
+    "wink": "ちょっとおちゃめな気分",
+    "pien": "ぴえんな気分",
+    "sleeping": "眠たい気分",
+}
+
 def normalize_kanji_numbers(s):
     s = s.replace("点", ".")
     comp_map = {
@@ -322,13 +334,15 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
         if kw in norm_inst:
             return {"commands": [], "cancel": False, "fast_path": True, "speak": reply}
 
-    # 4. 状況・エラー確認クエリの判定
+    # 4. 状況・気分・エラー確認クエリの判定
     status_queries = ["状況", "状態", "ステータス", "どうなってる", "何してる", "どこにいる"]
+    mood_queries = ["気分", "機嫌", "きぶん", "きげん", "調子どう", "調子は", "元気", "げんき"]
     error_queries = ["なんで失敗", "何で失敗", "なぜ失敗", "なぜ止まった", "なんで止まった", "何で止まった", "失敗した理由", "止まった理由"]
     is_status_query = any(q in norm_inst for q in status_queries)
+    is_mood_query = any(q in norm_inst for q in mood_queries)
     is_error_query = any(q in norm_inst for q in error_queries)
     
-    if is_status_query or is_error_query:
+    if is_status_query or is_mood_query or is_error_query:
         current_x = state_info.get("current_x", 0.0)
         current_y = state_info.get("current_y", 0.0)
         executing = state_info.get("executing", False)
@@ -339,7 +353,15 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
         current_expression = state_info.get("current_expression", "normal")
         
         speak_msg = ""
-        if is_status_query:
+        if is_mood_query:
+            mood_str = EXPRESSION_JA.get(current_expression, f"{current_expression}な気分")
+            if stuck:
+                speak_msg = f"[sad]今は{mood_str}だけど、進路が塞がれていて少し困っているのだ。"
+            elif executing:
+                speak_msg = f"[happy]今は{mood_str}なのだ！移動中だから、ちょっと集中しているのだ。"
+            else:
+                speak_msg = f"[happy]今は{mood_str}なのだ！いつでも次の指示を待っているのだ。"
+        elif is_status_query:
             face_state_str = f"表情は「{current_expression}」、画面は{'接続中' if face_active else '切断状態'}なのだ。"
             people_str = f"周りには {people_count} 人の人が検知されているのだ！"
             
