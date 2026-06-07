@@ -707,10 +707,11 @@ class LlmDynamicGoal(Node):
                 "北": 90.0, "kita": 90.0,
                 "東": 0.0, "higashi": 0.0,
                 "南": -90.0, "minami": -90.0,
-                "西": 180.0, "nishi": 180.0
+                "西": 180.0, "nishi": 180.0,
+                "前": 0.0, "正面": 0.0, "mae": 0.0, "shoumen": 0.0
             }
             for d_name, angle in face_map.items():
-                if d_name in part_norm and ("向" in part_norm or "向き" in part_norm or "face" in part_norm):
+                if d_name in part_norm and ("向" in part_norm or "向き" in part_norm or "むい" in part_norm or "むく" in part_norm or "face" in part_norm):
                     return {"type": "face", "value": angle}
 
             # 4. Turn/Spin with numbers
@@ -764,6 +765,19 @@ class LlmDynamicGoal(Node):
 
         def parse_no_number_part(part_raw):
             part_norm = part_raw.strip().lower()
+            
+            # Compass face directions
+            face_map = {
+                "北": 90.0, "kita": 90.0,
+                "東": 0.0, "higashi": 0.0,
+                "南": -90.0, "minami": -90.0,
+                "西": 180.0, "nishi": 180.0,
+                "前": 0.0, "正面": 0.0, "mae": 0.0, "shoumen": 0.0
+            }
+            for d_name, angle in face_map.items():
+                if d_name in part_norm and ("向" in part_norm or "向き" in part_norm or "むい" in part_norm or "むく" in part_norm or "face" in part_norm):
+                    return {"type": "face", "value": angle}
+
             is_right = any(pat in part_norm for pat in ["右", "migi", "みぎ", "みぎむ"])
             is_left = any(pat in part_norm for pat in ["左", "hidari", "ひだり", "ひだりむ"])
             is_back = any(pat in part_norm for pat in ["後ろ", "うしろ", "ushiro", "裏", "うら"])
@@ -962,7 +976,7 @@ class LlmDynamicGoal(Node):
             base_cmds = []
             parts = [p.strip() for p in re.split(r"して|て|、|そして", base_part) if p.strip()]
             for part in parts:
-                parsed_cmd = parse_part(part)
+                parsed_cmd = parse_any_part(part)
                 if parsed_cmd:
                     base_cmds.append(parsed_cmd)
             if base_cmds:
@@ -976,7 +990,7 @@ class LlmDynamicGoal(Node):
             parts = [p.strip() for p in re.split(r"して|て|、|そして", norm_inst) if p.strip()]
             parsed_cmds = []
             for part in parts:
-                cmd = parse_part(part)
+                cmd = parse_any_part(part)
                 if cmd:
                     parsed_cmds.append(cmd)
             if parsed_cmds:
@@ -996,34 +1010,19 @@ class LlmDynamicGoal(Node):
         elif any(pat in norm_inst for pat in fast_patterns):
             speed_val = 1.0
 
-        has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい", "後ろ", "うしろ", "ushiro", "裏", "うら"])
-        
         cmd_list = []
         if speed_val is not None:
             cmd_list.append({"type": "speed", "value": speed_val})
             
+        # Try to parse standard direction/orientation/movement commands without numbers using the helper
+        no_num_cmd = parse_no_number_part(norm_inst)
+        if no_num_cmd:
+            cmd_list.append(no_num_cmd)
+            return {"commands": cmd_list, "cancel": False}
+
+        # Fallback for continuing/relative adjustments without direct directional keywords (e.g. "もっと", "すこし")
+        has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい", "後ろ", "うしろ", "ushiro", "裏", "うら"])
         if has_dir:
-            is_right = any(pat in norm_inst for pat in ["右", "migi", "みぎ", "みぎむ"])
-            is_left = any(pat in norm_inst for pat in ["左", "hidari", "ひだり", "ひだりむ"])
-            is_back = any(pat in norm_inst for pat in ["後ろ", "うしろ", "ushiro", "裏", "うら"])
-            
-            if (is_right or is_left or is_back) and not any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす"]):
-                if is_back:
-                    val = 3.14159
-                else:
-                    val = -1.5708 if is_right else 1.5708
-                    if any(x in norm_inst for x in ["少し", "ちょっと", "微", "すこし"]):
-                        val = -0.5236 if is_right else 0.5236
-                cmd_list.append({"type": "turn", "value": val})
-                return {"commands": cmd_list, "cancel": False}
-                
-            if any(x in norm_inst for x in ["旋回", "回転", "senkai", "spin"]):
-                deg = 360.0
-                if "右" in norm_inst or "時計回り" in norm_inst:
-                    deg = -360.0
-                cmd_list.append({"type": "spin", "value": deg})
-                return {"commands": cmd_list, "cancel": False}
-    
             last_cmd_was_backward = False
             last_cmd_was_forward = False
             with self.lock:
@@ -1052,22 +1051,6 @@ class LlmDynamicGoal(Node):
                 elif last_cmd_was_forward:
                     cmd_list.append({"type": "forward", "value": max(1.0, val)})
                     return {"commands": cmd_list, "cancel": False}
-    
-            if any(x in norm_inst for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro"]):
-                val = 1.0
-                if any(x in norm_inst for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
-                    val = 2.0
-                cmd_list.append({"type": "backward", "value": val})
-                return {"commands": cmd_list, "cancel": False}
-    
-            if any(x in norm_inst for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"]):
-                val = 1.5
-                if any(x in norm_inst for x in ["少し", "ちょっと", "すこし"]):
-                    val = 1.0
-                elif any(x in norm_inst for x in ["もっと", "大きく", "たくさん", "さらに"]):
-                    val = 2.5
-                cmd_list.append({"type": "forward", "value": val})
-                return {"commands": cmd_list, "cancel": False}
         else:
             if speed_val is not None:
                 return {"commands": cmd_list, "cancel": False}
