@@ -1188,7 +1188,7 @@ class LlmDynamicGoal(Node):
             
             # 安全のためロックの外側でキャンセルを実行
             self.send_sirius_speak(DIALOGUE_TEMPLATES["stuck"])
-            self.cancel_navigation()
+            self.cancel_navigation(preserve_current_goal=True)
             
             print(f"\n⚠️ {stuck_msg.split(']')[-1].strip()} 目標をキャンセルして停止します。")
             print("Command > ", end="", flush=True)
@@ -1437,6 +1437,7 @@ class LlmDynamicGoal(Node):
                     "last_target_value": self.last_target_value,
                     "turn_remaining_angle": self.turn_remaining_angle,
                     "turn_target_yaw": self.turn_target_yaw,
+                    "current_xy_tolerance": self.current_xy_tolerance,
                 }
             elif not preserve_current_goal:
                 self.paused_goal_snapshot = None
@@ -1505,7 +1506,16 @@ class LlmDynamicGoal(Node):
                 snapshot["active_goal_yaw"] if snapshot.get("active_goal_yaw") is not None else 0.0,
             )
             with self.lock:
+                self.executing_command = True
+                self.command_start_time = self.get_clock().now()
+                self.last_active_cmd_type = snapshot.get("last_action_type", "goto")
+                self.current_xy_tolerance = snapshot.get("current_xy_tolerance", 0.50)
+                self.last_action_status = "none"
+                self.distance_remaining_history = []
+                self.yaw_diff_history = []
+                self.is_stuck = False
                 self.paused_goal_snapshot = None
+            self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': self.current_xy_tolerance})
             return True
 
         return False
