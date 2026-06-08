@@ -52,7 +52,7 @@ graph TD
   * `「ストップ」` `「止まれ」` `「停止」` `「キャンセル」` など
 * **雑談応答・ステータス（事前登録ワード）**:
   * `「バッテリー状況」`（gRPC経由で顔アプリから電池残量を取得して発話）
-  * `「自己紹介」` `「研究室紹介」` `「可愛いね」` など（[chat.py](file:///home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/sirius_navigation/dialogue/chat.py) に定義されている応答テンプレートにマッチする会話）
+  * `「自己紹介」` `「研究室紹介」` `「ウインク」` など（[chat.py](file:///home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/sirius_navigation/dialogue/chat.py) に定義されている応答テンプレートにマッチする会話）
 
 ---
 
@@ -83,3 +83,13 @@ graph TD
 LLMの出力揺れによるロボットの誤作動を防ぐため、Python側で強力な**コマンドサニタイザー**が常時作動しています。
 * **`face` と `turn` の取り違え補正**: LLMが「右向いて」などの相対方向に対して、誤って絶対方位コマンド（`face`）をラジアン値で出力した場合、自動で相対旋回（`turn`）へと書き換えます。
 * **単位補正**: `"turn"` コマンドが大きな値（度数法）で出力された場合は自動的にラジアンへ変換し、逆に `"spin"` コマンドが小さな浮動小数点（ラジアン）で出力された場合は度数法へと相互変換します。
+
+---
+
+## 📂 セリフテンプレートの集中管理
+
+対話時の音声セリフテンプレートは重複定義を防ぎ保守性を高めるため、以下の役割分担で一元管理されています。
+* [navigation.py](file:///home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/sirius_navigation/dialogue/navigation.py): 移動（前進、後退、旋回、スタック、目的地到着など）に関するテンプレート
+* [system.py](file:///home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/sirius_navigation/dialogue/system.py): システム状態（バッテリー報告、速度設定変更など）に関するテンプレート
+* [__init__.py](file:///home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/sirius_navigation/dialogue/__init__.py) / [local_parser.py](file:///home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/sirius_navigation/dialogue/local_parser.py): 上記テンプレートを動的にインポート・マージして単一の `DIALOGUE_TEMPLATES` ディショナリとして公開・利用します。
+

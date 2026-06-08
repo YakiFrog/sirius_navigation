@@ -1029,7 +1029,7 @@ class LlmDynamicGoal(Node):
         self.get_logger().info(f"Published goal pose to /goal_pose: X={target_x:.2f}, Y={target_y:.2f}, Yaw={math.degrees(target_yaw):+.1f}deg")
 
     def timer_goal_publisher(self):
-        """10Hzで実行され、旋回中であれば目標角度との差分を計算し、8度以下で自動キャンセル（到達判定）する"""
+        """10Hzで実行され、旋回中であれば目標角度との差分を計算し、3度以下で自動キャンセル（到達判定）する"""
         with self.lock:
             executing = self.executing_command
             remaining = self.turn_remaining_angle

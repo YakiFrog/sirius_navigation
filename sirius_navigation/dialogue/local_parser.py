@@ -100,20 +100,21 @@ def extract_face_commands(part_norm):
     return [cmd for _, cmd in sorted(candidates, key=lambda x: x[0])]
 
 # テンプレート群
-DIALOGUE_TEMPLATES = {
-    "arrival": "[happy]目的地に到着したのだ！",
-    "stuck": "[sad]進めなくなっちゃったのだ！障害物があるかもしれないのだ。",
-    "parse_failure": "[sad]指示の理解に失敗したのだ。",
-    "forward_start": "[happy]{distance:.1f}メートル前進するのだ！",
-    "backward_start": "[happy]{distance:.1f}メートル後退するのだ！",
-    "turn_success": "[happy]旋回が完了したのだ！",
-    "turn_failure": "[sad]旋回に失敗したのだ。",
-    "speed_change": "[happy]速度を {speed:.2f} に変更するのだ！",
-    "goto_start": "[happy]座標 X{x:.1f}、Y{y:.1f} に向かうのだ！",
-    "battery_report": "[happy]現在のバッテリー残量は {level:.1f}パーセントなのだ！状態は {charging_str} なのだ。",
-    "battery_error": "[sad]バッテリー残量データが不正なのだ。",
-    "battery_fail": "[sad]バッテリー状態が確認できないのだ。",
-}
+try:
+    from .navigation import NAVIGATION_TEMPLATES
+    from .system import SYSTEM_TEMPLATES
+except ImportError:
+    try:
+        from navigation import NAVIGATION_TEMPLATES
+        from system import SYSTEM_TEMPLATES
+    except ImportError:
+        NAVIGATION_TEMPLATES = {}
+        SYSTEM_TEMPLATES = {}
+
+DIALOGUE_TEMPLATES = {}
+DIALOGUE_TEMPLATES.update(NAVIGATION_TEMPLATES)
+DIALOGUE_TEMPLATES.update(SYSTEM_TEMPLATES)
+
 
 EXPRESSION_JA = {
     "normal": "落ち着いた普通の気分",
