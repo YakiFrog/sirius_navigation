@@ -16,7 +16,7 @@ os.environ.setdefault("RCUTILS_CONSOLE_OUTPUT_FORMAT", "[{severity}] [{time}] [{
 import rclpy
 
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import Bool, String
 from action_msgs.srv import CancelGoal
@@ -71,6 +71,8 @@ class LlmDynamicGoal(Node):
         self.marker_pub = self.create_publisher(Marker, '/dynamic_goal_marker', 10)
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
         self.nav_control_pub = self.create_publisher(String, '/nav_control', 10)
+        self.cmd_vel_teleop_pub = self.create_publisher(Twist, 'cmd_vel_teleop', 10)
+        self.cmd_vel_direct_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.stuck_pub = self.create_publisher(Bool, '/sirius_is_stuck', 10)
         self.costmap_sub = self.create_subscription(OccupancyGrid, '/local_costmap/costmap', self.costmap_callback, 10)
         self.last_costmap_time = 0.0
@@ -162,6 +164,14 @@ class LlmDynamicGoal(Node):
         self.last_action_start_x = 0.0
         self.last_action_start_y = 0.0
         self.last_action_start_yaw = 0.0
+        self.assisted_drive_active = False
+        self.assisted_drive_direction = 0.0
+        self.assisted_drive_end_time = None
+        self.assisted_drive_speed = 0.0
+        self.assisted_drive_distance = 0.0
+        self.assisted_drive_blocked_reported = False
+        self.assisted_drive_last_route_log_time = 0.0
+        self.assisted_drive_timer = self.create_timer(0.1, self.timer_assisted_drive_publisher)
         
         # 1Hzで自己位置と目標位置の距離を監視するタイマー
         self.goal_monitor_timer = self.create_timer(1.0, self.monitor_goal_distance)
@@ -524,6 +534,16 @@ class LlmDynamicGoal(Node):
             try:
                 speed_factor = float(value)
                 self.set_controller_speed(speed_factor)
+                with self.lock:
+                    if self.assisted_drive_active:
+                        base_distance = max(self.assisted_drive_distance, 0.3)
+                        base_speed = min(max(base_distance * 0.35, 0.12), 0.22)
+                        adjusted_speed = max(0.08, min(base_speed * speed_factor, 0.35))
+                        self.assisted_drive_speed = adjusted_speed
+                        self.get_logger().info(
+                            f"[AssistDrive] active speed updated -> {adjusted_speed:.2f} m/s "
+                            f"(factor={speed_factor:.2f})"
+                        )
                 print(f"⚡ 速度パラメータを変更しました (factor: {speed_factor:.2f})")
                 if should_speak:
                     self.send_sirius_speak(DIALOGUE_TEMPLATES["speed_change"].format(speed=speed_factor))
@@ -706,6 +726,9 @@ class LlmDynamicGoal(Node):
             base_yaw = yaw_robot
         
         # turn 以外のコマンドが実行される際は、旋回関連の監視パラメータを確実に初期化して誤作動を防ぐ
+        if cmd_type not in ["forward", "backward"]:
+            self.stop_assisted_drive()
+
         if cmd_type not in ["turn", "spin", "face"]:
             with self.lock:
                 self.turn_remaining_angle = None
@@ -713,31 +736,10 @@ class LlmDynamicGoal(Node):
                 self.turn_arrival_triggered = False
 
         if cmd_type == "forward":
-            # ウェイポイントは最小0.3mから置くように制限
-            r = max(value, 0.3)
-            theta = 0.0
-            tolerance = max(r * 0.3, 0.15) if r < 1.0 else 0.50
-            with self.lock:
-                self.current_xy_tolerance = tolerance
-            self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
-            if should_speak:
-                self.send_sirius_speak(DIALOGUE_TEMPLATES["forward_start"].format(distance=r))
-            self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
+            self.start_assisted_drive(1.0, value, should_speak=should_speak)
             
         elif cmd_type == "backward":
-            # 後退時: 目標位置は現在姿勢の後方へ置き、目標yawは現在yawのまま保持する。
-            # yawまで180度反転させると、Nav2が「後ろを向いて到着」と解釈して旋回してしまう。
-            # ウェイポイントは最小0.3mから置くように制限
-            r = max(abs(value), 0.3)
-            tolerance = max(r * 0.3, 0.15) if r < 1.0 else 0.50
-            with self.lock:
-                self.current_xy_tolerance = tolerance
-            self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
-            if should_speak:
-                self.send_sirius_speak(DIALOGUE_TEMPLATES["backward_start"].format(distance=r))
-            target_map_x = base_x - r * math.cos(base_yaw)
-            target_map_y = base_y - r * math.sin(base_yaw)
-            self.publish_direct_map_goal(target_map_x, target_map_y, base_yaw)
+            self.start_assisted_drive(-1.0, value, should_speak=should_speak)
             
         elif cmd_type == "turn":
             # 旋回時: Nav2の標準ビヘイビアである /spin アクションを使用し、
@@ -1892,6 +1894,123 @@ class LlmDynamicGoal(Node):
         msg = String()
         msg.data = command
         self.nav_control_pub.publish(msg)
+
+    def publish_assisted_drive_twist(self, twist: Twist):
+        """前後移動の速度指令を publish する。
+
+        通常は twist_mux の teleop 入力に流す。twist_mux が起動していない場合だけ
+        cmd_vel に直接 publish して、起動構成の抜けで完全に動かなくなるのを避ける。
+        """
+        self.cmd_vel_teleop_pub.publish(twist)
+
+        teleop_subscribers = self.cmd_vel_teleop_pub.get_subscription_count()
+        now = self.get_clock().now().nanoseconds / 1e9
+        if teleop_subscribers == 0:
+            self.cmd_vel_direct_pub.publish(twist)
+            with self.lock:
+                should_log = now - self.assisted_drive_last_route_log_time > 1.0
+                if should_log:
+                    self.assisted_drive_last_route_log_time = now
+            if should_log:
+                self.get_logger().warning(
+                    "[AssistDrive] cmd_vel_teleop has no subscribers. "
+                    "Publishing fallback directly to cmd_vel. Is twist_mux running?"
+                )
+        else:
+            with self.lock:
+                should_log = now - self.assisted_drive_last_route_log_time > 1.0
+                if should_log:
+                    self.assisted_drive_last_route_log_time = now
+            if should_log:
+                self.get_logger().info(
+                    f"[AssistDrive] publishing to cmd_vel_teleop "
+                    f"(subscribers={teleop_subscribers}, linear.x={twist.linear.x:.2f})"
+                )
+
+    def start_assisted_drive(self, direction: float, distance: float, should_speak: bool = True):
+        """前後移動を assisted teleop 系の速度指示に切り替える。"""
+        try:
+            if isinstance(distance, dict):
+                distance = distance.get("value", 1.0)
+            distance = float(distance)
+        except (TypeError, ValueError, AttributeError):
+            distance = 1.0
+
+        distance = max(abs(distance), 0.3)
+        direction = 1.0 if direction >= 0.0 else -1.0
+        speed = min(max(distance * 0.35, 0.12), 0.22)
+        duration = distance / speed
+
+        with self.lock:
+            self.assisted_drive_active = True
+            self.assisted_drive_direction = direction
+            self.assisted_drive_end_time = self.get_clock().now().nanoseconds / 1e9 + duration + 1.0
+            self.assisted_drive_speed = speed
+            self.assisted_drive_distance = distance
+            self.assisted_drive_blocked_reported = False
+            self.assisted_drive_last_route_log_time = 0.0
+
+        if should_speak:
+            if direction > 0.0:
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["forward_start"].format(distance=distance))
+            else:
+                self.send_sirius_speak(DIALOGUE_TEMPLATES["backward_start"].format(distance=distance))
+
+        self.get_logger().info(
+            f"[AssistDrive] direction={'forward' if direction > 0.0 else 'backward'}, "
+            f"distance={distance:.2f}m speed={speed:.2f}m/s duration={duration:.2f}s"
+        )
+
+    def stop_assisted_drive(self):
+        with self.lock:
+            self.assisted_drive_active = False
+            self.assisted_drive_direction = 0.0
+            self.assisted_drive_end_time = None
+            self.assisted_drive_speed = 0.0
+            self.assisted_drive_distance = 0.0
+            self.assisted_drive_blocked_reported = False
+
+        self.publish_assisted_drive_twist(Twist())
+
+    def timer_assisted_drive_publisher(self):
+        with self.lock:
+            active = self.assisted_drive_active
+            end_time = self.assisted_drive_end_time
+            direction = self.assisted_drive_direction
+            speed = self.assisted_drive_speed
+            blocked_reported = self.assisted_drive_blocked_reported
+            last_type = self.last_active_cmd_type
+            obs_dists = dict(getattr(self, 'obstacle_distances', {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}))
+
+        if not active:
+            return
+
+        nearest_front = obs_dists.get("front", 999.0)
+        nearest_back = obs_dists.get("back", 999.0)
+        blocked_dist = nearest_back if direction < 0.0 else nearest_front
+        blocked_side = "後方" if direction < 0.0 else "前方"
+        if blocked_dist < 0.40:
+            if not blocked_reported:
+                with self.lock:
+                    self.assisted_drive_blocked_reported = True
+                    self.is_stuck = True
+                    self.last_action_status = "failed_stuck"
+                self.send_sirius_speak(f"[sad]{blocked_side} {blocked_dist:.1f}メートルに障害物があって、これ以上動けないのだ！")
+                self.get_logger().warning(
+                    f"[AssistDrive] blocked by obstacle: side={blocked_side}, dist={blocked_dist:.2f}m, last_type={last_type}"
+                )
+            self.stop_assisted_drive()
+            return
+
+        now = self.get_clock().now().nanoseconds / 1e9
+        if end_time is not None and now >= end_time:
+            self.send_sirius_speak("[happy]ここまでの移動は完了したのだ！")
+            self.stop_assisted_drive()
+            return
+
+        twist = Twist()
+        twist.linear.x = speed * direction
+        self.publish_assisted_drive_twist(twist)
 
     def resume_navigation(self):
         """停止前の目標を再開する"""
