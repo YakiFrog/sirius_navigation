@@ -43,6 +43,7 @@ setup(
             'status_monitor = sirius_navigation.dialogue.status_monitor:main',
             'odom_path_publisher = sirius_navigation.odom_path_publisher:main',
             'sirius_ble_gateway = sirius_navigation.sirius_ble_gateway:main',
+            'sirius_ble_gateway_ui = sirius_navigation.sirius_ble_gateway_ui:main',
         ],
     },
 )

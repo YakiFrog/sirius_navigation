@@ -63,6 +63,7 @@ class SiriusBleGateway(Node):
         _append_face_stubs_dir(self.face_stubs_dir)
 
         self.remote_command_pub = self.create_publisher(String, "/sirius/remote_command", 10)
+        self.remote_status_pub = self.create_publisher(String, "/sirius/remote_status", 10)
         self.battery_json_pub = self.create_publisher(String, "/sirius/battery_status", 10)
         self.battery_state_pub = self.create_publisher(BatteryState, "/battery_state", 10)
 
@@ -72,6 +73,8 @@ class SiriusBleGateway(Node):
         self._stopping = threading.Event()
 
         self._last_face_battery_update = 0.0
+        self._last_remote_status = None
+        self._last_remote_payload = ""
         self._remote_server = None
         self._battery_device = None
 
@@ -179,12 +182,17 @@ class SiriusBleGateway(Node):
             f"service={self.service_uuid}"
         )
         await server.start()
+        self._publish_remote_status("advertising", connected=False)
 
         try:
             while not self._stopping.is_set():
+                is_connected = bool(server.is_connected())
+                status = "connected" if is_connected else "advertising"
+                self._publish_remote_status(status, connected=is_connected)
                 await asyncio.sleep(1.0)
         finally:
             await server.stop()
+            self._publish_remote_status("stopped", connected=False)
 
     def _handle_remote_ble_write(self, characteristic, value: bytes, **kwargs):
         characteristic.value = value
@@ -198,7 +206,10 @@ class SiriusBleGateway(Node):
             return
         if text == "[ping]":
             self.get_logger().debug("Remote BLE ping received")
+            self._publish_remote_status("connected", connected=True, last_payload="[ping]")
             return
+
+        self._publish_remote_status("connected", connected=True, last_payload=text)
 
         msg = String()
         msg.data = text
@@ -247,6 +258,33 @@ class SiriusBleGateway(Node):
                 stub.Speak(req, timeout=3.0)
         except Exception as exc:
             self.get_logger().error(f"Failed to forward speak command to face: {exc}")
+
+    def _publish_remote_status(self, status: str, connected: bool, last_payload: str = ""):
+        if last_payload:
+            self._last_remote_payload = last_payload[:80]
+
+        data = {
+            "status": status,
+            "connected": connected,
+            "advertise_name": self.advertise_name,
+            "service_uuid": self.service_uuid,
+            "stamp": time.time(),
+        }
+        if self._last_remote_payload:
+            data["last_payload"] = self._last_remote_payload
+
+        cache_key = (
+            data["status"],
+            data["connected"],
+            data.get("last_payload", ""),
+        )
+        if cache_key == self._last_remote_status and not last_payload:
+            return
+        self._last_remote_status = cache_key
+
+        msg = String()
+        msg.data = json.dumps(data, ensure_ascii=False)
+        self.remote_status_pub.publish(msg)
 
     async def _run_battery_monitor(self):
         solix = self._load_solix_support()
