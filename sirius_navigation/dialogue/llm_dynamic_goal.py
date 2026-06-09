@@ -7,6 +7,11 @@ import urllib.request
 import urllib.error
 import threading
 import unicodedata
+import os
+
+os.environ.setdefault("RCUTILS_COLORIZED_OUTPUT", "1")
+os.environ.setdefault("RCUTILS_CONSOLE_OUTPUT_FORMAT", "[{severity}] [{time}] [{name}]: {message}")
+
 import rclpy
 
 from rclpy.node import Node
@@ -22,12 +27,27 @@ from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 from visualization_msgs.msg import Marker, MarkerArray
 
+_COLOR_ENABLED = os.environ.get("NO_COLOR", "").lower() not in ["1", "true", "yes"]
+_RESET = "\033[0m" if _COLOR_ENABLED else ""
+_CYAN = "\033[36m" if _COLOR_ENABLED else ""
+_GREEN = "\033[32m" if _COLOR_ENABLED else ""
+_YELLOW = "\033[33m" if _COLOR_ENABLED else ""
+_MAGENTA = "\033[35m" if _COLOR_ENABLED else ""
+
+
+def color_text(text, color):
+    return f"{color}{text}{_RESET}" if color else text
+
+
+def print_command_prompt():
+    print(color_text("Command > ", _CYAN), end="", flush=True)
+
 try:
     from .face_client import FaceClient
-    from .local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text
+    from .local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text, style_sirius_speak, DEFAULT_HUMOR_LEVEL, clamp_humor_level
 except ImportError:
     from face_client import FaceClient
-    from local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text
+    from local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text, style_sirius_speak, DEFAULT_HUMOR_LEVEL, clamp_humor_level
 
 
 class LlmDynamicGoal(Node):
@@ -84,6 +104,7 @@ class LlmDynamicGoal(Node):
         self.face_client = FaceClient(logger=self.get_logger())
         self.surrounding_people_count = 0
         self.current_expression = "normal"
+        self.current_humor_level = DEFAULT_HUMOR_LEVEL
         self.marker_array_sub = self.create_subscription(
             MarkerArray,
             '/target_detector/target_markers',
@@ -297,7 +318,7 @@ class LlmDynamicGoal(Node):
 
     def interactive_input_loop(self):
         """標準入力からインタラクティブに入力を受け付けるスレッド"""
-        print("\n=== Sirius LLM Dynamic Goal Navigation ===")
+        print(color_text("\n=== Sirius LLM Dynamic Goal Navigation ===", _MAGENTA))
         print("LM Studioを起動し、モデルがロードされていることを確認してください。")
         print("「ちょっと前に行って」「そこで右向いて」「停止」などの指示を入力してください。")
         print("「3m前に行って、右向いて」といった連続指示も実行可能です。")
@@ -305,7 +326,7 @@ class LlmDynamicGoal(Node):
         
         while self.running:
             try:
-                print("Command > ", end="", flush=True)
+                print_command_prompt()
                 line = sys.stdin.readline()
                 if not line:
                     break
@@ -548,6 +569,21 @@ class LlmDynamicGoal(Node):
                         self.get_logger().warning(f"[Parameter] Failed to set {param_name} (face server offline)")
             except Exception as e:
                 self.get_logger().error(f"[Parameter] Failed to apply effect: {e}")
+            self.execute_next_command()
+            return
+
+        if cmd_type == "humor":
+            level = clamp_humor_level(value)
+            with self.lock:
+                self.current_humor_level = level
+            self.get_logger().info(f"[Humor] Set humor level to {level:.2f}")
+            if should_speak:
+                if level <= 0.0:
+                    self.send_sirius_speak("[normal]ユーモアレベルを0.0に設定しました。真面目な敬語モードで対応します。")
+                elif level < 0.5:
+                    self.send_sirius_speak(f"[normal]ユーモアレベルを{level:.1f}にしたのだ。落ち着いて対応するのだ。")
+                else:
+                    self.send_sirius_speak(f"[cat]ユーモアレベルを{level:.1f}にしたのだ！ちょっと生意気にいくのだ。")
             self.execute_next_command()
             return
 
@@ -829,6 +865,7 @@ class LlmDynamicGoal(Node):
             last_target = self.last_target_value
             last_dist_err = self.last_final_distance_error
             last_yaw_err = self.last_final_yaw_error
+            humor_level = self.current_humor_level
             last_start_x = self.last_action_start_x
             last_start_y = self.last_action_start_y
             last_start_yaw = self.last_action_start_yaw
@@ -887,6 +924,7 @@ class LlmDynamicGoal(Node):
             f"- Target Waypoint: X={goal_x:.2f}, Y={goal_y:.2f}, Yaw={math.degrees(goal_yaw):+.1f}deg\n"
             f"- Distance remaining to target: {distance:.2f} meters\n"
             f"- Current velocities: {vel_str}\n"
+            f"- Current Sirius humor level: {humor_level:.2f}\n"
             f"- Physical obstacles / blockage state: {stuck_str}\n"
             f"- Obstacle distances (meters): front={obs_dists.get('front', 999.0):.2f}, back={obs_dists.get('back', 999.0):.2f}, left={obs_dists.get('left', 999.0):.2f}, right={obs_dists.get('right', 999.0):.2f}\n"
             f"- Actions left in sequence queue: {queue_len} commands\n"
@@ -915,6 +953,7 @@ class LlmDynamicGoal(Node):
             last_action_start_x = self.last_action_start_x
             last_action_start_y = self.last_action_start_y
             last_action_start_yaw = self.last_action_start_yaw
+            current_humor_level = self.current_humor_level
             # 最後のコマンド方向を chat_history から判定
             last_cmd_was_backward = False
             last_cmd_was_forward = False
@@ -941,6 +980,7 @@ class LlmDynamicGoal(Node):
             "people_count": self.surrounding_people_count,
             "face_active": self.face_client.face_server_active,
             "current_expression": self.current_expression,
+            "current_humor_level": current_humor_level,
             "current_speed_setting": self.current_speed_setting,
             "current_vel_x": self.current_vel_x,
             "current_vel_theta": self.current_vel_theta,
@@ -1018,7 +1058,7 @@ class LlmDynamicGoal(Node):
         if decision != "revise":
             return None
 
-        allowed_types = {"forward", "backward", "turn", "spin", "face", "goto", "speed", "expression", "parameter", "reset", "effect", "look"}
+        allowed_types = {"forward", "backward", "turn", "spin", "face", "goto", "speed", "expression", "parameter", "reset", "effect", "look", "humor"}
         revised_commands = verifier_result.get("commands", [])
         if not isinstance(revised_commands, list):
             return None
@@ -1055,7 +1095,7 @@ class LlmDynamicGoal(Node):
             "Use revise only when the rule_parse is clearly wrong. "
             "Use ask only when the instruction is genuinely ambiguous. "
             "If executing the command requires guessing missing direction, distance, destination, face expression, or effect, use ask and keep commands empty. "
-            "Allowed command types: forward, backward, turn, spin, face, goto, speed, expression, parameter, reset, effect, look. "
+            "Allowed command types: forward, backward, turn, spin, face, goto, speed, expression, parameter, reset, effect, look, humor. "
             "Important: backward means move backward while keeping the current yaw; do not convert it to a turn. "
             "Keep distances and angles conservative. Do not invent extra commands."
         )
@@ -1068,6 +1108,7 @@ class LlmDynamicGoal(Node):
                 "last_action_status": state_info.get("last_action_status", ""),
                 "last_action_type": state_info.get("last_action_type", ""),
                 "last_target_value": state_info.get("last_target_value", 0.0),
+                "current_humor_level": state_info.get("current_humor_level", DEFAULT_HUMOR_LEVEL),
                 "obstacle_distances": state_info.get("obstacle_distances", {}),
             },
         }
@@ -1145,9 +1186,12 @@ class LlmDynamicGoal(Node):
         # -------------------------------------------------------------------
         system_prompt = (
             "You are a robotic navigator assistant. Output raw JSON only, no markdown, no reasoning, no extra text.\n"
-            "Schema: {\"commands\": [ {\"type\": one_of(forward, backward, turn, spin, face, goto, speed, expression, parameter, reset, effect, look), \"value\": any } ], \"cancel\": boolean, \"speak\": string?}\n"
+            "Schema: {\"commands\": [ {\"type\": one_of(forward, backward, turn, spin, face, goto, speed, expression, parameter, reset, effect, look, humor), \"value\": any } ], \"cancel\": boolean, \"speak\": string?}\n"
             "If the user asks a question, explain briefly in Japanese in speak and keep commands empty.\n"
             "If the user requests movement, output the exact command sequence.\n"
+            "If the user asks to change humor level, output a humor command with value 0.0 to 1.0.\n"
+            "Character: you are Sirius, a cute outdoor autonomous robot. Use a short expression tag and speak like Sirius. "
+            "Humor 0.0 means polite Japanese. Humor >=0.5 means lively Kansai-ben with playful confidence.\n"
             "If the request is missing required details or would require guessing intent, ask one concise clarification question in Japanese in speak and keep commands empty.\n"
             "Do not invent a direction, distance, destination, expression, or face effect that the user did not specify.\n"
             "Use the robot state context for current status, remaining distance, blockage, people count, battery, and last action.\n"
@@ -1533,8 +1577,8 @@ class LlmDynamicGoal(Node):
             self.send_sirius_speak(speak_msg)
             self.cancel_navigation(preserve_current_goal=True)
             
-            print(f"\n⚠️ {stuck_msg.split(']')[-1].strip()} 目標をキャンセルして停止します。")
-            print("Command > ", end="", flush=True)
+            print(color_text(f"\n⚠️ {stuck_msg.split(']')[-1].strip()} 目標をキャンセルして停止します。", _YELLOW))
+            print_command_prompt()
             return
         else:
             with self.lock:
@@ -1585,8 +1629,8 @@ class LlmDynamicGoal(Node):
                     self.current_xy_tolerance = 0.50
                 self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
                 self.send_sirius_speak(DIALOGUE_TEMPLATES["arrival"])
-                print("\n🎉 全ての目標地点に到着しました！次の指示をどうぞ。")
-                print("Command > ", end="", flush=True)
+                print(color_text("\n🎉 全ての目標地点に到着しました！次の指示をどうぞ。", _GREEN))
+                print_command_prompt()
 
     def set_controller_speed(self, speed_setting):
         """Configure controller_server and velocity_smoother based on navigation mode configs"""
@@ -1976,13 +2020,16 @@ class LlmDynamicGoal(Node):
                 self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_success"])
             else:
                 self.send_sirius_speak(DIALOGUE_TEMPLATES["turn_failure"])
-            print("\n✅ 旋回完了！次の指示をどうぞ。")
-            print("Command > ", end="", flush=True)
+            print(color_text("\n✅ 旋回完了！次の指示をどうぞ。", _GREEN))
+            print_command_prompt()
 
     def send_sirius_speak(self, text):
         """face_client 経由で音声送信する薄いラッパー"""
-        self.face_client.send_speak(text)
-        self.get_logger().info(f"Sent Speak command: {text}")
+        with self.lock:
+            humor_level = self.current_humor_level
+        styled_text = style_sirius_speak(text, humor_level)
+        self.face_client.send_speak(styled_text)
+        self.get_logger().info(f"Sent Speak command: {styled_text}")
 
     def get_battery_report_string(self):
         """face_client から生情報を取得し、DIALOGUE_TEMPLATES を使ってバッテリー状態をフォーマットする"""

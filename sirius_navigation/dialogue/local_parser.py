@@ -84,7 +84,7 @@ LOOK_KEYWORDS = [
 
 FORWARD_PATTERNS = [
     "前進", "前方", "進め", "進ん", "進む", "進ま",
-    "mae", "forward", "straight", "まえ", "すす", "行っ"
+    "mae", "forward", "straight", "まえ", "すす"
 ]
 
 BACKWARD_PATTERNS = [
@@ -222,6 +222,96 @@ EXPRESSION_JA = {
     "pien": "ぴえんな気分",
     "sleeping": "眠たい気分",
 }
+
+DEFAULT_HUMOR_LEVEL = 0.7
+
+def clamp_humor_level(value):
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return DEFAULT_HUMOR_LEVEL
+
+def strip_expression_tag(text):
+    match = re.match(r"^(\[[^\]]+\])(.+)$", text or "")
+    if match:
+        return match.group(1), match.group(2)
+    return "", text or ""
+
+def style_sirius_speak(text, humor_level=DEFAULT_HUMOR_LEVEL):
+    """SiriusFace のユーモアレベルに合わせて、ナビ側の定型文も軽く口調統一する。"""
+    tag, body = strip_expression_tag(text)
+    humor = clamp_humor_level(humor_level)
+    if not body:
+        return text
+
+    if humor <= 0.0:
+        polite = body
+        replacements = [
+            ("ボク", "私"),
+            ("僕", "私"),
+            ("したのだ！", "しました。"),
+            ("したのだ。", "しました。"),
+            ("するのだ！", "します。"),
+            ("するのだ。", "します。"),
+            ("ほしいのだ。", "ください。"),
+            ("なのだ！", "です。"),
+            ("なのだ。", "です。"),
+            ("なのだ？", "ですか？"),
+            ("のだ！", "です。"),
+            ("のだ。", "です。"),
+            ("ちゃった", "しました"),
+            ("ごめんなさい、", "申し訳ありません、"),
+        ]
+        for src, dst in replacements:
+            polite = polite.replace(src, dst)
+        return f"{tag}{polite}"
+
+    kansai = body.replace("ボク", "僕")
+    if humor >= 0.5:
+        replacements = [
+            ("したのだ！", "したで！"),
+            ("したのだ。", "したで。"),
+            ("するのだ！", "するで！"),
+            ("するのだ。", "するで。"),
+            ("向かうのだ！", "向かうで！"),
+            ("戻すのだ！", "戻すで！"),
+            ("変えるのだ！", "変えるで！"),
+            ("ほしいのだ。", "ほしいんや。"),
+            ("なのだ！", "やで！"),
+            ("なのだ。", "やで。"),
+            ("なのだ？", "やろか？"),
+            ("のだ！", "やで！"),
+            ("のだ。", "やで。"),
+        ]
+        for src, dst in replacements:
+            kansai = kansai.replace(src, dst)
+    else:
+        replacements = [
+            ("なのだ！", "なのだ。"),
+            ("のだ！", "のだ。"),
+            ("やで！", "やで。"),
+        ]
+        for src, dst in replacements:
+            kansai = kansai.replace(src, dst)
+    return f"{tag}{kansai}"
+
+def parse_humor_command(norm_inst):
+    if not any(word in norm_inst for word in ["ユーモア", "ゆーもあ", "humor", "真面目", "まじめ", "デフォルト"]):
+        return None
+
+    if any(word in norm_inst for word in ["デフォルト", "標準", "戻"]):
+        return {"type": "humor", "value": DEFAULT_HUMOR_LEVEL}
+    if any(word in norm_inst for word in ["真面目", "まじめ", "敬語", "丁寧"]):
+        return {"type": "humor", "value": 0.0}
+    if any(word in norm_inst for word in ["高め", "上げ", "おもしろ", "面白", "生意気"]):
+        return {"type": "humor", "value": 0.9}
+    if any(word in norm_inst for word in ["低め", "下げ", "控えめ"]):
+        return {"type": "humor", "value": 0.3}
+
+    match = re.search(r"(?:ユーモア|ゆーもあ|humor)(?:レベル)?(?:を|は|=|:)?([01](?:\.\d+)?)", norm_inst)
+    if match:
+        return {"type": "humor", "value": clamp_humor_level(match.group(1))}
+    return None
 
 def build_clarification_response(norm_inst):
     """内容不足で動作を推測する必要がある指示なら、確認質問を返す。"""
@@ -476,6 +566,10 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     返り値: dict (成功時), None (マッチせずLLMへフォールバックが必要な場合)
     """
     norm_inst = normalize_instruction_text(instruction).strip().replace(" ", "").replace("　", "").lower()
+
+    humor_cmd = parse_humor_command(norm_inst)
+    if humor_cmd:
+        return {"commands": [humor_cmd], "cancel": False, "fast_path": True}
 
     # 0. 現在の速度確認
     speed_queries = ["今の速度", "現在の速度", "速度を教えて", "スピード教えて", "すぴーど教えて", "スピードは", "速度は"]

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import unittest
-from sirius_navigation.dialogue.local_parser import parse_local_rules
+from sirius_navigation.dialogue.local_parser import parse_local_rules, style_sirius_speak
 
 class TestLocalParserColcon(unittest.TestCase):
     def setUp(self):
@@ -54,6 +54,12 @@ class TestLocalParserColcon(unittest.TestCase):
         self.assertTrue(res.get("fast_path"))
         self.assertIn("Hokuyo", res.get("speak", ""))
 
+        res = parse_local_rules("ダジャレ行って", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertTrue(res.get("fast_path"))
+        self.assertEqual(res.get("commands"), [])
+        self.assertIn("布団", res.get("speak", ""))
+
     def test_face_effect_commands(self):
         res = parse_local_rules("右見て", self.state_info)
         self.assertIsNotNone(res)
@@ -89,12 +95,26 @@ class TestLocalParserColcon(unittest.TestCase):
         commands = res.get("commands", [])
         self.assertTrue(any(c["type"] == "speed" and c["value"] == 0.2 for c in commands))
 
+    def test_humor_control_and_style(self):
+        res = parse_local_rules("ユーモアレベルを0.9にして", self.state_info)
+        self.assertIsNotNone(res)
+        commands = res.get("commands", [])
+        self.assertEqual(commands[0]["type"], "humor")
+        self.assertEqual(commands[0]["value"], 0.9)
+
+        self.assertIn("したで", style_sirius_speak("[happy]目的地に到着したのだ！", 0.9))
+        self.assertIn("しました", style_sirius_speak("[happy]目的地に到着したのだ！", 0.0))
+
     def test_forward_word_inside_non_motion_word_does_not_move(self):
         res = parse_local_rules("あなたの名前は", self.state_info)
         self.assertIsNotNone(res)
         self.assertEqual(res.get("commands"), [])
 
         res = parse_local_rules("手前に来て", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("commands"), [])
+
+        res = parse_local_rules("ダジャレ行って", self.state_info)
         self.assertIsNotNone(res)
         self.assertEqual(res.get("commands"), [])
 

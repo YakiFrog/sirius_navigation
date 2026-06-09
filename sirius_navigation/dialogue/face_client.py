@@ -5,6 +5,17 @@ import time
 import logging
 import re
 
+_COLOR_ENABLED = os.environ.get("NO_COLOR", "").lower() not in ["1", "true", "yes"]
+_RESET = "\033[0m" if _COLOR_ENABLED else ""
+_CYAN = "\033[36m" if _COLOR_ENABLED else ""
+_GREEN = "\033[32m" if _COLOR_ENABLED else ""
+_MAGENTA = "\033[35m" if _COLOR_ENABLED else ""
+
+
+def _color(text, color):
+    return f"{color}{text}{_RESET}" if color else text
+
+
 class FaceClient:
     """sirius_face_anim2 の gRPC サーバーと通信するクライアントラッパー。
     サーバーが起動していない場合でもプロセスが遅延しないように、接続状態をキャッシュして制御します。
@@ -38,7 +49,7 @@ class FaceClient:
         """指定したテキストを喋らせる (gRPC ポート 50052)"""
         # TTSが「0人」を不自然に読むことがあるので、読み上げ用にだけ整形する
         text = re.sub(r"0\s*人", "ゼロ人", text)
-        print(f"Command > [Speech] {text}")
+        print(f"{_color('Command >', _CYAN)} {_color('[Speech]', _GREEN)} {text}")
         if not self._should_attempt_connection():
             return False
 
@@ -65,7 +76,7 @@ class FaceClient:
 
     def set_expression(self, expression_state):
         """表情を変更する (gRPC ポート 50051)"""
-        print(f"Command > [Expression Change] -> {expression_state}")
+        print(f"{_color('Command >', _CYAN)} {_color('[Expression Change]', _MAGENTA)} -> {expression_state}")
         if not self._should_attempt_connection():
             return False
 
@@ -117,7 +128,7 @@ class FaceClient:
 
     def trigger_effect(self, effect_type):
         """揺れなどの単発演出を実行する (gRPC ポート 50051)"""
-        print(f"Command > [Effect] -> {effect_type}")
+        print(f"{_color('Command >', _CYAN)} {_color('[Effect]', _MAGENTA)} -> {effect_type}")
         if not self._should_attempt_connection():
             return False
 
@@ -141,7 +152,7 @@ class FaceClient:
 
     def look_at(self, x, y):
         """顔の視線を画面座標へ向ける (gRPC ポート 50051)"""
-        print(f"Command > [LookAt] -> x={x}, y={y}")
+        print(f"{_color('Command >', _CYAN)} {_color('[LookAt]', _MAGENTA)} -> x={x}, y={y}")
         if not self._should_attempt_connection():
             return False
 
