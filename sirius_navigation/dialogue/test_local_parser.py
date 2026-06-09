@@ -82,6 +82,15 @@ class TestLocalParser(unittest.TestCase):
         self.assertEqual(commands[0]["type"], "goto")
         self.assertEqual(commands[0]["value"], [0.0, 0.0])
 
+    def test_negative_coordinate_with_unicode_minus(self):
+        for text in ["−3,3移動して", "－3，3移動して"]:
+            res = parse_local_rules(text, self.state_info)
+            self.assertIsNotNone(res)
+            commands = res.get("commands", [])
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["type"], "goto")
+            self.assertEqual(commands[0]["value"], [-3.0, 3.0])
+
     def test_capabilities(self):
         res = parse_local_rules("何ができるの？", self.state_info)
         self.assertIsNotNone(res)

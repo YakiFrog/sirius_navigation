@@ -61,6 +61,14 @@ class TestLocalParserColcon(unittest.TestCase):
         self.assertEqual(commands[0]["type"], "goto")
         self.assertEqual(commands[0]["value"], [0.0, 0.0])
 
+    def test_negative_coordinate_with_unicode_minus(self):
+        for text in ["−3,3移動して", "－3，3移動して"]:
+            res = parse_local_rules(text, self.state_info)
+            self.assertIsNotNone(res)
+            commands = res.get("commands", [])
+            self.assertEqual(commands[0]["type"], "goto")
+            self.assertEqual(commands[0]["value"], [-3.0, 3.0])
+
     def test_correction_rules(self):
         self.state_info["last_action_type"] = "forward"
         self.state_info["last_target_value"] = 2.0

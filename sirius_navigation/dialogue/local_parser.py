@@ -131,7 +131,21 @@ EXPRESSION_JA = {
     "sleeping": "眠たい気分",
 }
 
+MINUS_TRANSLATION = str.maketrans({
+    "−": "-",
+    "－": "-",
+    "―": "-",
+    "–": "-",
+    "—": "-",
+    "﹣": "-",
+    "ｰ": "-",
+})
+
+def normalize_instruction_text(s):
+    return unicodedata.normalize("NFKC", s).translate(MINUS_TRANSLATION)
+
 def normalize_kanji_numbers(s):
+    s = normalize_instruction_text(s)
     s = s.replace("点", ".")
     comp_map = {
         "二十": "2", "thirty": "3", "三十": "3", "四十": "4", "五十": "5",
@@ -169,7 +183,7 @@ def parse_part(part_raw):
     part_norm = normalize_kanji_numbers(part_raw.strip().lower())
     
     # 1. Goto coordinates
-    coord_match = re.search(r"(?:goto|go\s*to|座標指定|座標|目標座標)?\s*\(?\s*(-?\d+(?:\.\d+)?)\s*[,，\s]\s*(-?\d+(?:\.\d+)?)\s*\)?", part_norm)
+    coord_match = re.search(r"(?:^|[^\d.])(?:goto|go\s*to|座標指定|座標|目標座標)?\s*\(?\s*([+-]?\d+(?:\.\d+)?)\s*[,，\s]\s*([+-]?\d+(?:\.\d+)?)\s*\)?", part_norm)
     if coord_match and ("座標" in part_norm or "goto" in part_norm or "," in part_norm):
         try:
             x = float(coord_match.group(1))
@@ -247,7 +261,7 @@ def parse_part(part_raw):
     return None
 
 def parse_no_number_part(part_raw):
-    part_norm = part_raw.strip().lower()
+    part_norm = normalize_instruction_text(part_raw.strip().lower())
     
     # 1. Compass/Face directions
     face_map = {
@@ -312,7 +326,7 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     ローカルルールベース判定。LLMを呼び出す前に、シンプルな表現をルールベースで直接解析する。
     返り値: dict (成功時), None (マッチせずLLMへフォールバックが必要な場合)
     """
-    norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
+    norm_inst = normalize_instruction_text(instruction).strip().replace(" ", "").replace("　", "").lower()
 
     # 0. 現在の速度確認
     speed_queries = ["今の速度", "現在の速度", "速度を教えて", "スピード教えて", "すぴーど教えて", "スピードは", "速度は"]

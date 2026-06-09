@@ -24,10 +24,10 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 try:
     from .face_client import FaceClient
-    from .local_parser import parse_local_rules, DIALOGUE_TEMPLATES
+    from .local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text
 except ImportError:
     from face_client import FaceClient
-    from local_parser import parse_local_rules, DIALOGUE_TEMPLATES
+    from local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text
 
 
 class LlmDynamicGoal(Node):
@@ -326,7 +326,7 @@ class LlmDynamicGoal(Node):
     def process_instruction(self, instruction):
         """指示文を解析し、適切なROS 2アクションを実行する"""
         # 全角英数字などを半角に正規化 (例: "１０ｍ" -> "10m", "０．５" -> "0.5")
-        instruction = unicodedata.normalize('NFKC', instruction)
+        instruction = normalize_instruction_text(instruction)
         
         # 1. 停止・キャンセル指示の簡易キーワード判定（高速応答のため）
         cancel_keywords = ["キャンセル", "cancel", "中止", "取り消", "とりけし"]
@@ -891,7 +891,7 @@ class LlmDynamicGoal(Node):
     def query_lm_studio(self, instruction):
         """ローカルルールを先に試み、マッチしなければLM StudioへLLMクエリを送る"""
         import re
-        norm_inst = instruction.strip().replace(" ", "").replace("　", "").lower()
+        norm_inst = normalize_instruction_text(instruction).strip().replace(" ", "").replace("　", "").lower()
 
         def _extract_jsonish_speak(text):
             if not text:
