@@ -84,6 +84,12 @@ class SiriusBleGateway(Node):
             self._on_blinker_command,
             10,
         )
+        self._remote_command_sub = self.create_subscription(
+            String,
+            "/sirius/remote_command",
+            self._on_remote_command,
+            10,
+        )
         self._stop_sub = self.create_subscription(Bool, "/stop", self._on_stop_command, 1)
 
         self._loop = asyncio.new_event_loop()
@@ -216,6 +222,22 @@ class SiriusBleGateway(Node):
             mode=self._ear_led_mode_text(),
             force=True,
         )
+
+    def _on_remote_command(self, msg: String):
+        text = (msg.data or "").strip()
+        if not text:
+            return
+        self.get_logger().info(f"Remote command topic received: {text}")
+        if text.startswith("[nav]"):
+            instruction = text[len("[nav]"):].strip()
+            if instruction:
+                threading.Thread(
+                    target=self._send_to_nav_http,
+                    args=(instruction,),
+                    daemon=True,
+                ).start()
+            return
+        threading.Thread(target=self._send_to_face_speak, args=(text,), daemon=True).start()
 
     async def _stop_remote_server(self):
         try:
