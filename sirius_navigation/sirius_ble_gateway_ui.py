@@ -174,7 +174,8 @@ class SiriusBleGatewayWindow(QMainWindow):
         remote = QGridLayout(remote_box)
         self.remote_labels = {}
         remote_rows = [
-            ("status", "接続状態"),
+            ("status", "受信状態"),
+            ("ble_link", "BLEリンク"),
             ("advertise_name", "広告名"),
             ("service_uuid", "Service UUID"),
             ("last_payload", "最終受信"),
@@ -324,17 +325,21 @@ class SiriusBleGatewayWindow(QMainWindow):
         self.last_remote_status_data = data
         status = data.get("status", "-")
         self.remote_labels["status"].setText(str(status))
+        self.remote_labels["ble_link"].setText("接続" if data.get("ble_link") else "待機")
         self.remote_labels["advertise_name"].setText(str(data.get("advertise_name", "-")))
         self.remote_labels["service_uuid"].setText(str(data.get("service_uuid", "-")))
         self.remote_labels["last_payload"].setText(str(data.get("last_payload", "-")))
         self.remote_labels["last_update"].setText(time.strftime("%H:%M:%S"))
 
-        if data.get("connected"):
+        if data.get("active"):
             self.remote_labels["status"].setStyleSheet("font-weight: bold; color: #286b2d;")
+            self.remote_labels["ble_link"].setStyleSheet("font-weight: bold; color: #286b2d;")
         elif status == "advertising":
             self.remote_labels["status"].setStyleSheet("font-weight: bold; color: #b36b00;")
+            self.remote_labels["ble_link"].setStyleSheet("font-weight: bold; color: #b36b00;")
         else:
             self.remote_labels["status"].setStyleSheet("font-weight: bold; color: #a33;")
+            self.remote_labels["ble_link"].setStyleSheet("font-weight: bold; color: #a33;")
 
     def _update_stale_state(self):
         if self.last_status_time is None:

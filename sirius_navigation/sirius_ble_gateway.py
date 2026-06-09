@@ -75,6 +75,8 @@ class SiriusBleGateway(Node):
         self._last_face_battery_update = 0.0
         self._last_remote_status = None
         self._last_remote_payload = ""
+        self._remote_ble_link = False
+        self._remote_last_activity = 0.0
         self._remote_server = None
         self._battery_device = None
 
@@ -182,17 +184,19 @@ class SiriusBleGateway(Node):
             f"service={self.service_uuid}"
         )
         await server.start()
-        self._publish_remote_status("advertising", connected=False)
+        self._publish_remote_status("advertising", ble_link=False, active=False)
 
         try:
             while not self._stopping.is_set():
                 is_connected = bool(server.is_connected())
-                status = "connected" if is_connected else "advertising"
-                self._publish_remote_status(status, connected=is_connected)
+                self._remote_ble_link = is_connected
+                active = (time.time() - self._remote_last_activity) < 4.0
+                status = "connected" if active else "advertising"
+                self._publish_remote_status(status, ble_link=is_connected, active=active)
                 await asyncio.sleep(1.0)
         finally:
             await server.stop()
-            self._publish_remote_status("stopped", connected=False)
+            self._publish_remote_status("stopped", ble_link=False, active=False)
 
     def _handle_remote_ble_write(self, characteristic, value: bytes, **kwargs):
         characteristic.value = value
@@ -206,10 +210,12 @@ class SiriusBleGateway(Node):
             return
         if text == "[ping]":
             self.get_logger().debug("Remote BLE ping received")
-            self._publish_remote_status("connected", connected=True, last_payload="[ping]")
+            self._remote_last_activity = time.time()
+            self._publish_remote_status("connected", ble_link=True, active=True, last_payload="[ping]")
             return
 
-        self._publish_remote_status("connected", connected=True, last_payload=text)
+        self._remote_last_activity = time.time()
+        self._publish_remote_status("connected", ble_link=True, active=True, last_payload=text)
 
         msg = String()
         msg.data = text
@@ -259,13 +265,20 @@ class SiriusBleGateway(Node):
         except Exception as exc:
             self.get_logger().error(f"Failed to forward speak command to face: {exc}")
 
-    def _publish_remote_status(self, status: str, connected: bool, last_payload: str = ""):
+    def _publish_remote_status(
+        self,
+        status: str,
+        ble_link: bool,
+        active: bool,
+        last_payload: str = "",
+    ):
         if last_payload:
             self._last_remote_payload = last_payload[:80]
 
         data = {
             "status": status,
-            "connected": connected,
+            "ble_link": ble_link,
+            "active": active,
             "advertise_name": self.advertise_name,
             "service_uuid": self.service_uuid,
             "stamp": time.time(),
@@ -275,7 +288,8 @@ class SiriusBleGateway(Node):
 
         cache_key = (
             data["status"],
-            data["connected"],
+            data["ble_link"],
+            data["active"],
             data.get("last_payload", ""),
         )
         if cache_key == self._last_remote_status and not last_payload:
