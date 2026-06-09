@@ -533,7 +533,7 @@ class LlmDynamicGoal(Node):
             return
 
         if cmd_type == "expression":
-            exp_state = str(value)
+            exp_state = self._normalize_expression_value(value)
             ok = self.face_client.set_expression(exp_state)
             if ok:
                 with self.lock:
@@ -2039,6 +2039,28 @@ class LlmDynamicGoal(Node):
                     self.current_expression = expression
         self.face_client.send_speak(styled_text)
         self.get_logger().info(f"Sent Speak command: {styled_text}")
+
+    def _normalize_expression_value(self, value):
+        valid = ["normal", "happy", "angry", "sad", "surprised", "cat", "wink", "pien", "sleeping"]
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in valid:
+                return lowered
+            if lowered in ["笑顔", "にこにこ", "ニコニコ"]:
+                return "happy"
+            if lowered in ["ウインク", "ウィンク", "wink"]:
+                return "wink"
+        try:
+            fval = float(value)
+            if fval >= 0.75:
+                return "happy"
+            if fval >= 0.5:
+                return "cat"
+            if fval >= 0.25:
+                return "normal"
+            return "normal"
+        except (TypeError, ValueError):
+            return "normal"
 
     def get_battery_report_string(self):
         """face_client から生情報を取得し、DIALOGUE_TEMPLATES を使ってバッテリー状態をフォーマットする"""
