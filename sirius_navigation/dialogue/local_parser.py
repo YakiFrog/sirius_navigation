@@ -42,6 +42,78 @@ EXPRESSION_KEYWORDS = [
     ("リセット", "normal"),
 ]
 
+RESET_KEYWORDS = ["リセット", "元に戻", "通常に戻", "普通にして", "表情戻"]
+
+EFFECT_KEYWORDS = [
+    ("揺れ", "shake"),
+    ("ゆれ", "shake"),
+    ("震え", "shake"),
+    ("ふるえ", "shake"),
+    ("ブルブル", "shake"),
+    ("ぶるぶる", "shake"),
+    ("shake", "shake"),
+]
+
+LOOK_KEYWORDS = [
+    ("右を見", "right"),
+    ("右見", "right"),
+    ("右に目線", "right"),
+    ("右へ目線", "right"),
+    ("lookright", "right"),
+    ("左を見", "left"),
+    ("左見", "left"),
+    ("左に目線", "left"),
+    ("左へ目線", "left"),
+    ("lookleft", "left"),
+    ("上を見", "up"),
+    ("上見", "up"),
+    ("上に目線", "up"),
+    ("lookup", "up"),
+    ("下を見", "down"),
+    ("下見", "down"),
+    ("下に目線", "down"),
+    ("lookdown", "down"),
+    ("正面を見", "center"),
+    ("正面見", "center"),
+    ("こっち見", "center"),
+    ("こっちを見", "center"),
+    ("中央を見", "center"),
+    ("中心を見", "center"),
+    ("lookcenter", "center"),
+]
+
+FORWARD_PATTERNS = [
+    "前進", "前方", "進め", "進ん", "進む", "進ま",
+    "mae", "forward", "straight", "まえ", "すす", "行っ"
+]
+
+BACKWARD_PATTERNS = [
+    "後退", "後ろ", "うしろ", "後方", "下が", "下げ", "さがって", "さがれ",
+    "sagatt", "usirosag", "ushirosag", "back", "reverse", "ushiro", "backward"
+]
+
+LATERAL_TURN_PATTERNS = [
+    "右", "左", "migi", "hidari", "みぎ", "ひだり"
+]
+
+def contains_any(text, patterns):
+    return any(pattern in text for pattern in patterns)
+
+def contains_forward_intent(text):
+    if contains_any(text, FORWARD_PATTERNS):
+        return True
+    return re.search(r"(?<![手名目])前(?:に|へ|を)", text) is not None
+
+def contains_motion_intent(text):
+    return (
+        contains_forward_intent(text)
+        or contains_any(text, BACKWARD_PATTERNS)
+        or contains_any(text, [
+            "旋回", "回転", "senkai", "spin", "goto", "座標", "まわ", "回っ",
+            "むい", "向い", "向き", "裏", "うら"
+        ] + LATERAL_TURN_PATTERNS)
+    )
+
 
 def extract_expression_commands(part_norm):
     commands = []
@@ -79,9 +151,17 @@ def extract_effect_commands(part_norm):
 def extract_face_commands(part_norm):
     candidates = []
     seen = set()
+    for kw in RESET_KEYWORDS:
+        idx = part_norm.find(kw)
+        key = ("reset", None)
+        if idx != -1 and key not in seen:
+            candidates.append((idx, {"type": "reset", "value": None}))
+            seen.add(key)
     for kw, exp in EXPRESSION_KEYWORDS:
         idx = part_norm.find(kw)
         key = ("expression", exp)
+        if exp == "normal" and ("reset", None) in seen:
+            continue
         if idx != -1 and key not in seen:
             candidates.append((idx, {"type": "expression", "value": exp}))
             seen.add(key)
@@ -99,6 +179,18 @@ def extract_face_commands(part_norm):
         key = ("parameter", param_name)
         if idx != -1 and key not in seen:
             candidates.append((idx, {"type": "parameter", "value": {"name": param_name, "amount": amount}}))
+            seen.add(key)
+    for kw, effect_type in EFFECT_KEYWORDS:
+        idx = part_norm.find(kw)
+        key = ("effect", effect_type)
+        if idx != -1 and key not in seen:
+            candidates.append((idx, {"type": "effect", "value": effect_type}))
+            seen.add(key)
+    for kw, direction in LOOK_KEYWORDS:
+        idx = part_norm.find(kw)
+        key = ("look", direction)
+        if idx != -1 and key not in seen:
+            candidates.append((idx, {"type": "look", "value": direction}))
             seen.add(key)
     return [cmd for _, cmd in sorted(candidates, key=lambda x: x[0])]
 
@@ -131,6 +223,58 @@ EXPRESSION_JA = {
     "sleeping": "眠たい気分",
 }
 
+def build_clarification_response(norm_inst):
+    """内容不足で動作を推測する必要がある指示なら、確認質問を返す。"""
+    vague_face_words = ["顔制御", "顔を制御", "顔操作", "顔を操作", "表情制御", "表情を制御", "表情操作", "表情を操作"]
+    vague_face_change_words = ["顔変えて", "顔を変えて", "表情変えて", "表情を変えて"]
+    if any(word in norm_inst for word in vague_face_words + vague_face_change_words):
+        return {
+            "commands": [],
+            "cancel": False,
+            "fast_path": True,
+            "speak": "[normal]顔をどうしますか？ウインク、笑顔、右を見る、キラキラなどを指定してほしいのだ。"
+        }
+
+    vague_motion_exact = {
+        "移動して": "[normal]どこへ移動しますか？座標、前後左右、距離のどれかを指定してほしいのだ。",
+        "移動しろ": "[normal]どこへ移動しますか？座標、前後左右、距離のどれかを指定してほしいのだ。",
+        "動いて": "[normal]どう動きますか？前進、後退、右向き、左向き、座標移動などで指定してほしいのだ。",
+        "動け": "[normal]どう動きますか？前進、後退、右向き、左向き、座標移動などで指定してほしいのだ。",
+        "行って": "[normal]どこへ行きますか？目的地か方向を指定してほしいのだ。",
+        "行け": "[normal]どこへ行きますか？目的地か方向を指定してほしいのだ。",
+        "回って": "[normal]どちらに何度回りますか？右90度、左に旋回、のように指定してほしいのだ。",
+        "向いて": "[normal]どちらを向きますか？右、左、後ろ、北などを指定してほしいのだ。",
+        "ナビして": "[normal]どこへ案内しますか？目的地か座標を指定してほしいのだ。",
+        "案内して": "[normal]どこへ案内しますか？目的地か座標を指定してほしいのだ。",
+    }
+    if norm_inst in vague_motion_exact:
+        return {
+            "commands": [],
+            "cancel": False,
+            "fast_path": True,
+            "speak": vague_motion_exact[norm_inst]
+        }
+
+    vague_approach_words = ["手前に来", "こっち来", "こっちに来", "近くに来", "近づいて"]
+    if any(word in norm_inst for word in vague_approach_words):
+        return {
+            "commands": [],
+            "cancel": False,
+            "fast_path": True,
+            "speak": "[normal]どの位置まで近づきますか？距離か座標を指定してほしいのだ。"
+        }
+
+    vague_control_words = ["制御して", "操作して", "コントロールして"]
+    if norm_inst in vague_control_words:
+        return {
+            "commands": [],
+            "cancel": False,
+            "fast_path": True,
+            "speak": "[normal]何をどう制御しますか？移動、速度、表情などを具体的に指定してほしいのだ。"
+        }
+
+    return None
+
 MINUS_TRANSLATION = str.maketrans({
     "−": "-",
     "－": "-",
@@ -142,7 +286,8 @@ MINUS_TRANSLATION = str.maketrans({
 })
 
 def normalize_instruction_text(s):
-    return unicodedata.normalize("NFKC", s).translate(MINUS_TRANSLATION)
+    s = unicodedata.normalize("NFKC", s).translate(MINUS_TRANSLATION)
+    return re.sub(r"(^|[,\s、(（\[【{=:：xXyY])ー(?=\d)", r"\1-", s)
 
 def normalize_kanji_numbers(s):
     s = normalize_instruction_text(s)
@@ -251,8 +396,8 @@ def parse_part(part_raw):
         if "cm" in part_norm or "センチ" in part_norm:
             val = val / 100.0
             
-        is_backward = any(x in part_norm for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro", "backward"])
-        is_forward = any(x in part_norm for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"])
+        is_backward = contains_any(part_norm, BACKWARD_PATTERNS)
+        is_forward = contains_forward_intent(part_norm)
         
         if is_backward:
             return {"type": "backward", "value": val}
@@ -276,7 +421,11 @@ def parse_no_number_part(part_raw):
             return {"type": "face", "value": angle}
 
     # 2. Expression control rules
-    if any(x in part_norm for x in ["顔", "表情", "しよ", "して", "むいて", "になって", "戻", "通常", "普通", "目", "頬", "キラキラ", "ウインク", "ウィンク", "wink"]):
+    if any(x in part_norm for x in [
+        "顔", "表情", "しよ", "して", "むいて", "になって", "戻", "通常", "普通",
+        "目", "頬", "キラキラ", "ウインク", "ウィンク", "wink", "見て", "見る",
+        "目線", "揺れ", "ゆれ", "震え", "ふるえ", "ブルブル", "ぶるぶる", "shake"
+    ]):
         face_cmds = extract_face_commands(part_norm)
         if face_cmds:
             return face_cmds[0] if len(face_cmds) == 1 else {"type": "face_sequence", "value": face_cmds}
@@ -291,7 +440,7 @@ def parse_no_number_part(part_raw):
             deg = -360.0
         return {"type": "spin", "value": deg}
     
-    if (is_right or is_left or is_back) and not any(x in part_norm for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "すす"]):
+    if (is_right or is_left or is_back) and not (contains_forward_intent(part_norm) or contains_any(part_norm, BACKWARD_PATTERNS)):
         if is_back:
             val = 3.14159
         else:
@@ -300,13 +449,13 @@ def parse_no_number_part(part_raw):
                 val = -0.5236 if is_right else 0.5236
         return {"type": "turn", "value": val}
 
-    if any(x in part_norm for x in ["下", "後退", "sagatt", "usirosag", "ushirosag", "back", "reverse", "さがって", "後ろ", "うしろ", "ushiro"]):
+    if contains_any(part_norm, BACKWARD_PATTERNS):
         val = 1.0
         if any(x in part_norm for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
             val = 2.0
         return {"type": "backward", "value": val}
 
-    if any(x in part_norm for x in ["前", "進", "mae", "forward", "straight", "まえ", "すす", "行っ"]):
+    if contains_forward_intent(part_norm):
         val = 1.5
         if any(x in part_norm for x in ["少し", "ちょっと", "すこし"]):
             val = 1.0
@@ -344,7 +493,7 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     speed_set_match = re.search(r"(?:速度|スピード|すぴーど)?(?:を)?(\d+(?:\.\d+)?)(?:にして|に変更|へ変更)?$", norm_inst)
     if speed_set_match and (
         any(x in norm_inst for x in ["速度", "スピード", "すぴーど"])
-        or ("にして" in norm_inst and not any(x in norm_inst for x in ["m", "メートル", "前", "後", "右", "左", "座標"]))
+        or ("にして" in norm_inst and not (contains_motion_intent(norm_inst) or any(x in norm_inst for x in ["m", "メートル"])))
     ):
         speed_val = float(speed_set_match.group(1))
         return {"commands": [{"type": "speed", "value": speed_val}], "cancel": False}
@@ -396,8 +545,24 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     face_cmds = extract_face_commands(norm_inst)
     if face_cmds:
         cmds = face_cmds
-        speak_msg = "[happy]表情を変えるのだ！" if len(cmds) == 1 else "[happy]表情を順番に変えるのだ！"
+        cmd_types = {cmd.get("type") for cmd in cmds}
+        if len(cmds) > 1:
+            speak_msg = "[happy]顔の動きを順番に変えるのだ！"
+        elif "look" in cmd_types:
+            speak_msg = "[happy]目線を動かすのだ！"
+        elif "effect" in cmd_types:
+            speak_msg = "[happy]演出を出すのだ！"
+        elif "reset" in cmd_types:
+            speak_msg = "[normal]表情を戻すのだ！"
+        elif "parameter" in cmd_types:
+            speak_msg = "[happy]顔の演出を変えるのだ！"
+        else:
+            speak_msg = "[happy]表情を変えるのだ！"
         return {"commands": cmds, "cancel": False, "fast_path": True, "speak": speak_msg}
+
+    clarification = build_clarification_response(norm_inst)
+    if clarification:
+        return clarification
         
     # 3. 雑談・キャラクター紹介の高速応答
     for kw, reply in CHAT_KEYWORDS.items():
@@ -409,7 +574,7 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     if any(q in norm_inst for q in capability_queries):
         speak_msg = (
             "[happy]ボクは前進、後退、右向き、左向き、その場旋回、座標への移動、速度変更、"
-            "表情変更、停止、再開、キャンセルができるのだ！"
+            "表情変更、ウインク、照れ、キラキラ、視線移動、揺れ演出、表情リセット、停止、再開、キャンセルができるのだ！"
         )
         return {"commands": [], "cancel": False, "fast_path": True, "speak": speak_msg}
 
@@ -471,7 +636,27 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
                 speak_msg = f"[happy]今は{mood_str}なのだ！移動中だから、ちょっと集中しているのだ。"
             else:
                 speak_msg = f"[happy]今は{mood_str}なのだ！いつでも次の指示を待っているのだ。"
-        elif is_status_query or is_people_query:
+        elif is_status_query:
+            obs_dists = state_info.get("obstacle_distances", {})
+            obstacle_parts = []
+            for direction, label in [("front", "前方"), ("back", "後方"), ("left", "左側"), ("right", "右側")]:
+                dist = obs_dists.get(direction, 999.0)
+                if isinstance(dist, (int, float)) and dist < 2.5:
+                    obstacle_parts.append(f"{label} {dist:.1f}メートル")
+            obstacle_text = "、".join(obstacle_parts) if obstacle_parts else "目立った障害物なし"
+            move_text = "実行中" if executing else "待機中"
+            stuck_text = "詰まり検知あり" if stuck else "詰まり検知なし"
+            face_text = "顔サーバー接続中" if face_active else "顔サーバー未接続"
+            vel_x = state_info.get("current_vel_x", 0.0)
+            vel_theta = state_info.get("current_vel_theta", 0.0)
+            speak_msg = (
+                f"[happy]システム状態は、{move_text}、{stuck_text}なのだ。"
+                f"現在位置は X{current_x:.2f}、Y{current_y:.2f}。"
+                f"速度は前後 {vel_x:.2f} メートル毎秒、回転 {vel_theta:.2f} ラジアン毎秒。"
+                f"キューは {queue_len} 件、{face_text}。"
+                f"障害物は {obstacle_text} なのだ。"
+            )
+        elif is_people_query:
             people_str = f"ゼロ人" if people_count == 0 else f"{people_count}人"
             
             if stuck:
@@ -668,7 +853,7 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
             cmd_list.append(no_num_cmd)
         return {"commands": cmd_list, "cancel": False}
 
-    has_dir = any(x in norm_inst for x in ["前", "進", "下", "後退", "sagatt", "usirosag", "ushirosag", "back", "mae", "右", "左", "migi", "hidari", "旋回", "回転", "senkai", "spin", "goto", "座標", "すす", "行っ", "さが", "下が", "さがっ", "まわ", "回っ", "むい", "後ろ", "うしろ", "ushiro", "裏", "うら"])
+    has_dir = contains_motion_intent(norm_inst)
     if has_dir:
         last_cmd_was_backward = state_info.get("last_cmd_was_backward", False)
         last_cmd_was_forward = state_info.get("last_cmd_was_forward", False)

@@ -38,16 +38,69 @@ class TestLocalParserColcon(unittest.TestCase):
         self.assertTrue(res.get("fast_path"))
         self.assertIn("シリウスなのだ", res.get("speak", ""))
 
+        res = parse_local_rules("あなたの名前は", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertTrue(res.get("fast_path"))
+        self.assertEqual(res.get("commands"), [])
+        self.assertIn("シリウス", res.get("speak", ""))
+
         res = parse_local_rules("ういんくして", self.state_info)
         self.assertIsNotNone(res)
         self.assertTrue(res.get("fast_path"))
         self.assertIn("ウインクしてみたのだ", res.get("speak", ""))
+
+        res = parse_local_rules("センサーは何がある？", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertTrue(res.get("fast_path"))
+        self.assertIn("Hokuyo", res.get("speak", ""))
+
+    def test_face_effect_commands(self):
+        res = parse_local_rules("右見て", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("commands", [])[0]["type"], "look")
+        self.assertEqual(res.get("commands", [])[0]["value"], "right")
+
+        res = parse_local_rules("揺れて", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("commands", [])[0]["type"], "effect")
+        self.assertEqual(res.get("commands", [])[0]["value"], "shake")
+
+        res = parse_local_rules("表情リセットして", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("commands", [])[0]["type"], "reset")
+
+    def test_ambiguous_commands_ask_for_clarification(self):
+        for text, expected in [
+            ("顔制御して", "顔をどうしますか"),
+            ("移動して", "どこへ移動"),
+            ("動いて", "どう動きますか"),
+            ("回って", "どちらに何度"),
+            ("手前に来て", "どの位置まで"),
+        ]:
+            res = parse_local_rules(text, self.state_info)
+            self.assertIsNotNone(res)
+            self.assertTrue(res.get("fast_path"))
+            self.assertEqual(res.get("commands"), [])
+            self.assertIn(expected, res.get("speak", ""))
 
     def test_speed_control(self):
         res = parse_local_rules("ゆっくり進んで", self.state_info)
         self.assertIsNotNone(res)
         commands = res.get("commands", [])
         self.assertTrue(any(c["type"] == "speed" and c["value"] == 0.2 for c in commands))
+
+    def test_forward_word_inside_non_motion_word_does_not_move(self):
+        res = parse_local_rules("あなたの名前は", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("commands"), [])
+
+        res = parse_local_rules("手前に来て", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("commands"), [])
+
+        res = parse_local_rules("1メートル前進して", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("commands", [])[0]["type"], "forward")
 
     def test_battery_query(self):
         res = parse_local_rules("バッテリーはどう？", self.state_info, battery_callback=lambda: "テスト中")
@@ -62,12 +115,23 @@ class TestLocalParserColcon(unittest.TestCase):
         self.assertEqual(commands[0]["value"], [0.0, 0.0])
 
     def test_negative_coordinate_with_unicode_minus(self):
-        for text in ["−3,3移動して", "－3，3移動して"]:
+        for text in ["−3,3移動して", "－3，3移動して", "3,ー3に移動して"]:
             res = parse_local_rules(text, self.state_info)
             self.assertIsNotNone(res)
             commands = res.get("commands", [])
             self.assertEqual(commands[0]["type"], "goto")
-            self.assertEqual(commands[0]["value"], [-3.0, 3.0])
+            expected = [-3.0, 3.0] if text.startswith(("−", "－")) else [3.0, -3.0]
+            self.assertEqual(commands[0]["value"], expected)
+
+    def test_system_status_query(self):
+        self.state_info["obstacle_distances"] = {"front": 1.2, "left": 999.0, "right": 999.0, "back": 999.0}
+        res = parse_local_rules("システム状態は", self.state_info)
+        self.assertIsNotNone(res)
+        speak = res.get("speak", "")
+        self.assertIn("システム状態", speak)
+        self.assertIn("現在位置", speak)
+        self.assertIn("前方 1.2メートル", speak)
+        self.assertNotIn("周りには", speak)
 
     def test_correction_rules(self):
         self.state_info["last_action_type"] = "forward"

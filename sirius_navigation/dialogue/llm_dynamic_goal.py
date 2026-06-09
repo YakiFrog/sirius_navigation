@@ -395,7 +395,15 @@ class LlmDynamicGoal(Node):
         for cmd in commands:
             c_type = cmd.get("type")
             c_value = cmd.get("value")
-            
+
+            if c_type == "goto" and isinstance(c_value, dict):
+                if "x" in c_value and "y" in c_value:
+                    try:
+                        cmd = {"type": "goto", "value": [float(c_value["x"]), float(c_value["y"])]}
+                        c_value = cmd["value"]
+                    except (TypeError, ValueError):
+                        self.get_logger().warning(f"Sanitizer: Invalid goto dict value from LLM: {c_value}")
+
             if c_type == "face" and isinstance(c_value, (int, float)):
                 # Detect if 'face' is accidentally used with radian values or relative instructions
                 relative_words = ["右", "左", "migi", "hidari", "turn", "曲が"]
@@ -540,6 +548,64 @@ class LlmDynamicGoal(Node):
                         self.get_logger().warning(f"[Parameter] Failed to set {param_name} (face server offline)")
             except Exception as e:
                 self.get_logger().error(f"[Parameter] Failed to apply effect: {e}")
+            self.execute_next_command()
+            return
+
+        if cmd_type == "reset":
+            ok = self.face_client.reset_face()
+            if ok:
+                with self.lock:
+                    self.current_expression = "normal"
+                self.get_logger().info("[Face] Reset face state")
+                if should_speak:
+                    self.send_sirius_speak("[normal]表情を戻したのだ！")
+            else:
+                self.get_logger().warning("[Face] Failed to reset face state (face server offline)")
+            self.execute_next_command()
+            return
+
+        if cmd_type == "effect":
+            effect_type = str(value or "shake")
+            ok = self.face_client.trigger_effect(effect_type)
+            if ok:
+                self.get_logger().info(f"[Effect] Triggered '{effect_type}'")
+                if should_speak:
+                    self.send_sirius_speak("[happy]演出を出したのだ！")
+            else:
+                self.get_logger().warning(f"[Effect] Failed to trigger '{effect_type}' (face server offline)")
+            self.execute_next_command()
+            return
+
+        if cmd_type == "look":
+            look_map = {
+                "center": (960.0, 540.0),
+                "left": (0.0, 540.0),
+                "right": (1920.0, 540.0),
+                "up": (960.0, 0.0),
+                "down": (960.0, 1080.0),
+            }
+            try:
+                if isinstance(value, dict):
+                    look_x = float(value.get("x", 960.0))
+                    look_y = float(value.get("y", 540.0))
+                    look_name = "custom"
+                elif isinstance(value, (list, tuple)) and len(value) >= 2:
+                    look_x = float(value[0])
+                    look_y = float(value[1])
+                    look_name = "custom"
+                else:
+                    look_name = str(value or "center").lower()
+                    look_x, look_y = look_map.get(look_name, look_map["center"])
+
+                ok = self.face_client.look_at(look_x, look_y)
+                if ok:
+                    self.get_logger().info(f"[Look] Set gaze '{look_name}' -> x={look_x:.1f}, y={look_y:.1f}")
+                    if should_speak:
+                        self.send_sirius_speak("[happy]目線を動かしたのだ！")
+                else:
+                    self.get_logger().warning(f"[Look] Failed to set gaze '{look_name}' (face server offline)")
+            except Exception as e:
+                self.get_logger().error(f"[Look] Failed to parse look command: {e}")
             self.execute_next_command()
             return
 
@@ -889,6 +955,159 @@ class LlmDynamicGoal(Node):
             "obstacle_distances": obs_dists,
         }
 
+    def _local_parse_needs_llm_check(self, instruction, local_result, norm_inst):
+        """ローカルパースが少し不安なときだけ LLM verifier に回す。"""
+        if local_result.get("cancel", False):
+            return False
+
+        commands = local_result.get("commands", [])
+        if not commands:
+            return False
+
+        cmd_types = [cmd.get("type") for cmd in commands if isinstance(cmd, dict)]
+        if not cmd_types:
+            return False
+
+        uncertain_words = [
+            "そのまま", "ちょっと", "少し", "すこし", "もう少し", "もうちょっと",
+            "もっと", "さらに", "いきすぎ", "行き過ぎ", "進みすぎ", "下がりすぎ",
+            "回りすぎ", "まわりすぎ", "逆", "反対", "違う", "ちがう", "そっちじゃ",
+            "足りない", "たりない", "戻って", "もどって", "戻し", "やり直",
+            "さっき", "前回", "同じ", "その方向", "そっち", "こっち",
+        ]
+        if any(word in norm_inst for word in uncertain_words):
+            return True
+
+        if len(commands) > 1:
+            return True
+
+        # 「-3,3移動して」のような裸座標は実用上便利だが、座標指定か相対移動かの誤読余地がある。
+        if any(cmd_type == "goto" for cmd_type in cmd_types):
+            explicit_coordinate_words = ["座標", "目標座標", "goto", "go to", "原点", "ホーム", "home"]
+            if not any(word in norm_inst for word in explicit_coordinate_words):
+                return True
+
+        # 右/左/後ろだけの短い指示は、向く・移動・旋回の揺れが出やすい。
+        if any(cmd_type in ["turn", "spin", "backward"] for cmd_type in cmd_types):
+            directional_words = ["右", "左", "後ろ", "うしろ", "裏", "みぎ", "ひだり"]
+            if any(word in norm_inst for word in directional_words) and len(norm_inst) <= 12:
+                return True
+
+        return False
+
+    def _parse_llm_json_content(self, content):
+        content = content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if len(lines) >= 3:
+                content = "\n".join(lines[1:-1]).strip()
+        return json.loads(content), content
+
+    def _validate_verifier_result(self, verifier_result, local_result):
+        if not isinstance(verifier_result, dict):
+            return None
+
+        decision = verifier_result.get("decision", "accept")
+        if decision == "accept":
+            return local_result
+
+        if decision == "ask":
+            speak = verifier_result.get("speak") or "[normal]念のため確認したいのだ。どう動けばいいか、もう少し具体的に言ってほしいのだ。"
+            return {"commands": [], "cancel": False, "fast_path": True, "speak": speak}
+
+        if decision != "revise":
+            return None
+
+        allowed_types = {"forward", "backward", "turn", "spin", "face", "goto", "speed", "expression", "parameter", "reset", "effect", "look"}
+        revised_commands = verifier_result.get("commands", [])
+        if not isinstance(revised_commands, list):
+            return None
+
+        safe_commands = []
+        for cmd in revised_commands:
+            if not isinstance(cmd, dict):
+                continue
+            cmd_type = cmd.get("type")
+            if cmd_type not in allowed_types:
+                continue
+            safe_commands.append(cmd)
+
+        if not safe_commands and not verifier_result.get("speak"):
+            return None
+
+        result = {
+            "commands": safe_commands,
+            "cancel": bool(verifier_result.get("cancel", False)),
+            "fast_path": True,
+        }
+        if verifier_result.get("speak"):
+            result["speak"] = verifier_result.get("speak")
+        return result
+
+    def _verify_local_parse_with_llm(self, instruction, local_result, state_info):
+        """ローカルパース結果を、短いLLM verifierで検算する。失敗時はNoneを返す。"""
+        system_prompt = (
+            "You are a safety verifier for a Japanese robot navigation parser. "
+            "Check whether rule_parse correctly captures the user's intent. "
+            "Reply raw JSON only, no markdown. "
+            "Schema: {\"decision\":\"accept|revise|ask\", \"commands\":[], \"cancel\":false, \"speak\":\"optional Japanese\"}. "
+            "Use accept if rule_parse is good enough. "
+            "Use revise only when the rule_parse is clearly wrong. "
+            "Use ask only when the instruction is genuinely ambiguous. "
+            "If executing the command requires guessing missing direction, distance, destination, face expression, or effect, use ask and keep commands empty. "
+            "Allowed command types: forward, backward, turn, spin, face, goto, speed, expression, parameter, reset, effect, look. "
+            "Important: backward means move backward while keeping the current yaw; do not convert it to a turn. "
+            "Keep distances and angles conservative. Do not invent extra commands."
+        )
+
+        verifier_input = {
+            "user_text": instruction,
+            "rule_parse": local_result,
+            "state": {
+                "executing": state_info.get("executing", False),
+                "last_action_status": state_info.get("last_action_status", ""),
+                "last_action_type": state_info.get("last_action_type", ""),
+                "last_target_value": state_info.get("last_target_value", 0.0),
+                "obstacle_distances": state_info.get("obstacle_distances", {}),
+            },
+        }
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(verifier_input, ensure_ascii=False)},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 384,
+            "top_p": 1.0,
+        }
+
+        try:
+            req = urllib.request.Request(
+                self.lm_studio_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as response:
+                res_body = response.read().decode("utf-8")
+                res_json = json.loads(res_body)
+                content = res_json["choices"][0]["message"]["content"]
+                verifier_json, cleaned_content = self._parse_llm_json_content(content)
+
+            checked = self._validate_verifier_result(verifier_json, local_result)
+            if checked is None:
+                self.get_logger().warning(f"LLM verifier returned unusable result: {verifier_json}")
+                return None
+
+            self.get_logger().info(
+                f"LLM verifier checked uncertain local parse: decision={verifier_json.get('decision', 'accept')} raw='{cleaned_content}'"
+            )
+            return checked
+        except Exception as e:
+            self.get_logger().warning(f"LLM verifier failed; using local parse as-is: {e}")
+            return None
+
     def query_lm_studio(self, instruction):
         """ローカルルールを先に試み、マッチしなければLM StudioへLLMクエリを送る"""
         import re
@@ -915,15 +1134,22 @@ class LlmDynamicGoal(Node):
         if local_result is not None:
             # 発話は process_instruction 側の send_sirius_speak に集約する。
             # ここで直接送ると同じ文が二重送信され、後段の割り込み発話で先発話を潰すことがある。
+            if self._local_parse_needs_llm_check(instruction, local_result, norm_inst):
+                self.get_logger().info(f"Local parse is uncertain; asking LLM verifier. parse={local_result}")
+                checked_result = self._verify_local_parse_with_llm(instruction, local_result, state_info)
+                if checked_result is not None:
+                    return checked_result
             return local_result
         
         # ルールベースで一致しなかった複雑な指示は LLM (LM Studio) へ問い合わせる
         # -------------------------------------------------------------------
         system_prompt = (
             "You are a robotic navigator assistant. Output raw JSON only, no markdown, no reasoning, no extra text.\n"
-            "Schema: {\"commands\": [ {\"type\": one_of(forward, backward, turn, spin, face, goto, speed, expression, parameter), \"value\": any } ], \"cancel\": boolean, \"speak\": string?}\n"
+            "Schema: {\"commands\": [ {\"type\": one_of(forward, backward, turn, spin, face, goto, speed, expression, parameter, reset, effect, look), \"value\": any } ], \"cancel\": boolean, \"speak\": string?}\n"
             "If the user asks a question, explain briefly in Japanese in speak and keep commands empty.\n"
             "If the user requests movement, output the exact command sequence.\n"
+            "If the request is missing required details or would require guessing intent, ask one concise clarification question in Japanese in speak and keep commands empty.\n"
+            "Do not invent a direction, distance, destination, expression, or face effect that the user did not specify.\n"
             "Use the robot state context for current status, remaining distance, blockage, people count, battery, and last action.\n"
             "Always prefer a valid minimal JSON object. Do not wrap in code fences."
         )
@@ -960,6 +1186,8 @@ class LlmDynamicGoal(Node):
             fallback_prompt = (
                 "You are a robotic navigator assistant. Reply with raw JSON only. "
                 "If the user asks a general question, answer briefly in Japanese in speak. "
+                "If details are missing or intent must be guessed, ask one concise clarification question in Japanese in speak and keep commands empty. "
+                "Do not invent movement or face-control parameters. "
                 "Do not reason. Do not use markdown."
             )
             fallback_messages = [

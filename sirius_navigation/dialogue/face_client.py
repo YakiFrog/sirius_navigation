@@ -115,6 +115,54 @@ class FaceClient:
                 self.last_connect_retry = time.time()
             return False
 
+    def trigger_effect(self, effect_type):
+        """揺れなどの単発演出を実行する (gRPC ポート 50051)"""
+        print(f"Command > [Effect] -> {effect_type}")
+        if not self._should_attempt_connection():
+            return False
+
+        try:
+            import grpc
+            import face_control_pb2
+            import face_control_pb2_grpc
+
+            with grpc.insecure_channel('localhost:50051') as channel:
+                stub = face_control_pb2_grpc.FaceServiceStub(channel)
+                req = face_control_pb2.EffectRequest(type=str(effect_type))
+                stub.TriggerEffect(req, timeout=1.0)
+                self.face_server_active = True
+                return True
+        except Exception as e:
+            if self.face_server_active:
+                self.logger.warning(f"Face TriggerEffect failed for '{effect_type}': {e}")
+                self.face_server_active = False
+                self.last_connect_retry = time.time()
+            return False
+
+    def look_at(self, x, y):
+        """顔の視線を画面座標へ向ける (gRPC ポート 50051)"""
+        print(f"Command > [LookAt] -> x={x}, y={y}")
+        if not self._should_attempt_connection():
+            return False
+
+        try:
+            import grpc
+            import face_control_pb2
+            import face_control_pb2_grpc
+
+            with grpc.insecure_channel('localhost:50051') as channel:
+                stub = face_control_pb2_grpc.FaceServiceStub(channel)
+                req = face_control_pb2.LookAtRequest(x=float(x), y=float(y))
+                stub.LookAt(req, timeout=1.0)
+                self.face_server_active = True
+                return True
+        except Exception as e:
+            if self.face_server_active:
+                self.logger.warning(f"Face LookAt failed for x={x}, y={y}: {e}")
+                self.face_server_active = False
+                self.last_connect_retry = time.time()
+            return False
+
     def set_styles(self, eye_style=None, mouth_style=None):
         """目・口のスタイルを直接変更する (gRPC ポート 50051)"""
         if not self._should_attempt_connection():
