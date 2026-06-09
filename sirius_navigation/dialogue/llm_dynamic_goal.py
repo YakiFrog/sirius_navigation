@@ -87,6 +87,9 @@ class LlmDynamicGoal(Node):
         )
         self.current_vel_x = 0.0
         self.current_vel_theta = 0.0
+        self.current_odom_x = 0.0
+        self.current_odom_y = 0.0
+        self.has_odom_pose = False
         
         # アクションキャンセルのためのサービス
         self.cancel_client = self.create_client(CancelGoal, '/navigate_to_pose/_action/cancel_goal')
@@ -167,8 +170,12 @@ class LlmDynamicGoal(Node):
         self.assisted_drive_active = False
         self.assisted_drive_direction = 0.0
         self.assisted_drive_end_time = None
+        self.assisted_drive_start_time = 0.0
         self.assisted_drive_speed = 0.0
         self.assisted_drive_distance = 0.0
+        self.assisted_drive_start_x = None
+        self.assisted_drive_start_y = None
+        self.assisted_drive_distance_source = "unknown"
         self.assisted_drive_blocked_reported = False
         self.assisted_drive_last_route_log_time = 0.0
         self.assisted_drive_timer = self.create_timer(0.1, self.timer_assisted_drive_publisher)
@@ -234,6 +241,9 @@ class LlmDynamicGoal(Node):
         with self.lock:
             self.current_vel_x = msg.twist.twist.linear.x
             self.current_vel_theta = msg.twist.twist.angular.z
+            self.current_odom_x = msg.pose.pose.position.x
+            self.current_odom_y = msg.pose.pose.position.y
+            self.has_odom_pose = True
 
     def costmap_callback(self, msg):
         """local_costmap を解析し、ロボットから見た前後左右の障害物までの最短距離を計算・更新する"""
@@ -484,6 +494,8 @@ class LlmDynamicGoal(Node):
         sorted_commands = [c for c in commands if c.get("type") == "speed"] + [c for c in commands if c.get("type") != "speed"]
         
         # 進行中の動作があれば、新しいコマンドを開始する前に一度キャンセルして停止させる（割り込み処理）
+        if any(c.get("type") in ["forward", "backward", "turn", "spin", "face", "goto"] for c in sorted_commands):
+            self.publish_nav_control("pause_silent")
         self.cancel_navigation(clear_queue=False)
         
         with self.lock:
@@ -1927,6 +1939,22 @@ class LlmDynamicGoal(Node):
                     f"(subscribers={teleop_subscribers}, linear.x={twist.linear.x:.2f})"
                 )
 
+    def get_assisted_drive_position(self):
+        """前後移動の距離測定用位置を取得する。/odom を優先する。"""
+        with self.lock:
+            if self.has_odom_pose:
+                return self.current_odom_x, self.current_odom_y, "odom"
+
+        try:
+            trans = self.tf_buffer.lookup_transform(
+                'map',
+                'sirius3/base_footprint',
+                rclpy.time.Time()
+            )
+            return trans.transform.translation.x, trans.transform.translation.y, "map_tf"
+        except Exception:
+            return None, None, "unavailable"
+
     def start_assisted_drive(self, direction: float, distance: float, should_speak: bool = True):
         """前後移動を assisted teleop 系の速度指示に切り替える。"""
         try:
@@ -1940,13 +1968,31 @@ class LlmDynamicGoal(Node):
         direction = 1.0 if direction >= 0.0 else -1.0
         speed = min(max(distance * 0.35, 0.12), 0.22)
         duration = distance / speed
+        start_x, start_y, distance_source = self.get_assisted_drive_position()
+        now = self.get_clock().now().nanoseconds / 1e9
+        preempt_delay = 1.1
+
+        self.publish_nav_control("pause_silent")
+        stop_msg = Bool()
+        stop_msg.data = True
+        self.stop_pub.publish(stop_msg)
+
+        def reset_manual_drive_stop():
+            msg = Bool()
+            msg.data = False
+            self.stop_pub.publish(msg)
+        threading.Timer(preempt_delay, reset_manual_drive_stop).start()
 
         with self.lock:
             self.assisted_drive_active = True
             self.assisted_drive_direction = direction
-            self.assisted_drive_end_time = self.get_clock().now().nanoseconds / 1e9 + duration + 1.0
+            self.assisted_drive_start_time = now + preempt_delay
+            self.assisted_drive_end_time = now + preempt_delay + duration + 3.0
             self.assisted_drive_speed = speed
             self.assisted_drive_distance = distance
+            self.assisted_drive_start_x = start_x
+            self.assisted_drive_start_y = start_y
+            self.assisted_drive_distance_source = distance_source
             self.assisted_drive_blocked_reported = False
             self.assisted_drive_last_route_log_time = 0.0
 
@@ -1958,32 +2004,61 @@ class LlmDynamicGoal(Node):
 
         self.get_logger().info(
             f"[AssistDrive] direction={'forward' if direction > 0.0 else 'backward'}, "
-            f"distance={distance:.2f}m speed={speed:.2f}m/s duration={duration:.2f}s"
+            f"target_distance={distance:.2f}m speed={speed:.2f}m/s "
+            f"preempt_delay={preempt_delay:.1f}s timeout={duration + 3.0:.2f}s "
+            f"distance_source={distance_source}"
         )
 
     def stop_assisted_drive(self):
+        should_publish_stop = False
         with self.lock:
+            should_publish_stop = self.assisted_drive_active
             self.assisted_drive_active = False
             self.assisted_drive_direction = 0.0
             self.assisted_drive_end_time = None
+            self.assisted_drive_start_time = 0.0
             self.assisted_drive_speed = 0.0
             self.assisted_drive_distance = 0.0
+            self.assisted_drive_start_x = None
+            self.assisted_drive_start_y = None
+            self.assisted_drive_distance_source = "unknown"
             self.assisted_drive_blocked_reported = False
 
-        self.publish_assisted_drive_twist(Twist())
+        if should_publish_stop:
+            self.publish_assisted_drive_twist(Twist())
 
     def timer_assisted_drive_publisher(self):
         with self.lock:
             active = self.assisted_drive_active
             end_time = self.assisted_drive_end_time
+            start_time = self.assisted_drive_start_time
             direction = self.assisted_drive_direction
             speed = self.assisted_drive_speed
+            target_distance = self.assisted_drive_distance
+            start_x = self.assisted_drive_start_x
+            start_y = self.assisted_drive_start_y
+            distance_source = self.assisted_drive_distance_source
             blocked_reported = self.assisted_drive_blocked_reported
             last_type = self.last_active_cmd_type
             obs_dists = dict(getattr(self, 'obstacle_distances', {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}))
 
         if not active:
             return
+
+        now = self.get_clock().now().nanoseconds / 1e9
+        if start_time and now < start_time:
+            return
+
+        if start_x is None or start_y is None:
+            current_x, current_y, current_source = self.get_assisted_drive_position()
+            if current_x is not None and current_y is not None:
+                with self.lock:
+                    self.assisted_drive_start_x = current_x
+                    self.assisted_drive_start_y = current_y
+                    self.assisted_drive_distance_source = current_source
+                start_x = current_x
+                start_y = current_y
+                distance_source = current_source
 
         nearest_front = obs_dists.get("front", 999.0)
         nearest_back = obs_dists.get("back", 999.0)
@@ -2002,9 +2077,26 @@ class LlmDynamicGoal(Node):
             self.stop_assisted_drive()
             return
 
-        now = self.get_clock().now().nanoseconds / 1e9
+        current_x, current_y, current_source = self.get_assisted_drive_position()
+        if start_x is not None and start_y is not None and current_x is not None and current_y is not None:
+            traveled = math.hypot(current_x - start_x, current_y - start_y)
+            if traveled >= target_distance:
+                self.get_logger().info(
+                    f"[AssistDrive] target reached by odometry feedback: "
+                    f"traveled={traveled:.2f}m target={target_distance:.2f}m source={distance_source}"
+                )
+                self.send_sirius_speak("[happy]ここまで進んだのだ！")
+                self.stop_assisted_drive()
+                return
+        elif current_source == "unavailable":
+            self.get_logger().warning("[AssistDrive] odometry/TF position unavailable; distance feedback is paused.")
+
         if end_time is not None and now >= end_time:
-            self.send_sirius_speak("[happy]ここまでの移動は完了したのだ！")
+            self.get_logger().warning(
+                f"[AssistDrive] timeout before distance target. target={target_distance:.2f}m "
+                f"source={distance_source}"
+            )
+            self.send_sirius_speak("[sad]距離を確認できないので、いったん止まるのだ。")
             self.stop_assisted_drive()
             return
 
@@ -2080,18 +2172,34 @@ class LlmDynamicGoal(Node):
         self.get_logger().info("Spin goal finished execution")
         
         success = False
+        status = None
+        status_name = "UNKNOWN"
+        result_error = None
         try:
-            status = future.result().status
+            result_msg = future.result()
+            status = result_msg.status
+            status_name = {
+                0: "STATUS_UNKNOWN",
+                1: "STATUS_ACCEPTED",
+                2: "STATUS_EXECUTING",
+                3: "STATUS_CANCELING",
+                4: "STATUS_SUCCEEDED",
+                5: "STATUS_CANCELED",
+                6: "STATUS_ABORTED",
+            }.get(status, f"STATUS_{status}")
             if status == 4: # STATUS_SUCCEEDED in ROS 2
                 success = True
-        except Exception:
-            pass
+        except Exception as e:
+            result_error = str(e)
 
         with self.lock:
             if self.turn_arrival_triggered:
                 success = True
                 self.turn_arrival_triggered = False
 
+        yaw_robot = None
+        end_x = None
+        end_y = None
         # 最終自己位置の取得と表示
         try:
             trans = self.tf_buffer.lookup_transform(
@@ -2106,8 +2214,10 @@ class LlmDynamicGoal(Node):
             siny_cosp = 2 * (qw * qz + qx * qy)
             cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
             yaw_robot = math.atan2(siny_cosp, cosy_cosp)
+            end_x = trans.transform.translation.x
+            end_y = trans.transform.translation.y
             self.get_logger().info(
-                f"📍 [End Pose] X={trans.transform.translation.x:.3f}, Y={trans.transform.translation.y:.3f}, Yaw={math.degrees(yaw_robot):+.1f}deg"
+                f"📍 [End Pose] X={end_x:.3f}, Y={end_y:.3f}, Yaw={math.degrees(yaw_robot):+.1f}deg"
             )
         except Exception:
             pass
@@ -2119,6 +2229,14 @@ class LlmDynamicGoal(Node):
             has_more = bool(self.command_queue)
             obs_dists = getattr(self, 'obstacle_distances', {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0})
             nearest_obstacle = min(obs_dists.values()) if obs_dists else 999.0
+            requested_turn = self.turn_remaining_angle
+            start_yaw = self.last_action_start_yaw
+            achieved_turn = None
+            yaw_error_deg = None
+            if yaw_robot is not None and requested_turn is not None:
+                achieved_turn = (yaw_robot - start_yaw + math.pi) % (2 * math.pi) - math.pi
+                yaw_error_deg = abs(math.degrees(requested_turn - achieved_turn))
+                yaw_error_deg = min(yaw_error_deg, 360.0 - yaw_error_deg)
             if success:
                 self.last_action_status = "success"
                 self.last_final_distance_error = 0.0
@@ -2127,12 +2245,30 @@ class LlmDynamicGoal(Node):
             else:
                 self.last_action_status = "failed_stuck" if nearest_obstacle < 0.8 else "failed"
                 self.last_final_distance_error = 0.0
-                self.last_final_yaw_error = abs(math.degrees(self.turn_remaining_angle)) if self.turn_remaining_angle is not None else 0.0
+                self.last_final_yaw_error = yaw_error_deg if yaw_error_deg is not None else (
+                    abs(math.degrees(self.turn_remaining_angle)) if self.turn_remaining_angle is not None else 0.0
+                )
                 self.is_stuck = nearest_obstacle < 0.8
                 self.chat_history.append({
                     "role": "assistant",
                     "content": "【System Feedback】Spin/turn action failed. Nearby obstacle may have prevented safe rotation."
                 })
+
+        achieved_str = "unknown" if achieved_turn is None else f"{math.degrees(achieved_turn):+.1f}deg"
+        requested_str = "unknown" if requested_turn is None else f"{math.degrees(requested_turn):+.1f}deg"
+        yaw_error_str = "unknown" if yaw_error_deg is None else f"{yaw_error_deg:.1f}deg"
+        spin_result_msg = (
+            "[SpinResult] "
+            f"success={success} status={status_name}({status}) "
+            f"requested={requested_str} achieved={achieved_str} yaw_error={yaw_error_str} "
+            f"nearest_obstacle={nearest_obstacle:.2f}m obs={dict(obs_dists)} "
+            f"end_pose=({end_x if end_x is not None else 'unknown'}, {end_y if end_y is not None else 'unknown'}) "
+            f"result_error={result_error}"
+        )
+        if success:
+            self.get_logger().info(spin_result_msg)
+        else:
+            self.get_logger().warning(spin_result_msg)
             
         if has_more:
             self.execute_next_command()

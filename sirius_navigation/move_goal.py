@@ -63,6 +63,7 @@ class Nav2GoalClient(Node):
         self.distance = float('inf')
         self.positions_list = []
         self.current_goal_index = None
+        self.current_goal_handle = None
         self._waiting_until = None  # 待機終了時刻
         self._paused_by_user = False
         self._cancelled_by_user = False
@@ -202,6 +203,7 @@ class Nav2GoalClient(Node):
         name = f"[WP:{wp.number}] " if wp else "[WP:?] "
         if goal_handle.accepted:
             self.get_logger().info(name + "Goal accepted by action server.")
+            self.current_goal_handle = goal_handle
             self.distance = float('inf')  # reset distance for new goal
         else:
             self.get_logger().warning(name + "Goal REJECTED by action server.")
@@ -239,13 +241,40 @@ class Nav2GoalClient(Node):
         elif cmd in ["cancel", "abort", "clear"]:
             self.get_logger().info(f"nav_control received: {cmd}")
             self.cancel_current_goal()
+        elif cmd in ["cancel_silent", "abort_silent", "clear_silent"]:
+            self.get_logger().info(f"nav_control received: {cmd}")
+            self.cancel_current_goal(emit_stop=False)
+        elif cmd in ["pause_silent", "hold_silent", "stop_silent"]:
+            self.get_logger().info(f"nav_control received: {cmd}")
+            self.pause_current_goal(emit_stop=False)
 
-    def cancel_current_goal(self):
+    def cancel_current_goal(self, emit_stop: bool = True):
         """現在の経路を完全に取り消し、再送も止める"""
         self._paused_by_user = False
         self._cancelled_by_user = True
-        self.publish_stop_command(True, self.count)
+        if self.current_goal_handle is not None:
+            try:
+                self.current_goal_handle.cancel_goal_async()
+            except Exception as e:
+                self.get_logger().warning(f"Failed to cancel current action goal: {e}")
+            self.current_goal_handle = None
+        if emit_stop:
+            self.publish_stop_command(True, self.count)
         self.get_logger().info("Current waypoint goal cancelled; future goal resend disabled.")
+
+    def pause_current_goal(self, emit_stop: bool = True):
+        """現在の経路を一時停止する。resume で同じ waypoint を再送できる。"""
+        self._paused_by_user = True
+        self._cancelled_by_user = False
+        if self.current_goal_handle is not None:
+            try:
+                self.current_goal_handle.cancel_goal_async()
+            except Exception as e:
+                self.get_logger().warning(f"Failed to pause current action goal: {e}")
+            self.current_goal_handle = None
+        if emit_stop:
+            self.publish_stop_command(True, self.count)
+        self.get_logger().info("Current waypoint goal paused; resume will resend the current waypoint.")
 
     def resume_current_goal(self):
         """停止中の経路を再開する"""
@@ -405,7 +434,10 @@ class Nav2GoalClient(Node):
                 current_wp_info = f"[WP:{current_wp.number}] ({self.count + 1}/{len(self.waypoints)})"
 
                 if self._cancelled_by_user:
-                    self.get_logger().info(f"{current_wp_info} navigation cancelled; holding position.")
+                    self.get_logger().info(
+                        f"{current_wp_info} navigation cancelled; holding position.",
+                        throttle_duration_sec=2.0
+                    )
                     return
 
                 if self._paused_by_user:
