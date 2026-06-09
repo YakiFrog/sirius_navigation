@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 import sys
+import os
+import ast
 import math
 import time
+from collections import deque
 import rclpy
 
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Odometry, OccupancyGrid
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
@@ -16,7 +20,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QFrame, QScrollArea, QGridLayout, QMessageBox
 )
 from PyQt5.QtCore import QTimer, Qt, QPointF
-from PyQt5.QtGui import QFont, QPalette, QColor, QClipboard, QPainter, QPen, QBrush
+from PyQt5.QtGui import QFont, QPalette, QColor, QClipboard, QPainter, QPen, QBrush, QPolygonF
 
 try:
     from .face_client import FaceClient
@@ -36,6 +40,8 @@ class _SilentLogger:
 
 
 class SiriusStatusMonitor(Node):
+    RADAR_MAX_RANGE = 2.0
+
     KNOWLEDGE_ITEMS = [
         "現在座標 (TF map -> base_footprint)",
         "現在Yaw角",
@@ -83,6 +89,8 @@ class SiriusStatusMonitor(Node):
         self.goal_distance = None
         self.current_xy_tolerance = 0.50
         self.is_stuck = False
+        self.robot_base_frame = 'sirius3/base_footprint'
+        self.robot_footprint = self._load_nav2_footprint()
 
         self._battery_cache_text = "[unknown]"
         self._battery_cache_time = 0.0
@@ -92,9 +100,18 @@ class SiriusStatusMonitor(Node):
         self.create_subscription(PoseStamped, '/goal_pose', self.goal_callback, 10)
         self.create_subscription(String, '/nav_control', self.nav_control_callback, 10)
         self.create_subscription(Bool, '/sirius_is_stuck', self.stuck_callback, 10)
-        self.create_subscription(OccupancyGrid, '/local_costmap/costmap', self.costmap_callback, 10)
-        self.last_costmap_time = 0.0
+        self.create_subscription(LaserScan, '/hokuyo_scan', lambda msg: self.scan_callback(msg, '/hokuyo_scan'), 10)
+        self.create_subscription(LaserScan, '/scan3', lambda msg: self.scan_callback(msg, '/scan3'), 10)
         self.obstacle_distances = {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}
+        self.obstacle_points = []
+        self._scan_obstacle_distances = {}
+        self._scan_obstacle_points = {}
+        self._last_scan_times = {}
+        self._scan_hz_samples = {
+            '/hokuyo_scan': deque(maxlen=40),
+            '/scan3': deque(maxlen=40),
+        }
+        self._last_scan_hz_time = {}
 
     def odom_callback(self, msg):
         self.current_vel_x = msg.twist.twist.linear.x
@@ -120,15 +137,94 @@ class SiriusStatusMonitor(Node):
     def stuck_callback(self, msg):
         self.is_stuck = msg.data
 
-    def costmap_callback(self, msg):
+    def _load_nav2_footprint(self):
+        fallback = [[0.50, 0.30], [0.50, -0.30], [-0.70, -0.30], [-0.70, 0.30]]
+        candidate_paths = [
+            os.environ.get('NAV2_PARAMS_FILE'),
+            os.path.expanduser('~/sirius_jazzy_ws/params/nav2_params.yaml'),
+            os.path.expanduser('~/sirius_jazzy_ws/params/nav2_params_sim.yaml'),
+            '/home/kotantu-desktop/sirius_jazzy_ws/params/nav2_params.yaml',
+            '/home/kotantu-desktop/sirius_jazzy_ws/params/nav2_params_sim.yaml',
+        ]
+
+        for path in candidate_paths:
+            if not path or not os.path.exists(path):
+                continue
+            footprint = self._extract_footprint_from_yaml(path)
+            if footprint:
+                self.get_logger().info(f"Loaded radar footprint from {path}: {footprint}")
+                return footprint
+
+        self.get_logger().warning(f"Using fallback radar footprint: {fallback}")
+        return fallback
+
+    def _extract_footprint_from_yaml(self, path):
+        in_local_costmap = False
+        in_ros_parameters = False
+        local_indent = None
+        params_indent = None
+
+        try:
+            with open(path, 'r', encoding='utf-8') as yaml_file:
+                for raw_line in yaml_file:
+                    line = raw_line.split('#', 1)[0].rstrip()
+                    if not line.strip():
+                        continue
+
+                    indent = len(line) - len(line.lstrip(' '))
+                    stripped = line.strip()
+
+                    if indent == 0:
+                        in_local_costmap = stripped == 'local_costmap:'
+                        local_indent = indent if in_local_costmap else None
+                        in_ros_parameters = False
+                        params_indent = None
+                        continue
+
+                    if in_local_costmap and stripped == 'ros__parameters:':
+                        in_ros_parameters = True
+                        params_indent = indent
+                        continue
+
+                    if in_local_costmap and local_indent is not None and indent <= local_indent:
+                        in_local_costmap = False
+                        in_ros_parameters = False
+                        continue
+
+                    if in_ros_parameters and params_indent is not None and indent <= params_indent:
+                        in_ros_parameters = False
+                        continue
+
+                    if in_ros_parameters and stripped.startswith('footprint:'):
+                        _, value = stripped.split(':', 1)
+                        value = value.strip().strip('"').strip("'")
+                        footprint = ast.literal_eval(value)
+                        if self._is_valid_footprint(footprint):
+                            return [[float(x), float(y)] for x, y in footprint]
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to load radar footprint from {path}: {exc}")
+
+        return None
+
+    def _is_valid_footprint(self, footprint):
+        return (
+            isinstance(footprint, list)
+            and len(footprint) >= 3
+            and all(isinstance(point, (list, tuple)) and len(point) == 2 for point in footprint)
+        )
+
+    def scan_callback(self, msg, topic_name):
         now = time.time()
-        if now - self.last_costmap_time < 0.95:
+        self._record_scan_hz(topic_name, now)
+
+        topic_key = topic_name
+        if now - self._last_scan_times.get(topic_key, 0.0) < 0.08:
             return
-        self.last_costmap_time = now
+        self._last_scan_times[topic_key] = now
 
         try:
             trans = self.tf_buffer.lookup_transform(
-                'sirius3/base_footprint',
+                self.robot_base_frame,
                 msg.header.frame_id,
                 rclpy.time.Time()
             )
@@ -145,60 +241,123 @@ class SiriusStatusMonitor(Node):
         siny_cosp = 2 * (qw * qz + qx * qy)
         cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
         yaw = math.atan2(siny_cosp, cosy_cosp)
-        
+
         cos_yaw = math.cos(yaw)
         sin_yaw = math.sin(yaw)
 
-        res = msg.info.resolution
-        width = msg.info.width
-        origin_x = msg.info.origin.position.x
-        origin_y = msg.info.origin.position.y
+        distances = {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}
+        points = []
+        angle = msg.angle_min
 
-        front_dist = 999.0
-        left_dist = 999.0
-        right_dist = 999.0
-        back_dist = 999.0
+        for scan_range in msg.ranges:
+            if math.isfinite(scan_range) and msg.range_min <= scan_range <= msg.range_max:
+                sensor_x = scan_range * math.cos(angle)
+                sensor_y = scan_range * math.sin(angle)
+                robot_x = cos_yaw * sensor_x - sin_yaw * sensor_y + tx
+                robot_y = sin_yaw * sensor_x + cos_yaw * sensor_y + ty
 
-        for idx, cost in enumerate(msg.data):
-            if cost >= 99:
-                row = idx // width
-                col = idx % width
-                
-                mx = origin_x + (col + 0.5) * res
-                my = origin_y + (row + 0.5) * res
-                
-                x_robot = cos_yaw * mx - sin_yaw * my + tx
-                y_robot = sin_yaw * mx + cos_yaw * my + ty
-                
-                dist = math.sqrt(x_robot**2 + y_robot**2)
-                if dist == 0.0:
-                    continue
-                angle_deg = math.degrees(math.atan2(y_robot, x_robot))
-                angle_deg = (angle_deg + 180) % 360 - 180
-                
-                if -20.0 <= angle_deg <= 20.0:
-                    if dist < front_dist:
-                        front_dist = dist
-                elif 20.0 < angle_deg <= 80.0:
-                    if dist < left_dist:
-                        left_dist = dist
-                elif -80.0 <= angle_deg < -20.0:
-                    if dist < right_dist:
-                        right_dist = dist
-                elif angle_deg > 135.0 or angle_deg < -135.0:
-                    if dist < back_dist:
-                        back_dist = dist
+                center_dist = math.hypot(robot_x, robot_y)
+                if center_dist > 0.0:
+                    angle_rad = math.atan2(robot_y, robot_x)
+                    angle_deg = (math.degrees(angle_rad) + 180.0) % 360.0 - 180.0
+                    footprint_dist = self._footprint_radius_at(angle_rad)
+                    clearance = max(0.0, center_dist - footprint_dist)
+                    if center_dist <= self.RADAR_MAX_RANGE and center_dist >= footprint_dist:
+                        points.append((robot_x, robot_y))
 
-        self.obstacle_distances = {
-            "front": front_dist,
-            "left": left_dist,
-            "right": right_dist,
-            "back": back_dist
-        }
+                    direction = self._direction_from_angle(angle_deg)
+                    if direction and clearance < distances[direction]:
+                        distances[direction] = clearance
+            angle += msg.angle_increment
+
+        self._scan_obstacle_distances[topic_key] = (now, distances)
+        self._scan_obstacle_points[topic_key] = (now, points)
+        self._merge_scan_obstacle_distances(now)
+
+    def _record_scan_hz(self, topic_name, now):
+        last_time = self._last_scan_hz_time.get(topic_name)
+        if last_time is not None:
+            interval = now - last_time
+            if interval > 0.0:
+                self._scan_hz_samples.setdefault(topic_name, deque(maxlen=40)).append(interval)
+        self._last_scan_hz_time[topic_name] = now
+
+    def _format_scan_hz(self, now):
+        parts = []
+        for topic_name in ['/hokuyo_scan', '/scan3']:
+            last_time = self._last_scan_hz_time.get(topic_name)
+            samples = self._scan_hz_samples.get(topic_name)
+            if not last_time or not samples or now - last_time > 1.5:
+                hz_text = "--"
+            else:
+                avg_interval = sum(samples) / len(samples)
+                hz_text = f"{(1.0 / avg_interval):.1f}"
+            parts.append(f"{topic_name}={hz_text}Hz")
+        return " / ".join(parts)
+
+    def _format_footprint(self):
+        return " ".join(f"({x:+.2f},{y:+.2f})" for x, y in self.robot_footprint)
+
+    def _direction_from_angle(self, angle_deg):
+        if -20.0 <= angle_deg <= 20.0:
+            return "front"
+        if 20.0 < angle_deg <= 80.0:
+            return "left"
+        if -80.0 <= angle_deg < -20.0:
+            return "right"
+        if angle_deg > 135.0 or angle_deg < -135.0:
+            return "back"
+        return None
+
+    def _footprint_radius_at(self, angle_rad):
+        dx = math.cos(angle_rad)
+        dy = math.sin(angle_rad)
+        best = None
+        points = self.robot_footprint
+
+        for idx, (x1, y1) in enumerate(points):
+            x2, y2 = points[(idx + 1) % len(points)]
+            edge_x = x2 - x1
+            edge_y = y2 - y1
+            denom = dx * edge_y - dy * edge_x
+            if abs(denom) < 1.0e-9:
+                continue
+
+            ray_t = (x1 * edge_y - y1 * edge_x) / denom
+            edge_t = (x1 * dy - y1 * dx) / denom
+            if ray_t >= 0.0 and 0.0 <= edge_t <= 1.0:
+                if best is None or ray_t < best:
+                    best = ray_t
+
+        return best if best is not None else 0.0
+
+    def _merge_scan_obstacle_distances(self, now):
+        merged = {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}
+        merged_points = []
+        stale_keys = []
+
+        for key, (stamp, distances) in self._scan_obstacle_distances.items():
+            if now - stamp > 0.7:
+                stale_keys.append(key)
+                continue
+            for direction, distance in distances.items():
+                if distance < merged[direction]:
+                    merged[direction] = distance
+
+        for key in stale_keys:
+            self._scan_obstacle_distances.pop(key, None)
+            self._scan_obstacle_points.pop(key, None)
+
+        for stamp, points in self._scan_obstacle_points.values():
+            if now - stamp <= 0.7:
+                merged_points.extend(points)
+
+        self.obstacle_distances = merged
+        self.obstacle_points = merged_points
 
     def get_pose(self):
         try:
-            trans = self.tf_buffer.lookup_transform('map', 'sirius3/base_footprint', rclpy.time.Time())
+            trans = self.tf_buffer.lookup_transform('map', self.robot_base_frame, rclpy.time.Time())
             x = trans.transform.translation.x
             y = trans.transform.translation.y
             q = trans.transform.rotation
@@ -240,6 +399,8 @@ class SiriusStatusMonitor(Node):
             "action": self.last_nav_control,
             "last_action": f"type={self.last_action_type} status={self.last_action_status}",
             "velocity": f"linear={self.current_vel_x:.2f}m/s angular={self.current_vel_theta:.2f}rad/s",
+            "scan_hz": self._format_scan_hz(now),
+            "footprint": self._format_footprint(),
             "people": str(self.surrounding_people_count),
             "face": f"{'on' if self.face_active else 'off'} / {self.current_expression}",
             "battery": self._battery_cache_text,
@@ -261,11 +422,45 @@ class RadarWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.obstacle_distances = {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}
+        self.obstacle_points = []
+        self.footprint = []
         self.setMinimumSize(220, 220)
 
     def set_distances(self, distances):
         self.obstacle_distances = distances
         self.update()
+
+    def set_points(self, points):
+        self.obstacle_points = points
+        self.update()
+
+    def set_footprint(self, footprint):
+        self.footprint = footprint
+        self.update()
+
+    def _footprint_radius_at(self, angle_rad):
+        if not self.footprint:
+            return 0.0
+
+        dx = math.cos(angle_rad)
+        dy = math.sin(angle_rad)
+        best = None
+
+        for idx, (x1, y1) in enumerate(self.footprint):
+            x2, y2 = self.footprint[(idx + 1) % len(self.footprint)]
+            edge_x = x2 - x1
+            edge_y = y2 - y1
+            denom = dx * edge_y - dy * edge_x
+            if abs(denom) < 1.0e-9:
+                continue
+
+            ray_t = (x1 * edge_y - y1 * edge_x) / denom
+            edge_t = (x1 * dy - y1 * dx) / denom
+            if ray_t >= 0.0 and 0.0 <= edge_t <= 1.0:
+                if best is None or ray_t < best:
+                    best = ray_t
+
+        return best if best is not None else 0.0
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -280,7 +475,8 @@ class RadarWidget(QWidget):
         if radius <= 0:
             return
 
-        max_range = 3.0
+        max_range = SiriusStatusMonitor.RADAR_MAX_RANGE
+        scale = radius / max_range
         
         # Dark circular background
         painter.setPen(QPen(QColor(40, 44, 52), 1.2, Qt.SolidLine))
@@ -289,15 +485,15 @@ class RadarWidget(QWidget):
         
         # Inner circular range grids
         painter.setPen(QPen(QColor(40, 44, 52), 0.8, Qt.SolidLine))
-        painter.drawEllipse(QPointF(center_x, center_y), radius * 2.0 / 3.0, radius * 2.0 / 3.0)
-        painter.drawEllipse(QPointF(center_x, center_y), radius * 1.0 / 3.0, radius * 1.0 / 3.0)
+        painter.drawEllipse(QPointF(center_x, center_y), radius * 1.0 / 2.0, radius * 1.0 / 2.0)
+        painter.drawEllipse(QPointF(center_x, center_y), radius * 1.0 / 4.0, radius * 1.0 / 4.0)
         
         # Draw labels for ranges
         painter.setPen(QPen(QColor(110, 115, 130), 1, Qt.SolidLine))
         painter.setFont(QFont("Arial", 8))
-        painter.drawText(int(center_x + 5), int(center_y - radius * 1.0 / 3.0 + 4), "1.0m")
-        painter.drawText(int(center_x + 5), int(center_y - radius * 2.0 / 3.0 + 4), "2.0m")
-        painter.drawText(int(center_x + 5), int(center_y - radius + 12), "3.0m")
+        painter.drawText(int(center_x + 5), int(center_y - radius * 1.0 / 4.0 + 4), "0.5m")
+        painter.drawText(int(center_x + 5), int(center_y - radius * 1.0 / 2.0 + 4), "1.0m")
+        painter.drawText(int(center_x + 5), int(center_y - radius + 12), "2.0m")
 
         # Draw cross axes
         painter.setPen(QPen(QColor(40, 44, 52), 1, Qt.DashLine))
@@ -313,40 +509,51 @@ class RadarWidget(QWidget):
 
         # Sectors definition mapping standard angles
         sectors = {
-            "front": (45, 90),
-            "left": (135, 90),
-            "back": (225, 90),
-            "right": (315, 90)
+            "front": (45, 90, 0.0),
+            "left": (135, 90, math.pi / 2.0),
+            "back": (225, 90, math.pi),
+            "right": (315, 90, -math.pi / 2.0)
         }
         
-        for direction, (start_angle, span_angle) in sectors.items():
-            dist = self.obstacle_distances.get(direction, 999.0)
-            if dist < max_range:
+        for direction, (start_angle, span_angle, robot_angle) in sectors.items():
+            clearance = self.obstacle_distances.get(direction, 999.0)
+            footprint_radius = self._footprint_radius_at(robot_angle)
+            center_range = clearance + footprint_radius
+            if center_range < max_range:
                 # Color code
-                if dist < 0.8:
+                if clearance < 0.8:
                     color = QColor(235, 47, 6, 200)   # Vivid Red
-                elif dist < 1.5:
+                elif clearance < 1.5:
                     color = QColor(241, 196, 15, 180) # Orange-Yellow
                 else:
                     color = QColor(46, 204, 113, 160)  # Green
                 
                 painter.setPen(QPen(color, 3.5, Qt.SolidLine))
-                r_dist = radius * (dist / max_range)
+                r_dist = radius * (center_range / max_range)
                 if r_dist < 10:
                     r_dist = 10
                 
                 rect_x = center_x - r_dist
                 rect_y = center_y - r_dist
                 painter.drawArc(int(rect_x), int(rect_y), int(r_dist * 2), int(r_dist * 2), int(start_angle * 16), int(span_angle * 16))
-                
-                # Draw small fill slice
-                color_fill = QColor(color)
-                color_fill.setAlpha(30)
-                painter.setBrush(QBrush(color_fill))
-                painter.setPen(Qt.NoPen)
-                painter.drawPie(int(rect_x), int(rect_y), int(r_dist * 2), int(r_dist * 2), int(start_angle * 16), int(span_angle * 16))
+
+        if self.obstacle_points:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(241, 196, 15, 210)))
+            for x, y in self.obstacle_points:
+                px = center_x - y * scale
+                py = center_y - x * scale
+                painter.drawEllipse(QPointF(px, py), 2.0, 2.0)
 
         # Center dot (robot)
+        if self.footprint:
+            polygon = QPolygonF()
+            for x, y in self.footprint:
+                polygon.append(QPointF(center_x - y * scale, center_y - x * scale))
+            painter.setBrush(QBrush(QColor(0, 168, 255, 45)))
+            painter.setPen(QPen(QColor(0, 168, 255, 180), 1.5, Qt.SolidLine))
+            painter.drawPolygon(polygon)
+
         painter.setBrush(QBrush(QColor(0, 168, 255)))
         painter.setPen(QPen(QColor(255, 255, 255), 1.5))
         painter.drawEllipse(QPointF(center_x, center_y), 7, 7)
@@ -443,6 +650,8 @@ class StatusMonitorWidget(QWidget):
             ("Action", "action"),
             ("Last Act", "last_action"),
             ("Velocity", "velocity"),
+            ("LiDAR Hz", "scan_hz"),
+            ("Footprint", "footprint"),
             ("People", "people"),
             ("Face State", "face"),
             ("Battery", "battery")
@@ -482,6 +691,7 @@ class StatusMonitorWidget(QWidget):
         right_layout.addWidget(radar_title)
         
         self.radar_widget = RadarWidget()
+        self.radar_widget.set_footprint(self.node.robot_footprint)
         right_layout.addWidget(self.radar_widget)
         right_layout.addSpacing(10)
 
@@ -565,6 +775,7 @@ class StatusMonitorWidget(QWidget):
 
         # レーダー表示の更新
         self.radar_widget.set_distances(self.node.obstacle_distances)
+        self.radar_widget.set_points(self.node.obstacle_points)
 
     def copy_to_clipboard(self):
         data = self.node.get_status_data()
@@ -579,6 +790,8 @@ class StatusMonitorWidget(QWidget):
             f"Action    : {data['action']}",
             f"Last Act  : {data['last_action']}",
             f"Velocity  : {data['velocity']}",
+            f"LiDAR Hz  : {data['scan_hz']}",
+            f"Footprint : {data['footprint']}",
             f"People    : {data['people']}",
             f"Face      : {data['face']}",
             f"Battery   : {data['battery']}",
