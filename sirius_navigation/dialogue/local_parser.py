@@ -469,12 +469,35 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
         else:
             last_status = state_info.get("last_action_status", "")
             last_type = state_info.get("last_action_type", "")
+            obs_dists = state_info.get("obstacle_distances", {})
+            direction_labels = {
+                "front": "前方",
+                "back": "後方",
+                "left": "左側",
+                "right": "右側",
+            }
+            near_obstacles = [
+                f"{direction_labels[key]} {dist:.1f}メートル"
+                for key, dist in obs_dists.items()
+                if key in direction_labels and isinstance(dist, (int, float)) and dist < 0.8
+            ]
+            obstacle_text = "、".join(near_obstacles)
+
             if last_status == "failed_stuck":
-                speak_msg = "[sad]さっきは進もうとしたんだけど、行く手が障害物で遮られちゃって、これ以上進めなくて停止したのだ。"
+                if last_type in ["turn", "spin"]:
+                    if obstacle_text:
+                        speak_msg = f"[sad]さっきは旋回しようとしたんだけど、{obstacle_text}に障害物が近くて、安全のため途中で止まったのだ。"
+                    else:
+                        speak_msg = "[sad]さっきは旋回しようとしたんだけど、近くに障害物を検知して安全に回れなかったのだ。"
+                else:
+                    speak_msg = "[sad]さっきは進もうとしたんだけど、行く手が障害物で遮られちゃって、これ以上進めなくて停止したのだ。"
             elif last_status in ["failed_cancelled", "cancelled"]:
                 speak_msg = "[happy]さっきはユーザー指示で動作を途中でキャンセルしたのだ。"
-            elif last_type == "turn" and last_status == "failed":
-                speak_msg = "[sad]さっきは旋回しようとしたんだけど、目標の角度まで回りきれずに途中で止まっちゃったのだ。"
+            elif last_type in ["turn", "spin"] and last_status == "failed":
+                if obstacle_text:
+                    speak_msg = f"[sad]さっきは旋回しようとしたんだけど、{obstacle_text}に障害物が近くて、目標角度まで回りきれなかったのだ。"
+                else:
+                    speak_msg = "[sad]さっきは旋回しようとしたんだけど、目標の角度まで回りきれずに途中で止まっちゃったのだ。"
             else:
                 speak_msg = "[happy]直前のアクションは正常に完了しているか、まだエラーは発生していないのだ！"
         

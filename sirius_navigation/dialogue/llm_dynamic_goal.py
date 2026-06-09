@@ -912,10 +912,8 @@ class LlmDynamicGoal(Node):
             battery_callback=self.get_battery_report_string
         )
         if local_result is not None:
-            # fast_path 結果は speak を直接送信してから返す
-            speak_text = local_result.get("speak", "")
-            if speak_text:
-                self.face_client.send_speak(speak_text)
+            # 発話は process_instruction 側の send_sirius_speak に集約する。
+            # ここで直接送ると同じ文が二重送信され、後段の割り込み発話で先発話を潰すことがある。
             return local_result
         
         # ルールベースで一致しなかった複雑な指示は LLM (LM Studio) へ問い合わせる
@@ -1540,7 +1538,6 @@ class LlmDynamicGoal(Node):
     def cancel_navigation(self, clear_queue=True, preserve_current_goal=False):
         """実行中のナビゲーションをキャンセル"""
         self.delete_marker()
-        self.face_client.stop_speak()
         
         # Publish not stuck status instantly
         stuck_msg_bool = Bool()
@@ -1725,6 +1722,22 @@ class LlmDynamicGoal(Node):
             self.executing_command = False
             self.current_xy_tolerance = 0.50
             has_more = bool(self.command_queue)
+            obs_dists = getattr(self, 'obstacle_distances', {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0})
+            nearest_obstacle = min(obs_dists.values()) if obs_dists else 999.0
+            if success:
+                self.last_action_status = "success"
+                self.last_final_distance_error = 0.0
+                self.last_final_yaw_error = 0.0
+                self.is_stuck = False
+            else:
+                self.last_action_status = "failed_stuck" if nearest_obstacle < 0.8 else "failed"
+                self.last_final_distance_error = 0.0
+                self.last_final_yaw_error = abs(math.degrees(self.turn_remaining_angle)) if self.turn_remaining_angle is not None else 0.0
+                self.is_stuck = nearest_obstacle < 0.8
+                self.chat_history.append({
+                    "role": "assistant",
+                    "content": "【System Feedback】Spin/turn action failed. Nearby obstacle may have prevented safe rotation."
+                })
             
         if has_more:
             self.execute_next_command()
