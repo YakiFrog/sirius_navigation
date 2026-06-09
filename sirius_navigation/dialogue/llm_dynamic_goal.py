@@ -622,18 +622,19 @@ class LlmDynamicGoal(Node):
             self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
             
         elif cmd_type == "backward":
-            # 後退時: keyboard_dynamic_goal.py に合わせ、theta=180度(pi)として後方に移動させる
-            # これによりNav2が前方向のセンサを使って安全に目的地（後方）へアプローチできるようになる
+            # 後退時: 目標位置は現在姿勢の後方へ置き、目標yawは現在yawのまま保持する。
+            # yawまで180度反転させると、Nav2が「後ろを向いて到着」と解釈して旋回してしまう。
             # ウェイポイントは最小0.3mから置くように制限
             r = max(abs(value), 0.3)
-            theta = math.pi
             tolerance = max(r * 0.3, 0.15) if r < 1.0 else 0.50
             with self.lock:
                 self.current_xy_tolerance = tolerance
             self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
             if should_speak:
                 self.send_sirius_speak(DIALOGUE_TEMPLATES["backward_start"].format(distance=r))
-            self.publish_goal_pose(base_x, base_y, base_yaw, r, theta)
+            target_map_x = base_x - r * math.cos(base_yaw)
+            target_map_y = base_y - r * math.sin(base_yaw)
+            self.publish_direct_map_goal(target_map_x, target_map_y, base_yaw)
             
         elif cmd_type == "turn":
             # 旋回時: Nav2の標準ビヘイビアである /spin アクションを使用し、
