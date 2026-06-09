@@ -172,10 +172,10 @@ class FaceClient:
             # 他の呼び出しでハンドリングするため、ここでは活性フラグの更新は最小限に
             return False
 
-    def get_battery_level_string(self):
-        """現在のバッテリー残量を取得し、報告文を返す (gRPC ポート 50051)"""
+    def get_battery_status(self):
+        """現在のバッテリー残量と充電状態の数値を返す。エラー時は None を返す (gRPC ポート 50051)"""
         if not self._should_attempt_connection():
-            return "[sad]バッテリー状態が確認できないのだ。"
+            return None
 
         try:
             import grpc
@@ -188,20 +188,29 @@ class FaceClient:
                 status = stub.GetStatus(empty_pb2.Empty(), timeout=2.0)
                 level = status.current_parameters.get("batteryLevel", -1.0)
                 charging_val = status.current_parameters.get("batteryCharging", 0.0)
-                
-                charging_str = "未充電"
-                if charging_val == 1.0:
-                    charging_str = "充電中"
-                elif charging_val == 2.0:
-                    charging_str = "放電中（使用中）"
-                
-                if level >= 0.0:
-                    return f"[happy]現在のバッテリー残量は {level:.1f}パーセントなのだ！状態は {charging_str} なのだ。"
-                else:
-                    return "[sad]バッテリー残量データが不正なのだ。"
+                self.face_server_active = True
+                return level, charging_val
         except Exception as e:
             if self.face_server_active:
                 self.logger.warning(f"Face server offline during battery query: {e}")
                 self.face_server_active = False
                 self.last_connect_retry = time.time()
+            return None
+
+    def get_battery_level_string(self):
+        """現在のバッテリー残量を取得し、報告文を返す (gRPC ポート 50051)"""
+        status = self.get_battery_status()
+        if status is None:
             return "[sad]バッテリー状態が確認できないのだ。"
+        
+        level, charging_val = status
+        if level < 0.0:
+            return "[sad]バッテリー残量データが不正なのだ。"
+
+        charging_str = "未充電"
+        if charging_val == 1.0:
+            charging_str = "充電中"
+        elif charging_val == 2.0:
+            charging_str = "放電中（使用中）"
+        
+        return f"[happy]現在のバッテリー残量は {level:.1f}パーセントなのだ！状態は {charging_str} なのだ。"

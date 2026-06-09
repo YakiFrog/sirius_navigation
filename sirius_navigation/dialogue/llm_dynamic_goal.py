@@ -66,14 +66,7 @@ class LlmDynamicGoal(Node):
         self.spin_client = ActionClient(self, Spin, 'spin')
         self.param_client = self.create_client(SetParameters, '/controller_server/set_parameters')
 
-        # Janome トークナイザーの初期化
-        try:
-            from janome.tokenizer import Tokenizer
-            self.tokenizer = Tokenizer()
-            self.get_logger().info("Janome tokenizer successfully loaded for high-precision parsing.")
-        except Exception as e:
-            self.tokenizer = None
-            self.get_logger().warning(f"Failed to load Janome: {e}. Falling back to simple substring matching.")
+
 
         
         # 自然言語指示トピックのサブスクライバー
@@ -829,7 +822,7 @@ class LlmDynamicGoal(Node):
         local_result = parse_local_rules(
             instruction,
             state_info,
-            battery_callback=self.face_client.get_battery_level_string
+            battery_callback=self.get_battery_report_string
         )
         if local_result is not None:
             # fast_path 結果は speak を直接送信してから返す
@@ -1636,9 +1629,24 @@ class LlmDynamicGoal(Node):
         self.face_client.send_speak(text)
         self.get_logger().info(f"Sent Speak command: {text}")
 
-    def get_sirius_battery_level(self):
-        """face_client 経由でバッテリー残量を取得する薄いラッパー"""
-        return self.face_client.get_battery_level_string()
+    def get_battery_report_string(self):
+        """face_client から生情報を取得し、DIALOGUE_TEMPLATES を使ってバッテリー状態をフォーマットする"""
+        status = self.face_client.get_battery_status()
+        if status is None:
+            return DIALOGUE_TEMPLATES.get("battery_fail", "[sad]バッテリー状態が確認できないのだ。")
+        
+        level, charging_val = status
+        if level < 0.0:
+            return DIALOGUE_TEMPLATES.get("battery_error", "[sad]バッテリー残量データが不正なのだ。")
+
+        charging_str = "未充電"
+        if charging_val == 1.0:
+            charging_str = "充電中"
+        elif charging_val == 2.0:
+            charging_str = "放電中（使用中）"
+        
+        template = DIALOGUE_TEMPLATES.get("battery_report", "[happy]現在のバッテリー残量は {level:.1f}パーセントなのだ！状態は {charging_str} なのだ。")
+        return template.format(level=level, charging_str=charging_str)
 
 def main(args=None):
     rclpy.init(args=args)

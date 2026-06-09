@@ -8,17 +8,18 @@
 
 ```mermaid
 graph LR
-    subgraph 顔アプリ (Electron / Docker)
-        Backend[Python対話システム]
+    subgraph Docker["顔アプリ (Electron / Docker)"]
+        Backend["Python対話システム"]
+        FaceAppElectron["Electron UI 画面"]
     end
     
-    subgraph ROS 2 環境 (ホストPC側)
-        ROS2Node[llm_dynamic_goal.py ノード]
+    subgraph Host["ROS 2 環境 (ホストPC側)"]
+        ROS2Node["llm_dynamic_goal.py ノード"]
     end
 
-    Backend -->|HTTP POST 送信 ポート 50060| ROS2Node
-    ROS2Node -->|gRPC発話指示 ポート 50052 /Speak| Backend
-    ROS2Node -->|gRPCパラメータ制御 ポート 50051 /UpdateParameters| FaceAppElectron
+    Backend -->|"HTTP POST 送信 (ポート 50060)"| ROS2Node
+    ROS2Node -->|"gRPC発話指示 (ポート 50052 /Speak)"| Backend
+    ROS2Node -->|"gRPCパラメータ制御 (ポート 50051 /UpdateParameters)"| FaceAppElectron
 ```
 
 ---

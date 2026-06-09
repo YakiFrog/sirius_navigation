@@ -13,7 +13,10 @@ except ImportError:
     try:
         from dialogue.chat import CHAT_KEYWORDS
     except ImportError:
-        CHAT_KEYWORDS = {}
+        try:
+            from chat import CHAT_KEYWORDS
+        except ImportError:
+            CHAT_KEYWORDS = {}
 
 EXPRESSION_KEYWORDS = [
     ("ウィンク", "wink"),
@@ -554,7 +557,7 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     loop_match = re.search(r"(\d+)\s*(?:回|回繰り返して|回繰り返し)", norm_inst)
     if loop_match:
         times = int(loop_match.group(1))
-        base_part = re.sub(r"(?:のを)?\d+\s*(?:回|回繰り返して|回繰り返し).*", "", norm_inst).strip()
+        base_part = re.sub(r"(?:のを)?\d+\s*(?:回|回繰り返して|回繰り返し)", "", norm_inst).strip()
         base_cmds = []
         parts = [p.strip() for p in re.split(r"して|て|、|そして", base_part) if p.strip()]
         for part in parts:

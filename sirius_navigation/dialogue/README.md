@@ -12,30 +12,30 @@
 
 ```mermaid
 graph TD
-    User([ユーザー音声/テキスト入力]) --> Normalize[半角・小文字正規化]
-    Normalize --> CheckStop{停止・キャンセル指示か?}
+    User(["ユーザー音声/テキスト入力"]) --> Normalize["半角・小文字正規化"]
+    Normalize --> CheckStop{"停止・キャンセル指示か?"}
     
     %% 停止処理
-    CheckStop -->|Yes| Cancel[即座にNav2ゴールをキャンセル]
-    CheckStop -->|No| CheckCorr{是正・訂正キーワードか?<br>例: '行き過ぎ', '逆だよ', 'のに'}
+    CheckStop -->|"Yes"| Cancel["即座にNav2ゴールをキャンセル"]
+    CheckStop -->|"No"| CheckCorr{"定型外または是正・訂正キーワードか?<br>例: '行き過ぎ', '逆だよ', 'のに'"}
     
     %% 是正チェック
-    CheckCorr -->|Yes (是正)| LLMPath[LLM 推論パスへ強制ルーティング]
-    CheckCorr -->|No| CheckNum{数値を含んでいるか?<br>例: '3m', '90度'}
+    CheckCorr -->|"Yes (定型外 / 是正)"| LLMPath["LLM 推論パスへ強制ルーティング"]
+    CheckCorr -->|"No"| CheckNum{"数値を含んでいるか?<br>例: '3m', '90度'"}
     
     %% 数値チェック
-    CheckNum -->|Yes (数値あり)| LLMPath
-    CheckNum -->|No| RuleBase{定型文パターンに合致するか?<br>例: '前に行って', 'バッテリー状況', '自己紹介'}
+    CheckNum -->|"Yes (数値あり)"| LLMPath
+    CheckNum -->|"No"| RuleBase{"定型文パターンに合致するか?<br>例: '前に行って', 'バッテリー状況', '自己紹介'"}
     
     %% ルールベース判定
-    RuleBase -->|Yes (定型)| ExecuteDirect[LLMなしで即座に動作実行]
-    RuleBase -->|No| LLMPath
+    RuleBase -->|"Yes (定型)"| ExecuteDirect["LLMなしで即座に動作実行"]
+    RuleBase -->|"No"| LLMPath
     
     %% LLM処理
-    LLMPath --> QueryLLM[LM Studio API ポート1234 へ問い合わせ]
-    QueryLLM --> ParseJSON[生成されたJSONコマンドシーケンスをパース]
-    ParseJSON --> Sanitizer[コマンドサニタイザーで型/ラジアン自動修正]
-    Sanitizer --> ExecuteQueue[ROS 2 アクション実行キューへ追加]
+    LLMPath --> QueryLLM["LM Studio API ポート1234 へ問い合わせ"]
+    QueryLLM --> ParseJSON["生成されたJSONコマンドシーケンスをパース"]
+    ParseJSON --> Sanitizer["コマンドサニタイザーで型/ラジアン自動修正"]
+    Sanitizer --> ExecuteQueue["ROS 2 アクション実行キューへ追加"]
 ```
 
 ### 1. LLMなしで即座に動作するコマンド（高速パス）
