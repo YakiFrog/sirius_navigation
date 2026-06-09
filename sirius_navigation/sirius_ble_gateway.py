@@ -90,6 +90,7 @@ class SiriusBleGateway(Node):
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._tasks = []
         self._stopping = threading.Event()
+        self._ble_central_lock = asyncio.Lock()
 
         self._last_face_battery_update = 0.0
         self._last_remote_status = None
@@ -105,6 +106,10 @@ class SiriusBleGateway(Node):
         self._ear_led_blink_on = True
         self._ear_led_left_command = "M:1"
         self._ear_led_right_command = "M:1"
+        self._ear_led_signal = "straight"
+        self._ear_led_last_left_command = "M:1"
+        self._ear_led_last_right_command = "M:1"
+        self._ear_led_last_mode = "normal"
         self._last_ear_led_status = None
 
         self._thread.start()
@@ -171,6 +176,7 @@ class SiriusBleGateway(Node):
         data = (msg.data or "").strip()
         if not data:
             return
+        self._ear_led_signal = data
 
         if data == "left":
             self._ear_led_left_command = "C:0,255,0"
@@ -191,11 +197,25 @@ class SiriusBleGateway(Node):
 
         self._ear_led_blink_on = True
         self.get_logger().info(f"Ear LED command: {data}")
+        self._publish_ear_led_status(
+            "connected" if self._ear_leds_connected() else "disconnected",
+            left_command=self._ear_led_left_command,
+            right_command=self._ear_led_right_command,
+            mode=self._ear_led_mode_text(),
+            force=True,
+        )
 
     def _on_stop_command(self, msg: Bool):
         self._ear_led_stop = bool(msg.data)
         state = "emergency" if self._ear_led_stop else "safe"
         self.get_logger().info(f"Ear LED stop state: {state}")
+        self._publish_ear_led_status(
+            "connected" if self._ear_leds_connected() else "disconnected",
+            left_command="C:255,0,0" if self._ear_led_stop else self._ear_led_left_command,
+            right_command="C:255,0,0" if self._ear_led_stop else self._ear_led_right_command,
+            mode=self._ear_led_mode_text(),
+            force=True,
+        )
 
     async def _stop_remote_server(self):
         try:
@@ -394,6 +414,9 @@ class SiriusBleGateway(Node):
                     mode = "blink_off"
 
                 await self._write_ear_leds(left_command, right_command)
+                self._ear_led_last_left_command = left_command
+                self._ear_led_last_right_command = right_command
+                self._ear_led_last_mode = mode
                 if self._ear_led_blinking and not self._ear_led_stop:
                     self._ear_led_blink_on = not self._ear_led_blink_on
 
@@ -417,15 +440,16 @@ class SiriusBleGateway(Node):
         self._publish_ear_led_status("disconnected")
 
     async def _ensure_ear_led_connected(self, BleakClient):
-        if not self._ear_led_left_client or not self._ear_led_left_client.is_connected:
-            self.get_logger().info(f"Connecting left ear LED BLE: {self.ear_led_left_mac}")
-            self._ear_led_left_client = BleakClient(self.ear_led_left_mac)
-            await self._ear_led_left_client.connect()
+        async with self._ble_central_lock:
+            if not self._ear_led_left_client or not self._ear_led_left_client.is_connected:
+                self.get_logger().info(f"Connecting left ear LED BLE: {self.ear_led_left_mac}")
+                self._ear_led_left_client = BleakClient(self.ear_led_left_mac)
+                await self._ear_led_left_client.connect()
 
-        if not self._ear_led_right_client or not self._ear_led_right_client.is_connected:
-            self.get_logger().info(f"Connecting right ear LED BLE: {self.ear_led_right_mac}")
-            self._ear_led_right_client = BleakClient(self.ear_led_right_mac)
-            await self._ear_led_right_client.connect()
+            if not self._ear_led_right_client or not self._ear_led_right_client.is_connected:
+                self.get_logger().info(f"Connecting right ear LED BLE: {self.ear_led_right_mac}")
+                self._ear_led_right_client = BleakClient(self.ear_led_right_mac)
+                await self._ear_led_right_client.connect()
 
     def _ear_leds_connected(self) -> bool:
         return bool(
@@ -468,7 +492,11 @@ class SiriusBleGateway(Node):
         left_command: str = "",
         right_command: str = "",
         mode: str = "",
+        force: bool = False,
     ):
+        left_command = left_command or self._ear_led_last_left_command or self._ear_led_left_command
+        right_command = right_command or self._ear_led_last_right_command or self._ear_led_right_command
+        mode = mode or self._ear_led_last_mode or self._ear_led_mode_text()
         data = {
             "status": status,
             "left_mac": self.ear_led_left_mac,
@@ -479,12 +507,13 @@ class SiriusBleGateway(Node):
             "right_connected": bool(
                 self._ear_led_right_client and self._ear_led_right_client.is_connected
             ),
+            "signal": "stop" if self._ear_led_stop else self._ear_led_signal,
             "stop": self._ear_led_stop,
             "blinking": self._ear_led_blinking,
             "blink_on": self._ear_led_blink_on,
-            "mode": mode or self._ear_led_mode_text(),
-            "left_command": left_command or self._ear_led_left_command,
-            "right_command": right_command or self._ear_led_right_command,
+            "mode": mode,
+            "left_command": left_command,
+            "right_command": right_command,
             "stamp": time.time(),
         }
         if error:
@@ -494,6 +523,7 @@ class SiriusBleGateway(Node):
             data["status"],
             data["left_connected"],
             data["right_connected"],
+            data["signal"],
             data["stop"],
             data["blinking"],
             data["blink_on"],
@@ -502,7 +532,7 @@ class SiriusBleGateway(Node):
             data["right_command"],
             data.get("error", ""),
         )
-        if cache_key == self._last_ear_led_status:
+        if cache_key == self._last_ear_led_status and not force:
             return
         self._last_ear_led_status = cache_key
 
@@ -529,18 +559,19 @@ class SiriusBleGateway(Node):
             try:
                 if not self._battery_device or not self._battery_device.connected:
                     self._publish_battery_json({"status": "connecting"})
-                    if self._battery_device:
-                        await self._disconnect_battery()
-                    self._battery_device = await self._resolve_and_create_station(
-                        C300,
-                        BleakScanner,
-                        BLEDevice,
-                    )
-                    self.get_logger().info(f"Connecting to battery BLE: {self.battery_mac}")
-                    if not await self._battery_device.connect():
-                        self.get_logger().warning("Battery BLE connection failed; retrying")
-                        await asyncio.sleep(5.0)
-                        continue
+                    async with self._ble_central_lock:
+                        if self._battery_device:
+                            await self._disconnect_battery()
+                        self._battery_device = await self._resolve_and_create_station(
+                            C300,
+                            BleakScanner,
+                            BLEDevice,
+                        )
+                        self.get_logger().info(f"Connecting to battery BLE: {self.battery_mac}")
+                        if not await self._battery_device.connect():
+                            self.get_logger().warning("Battery BLE connection failed; retrying")
+                            await asyncio.sleep(5.0)
+                            continue
 
                 try:
                     await self._battery_device.get_status_update()

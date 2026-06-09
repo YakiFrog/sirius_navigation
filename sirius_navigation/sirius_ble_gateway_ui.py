@@ -222,6 +222,7 @@ class SiriusBleGatewayWindow(QMainWindow):
             ("status", "接続状態"),
             ("left_connected", "左耳"),
             ("right_connected", "右耳"),
+            ("signal", "指示"),
             ("mode", "モード"),
             ("left_color", "左色"),
             ("right_color", "右色"),
@@ -413,6 +414,7 @@ class SiriusBleGatewayWindow(QMainWindow):
         self.ear_led_labels["status"].setText(str(status))
         self.ear_led_labels["left_connected"].setText("接続" if left_connected else "待機")
         self.ear_led_labels["right_connected"].setText("接続" if right_connected else "待機")
+        self.ear_led_labels["signal"].setText(self._fmt_ear_led_signal(data.get("signal")))
         self.ear_led_labels["mode"].setText(self._fmt_ear_led_mode(data.get("mode")))
         self._set_ear_led_color("left_color", data.get("left_command"))
         self._set_ear_led_color("right_color", data.get("right_command"))
@@ -503,6 +505,18 @@ class SiriusBleGatewayWindow(QMainWindow):
             "blink_off": "消灯フェーズ",
             "stop": "緊急停止",
         }.get(str(mode or ""), str(mode or "-"))
+
+    @staticmethod
+    def _fmt_ear_led_signal(signal):
+        return {
+            "left": "左折",
+            "right": "右折",
+            "turning": "旋回",
+            "straight": "直進",
+            "finish": "完了",
+            "hazard": "ハザード",
+            "stop": "緊急停止",
+        }.get(str(signal or ""), str(signal or "-"))
 
     @staticmethod
     def _fmt_ear_led_command(command):
