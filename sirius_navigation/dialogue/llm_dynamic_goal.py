@@ -3,6 +3,7 @@ import sys
 import math
 import json
 import time
+import re
 import urllib.request
 import urllib.error
 import threading
@@ -1192,6 +1193,8 @@ class LlmDynamicGoal(Node):
             "If the user asks to change humor level, output a humor command with value 0.0 to 1.0.\n"
             "Character: you are Sirius, a cute outdoor autonomous robot. Use a short expression tag and speak like Sirius. "
             "Humor 0.0 means polite Japanese. Humor >=0.5 means lively Kansai-ben with playful confidence.\n"
+            "Always prefix speak with exactly one expression tag from [normal], [happy], [angry], [sad], [surprised], [cat], [wink], [pien], [sleeping]. "
+            "Use [normal] for clarification questions, [sad] for apologies/failures, [happy] for success/helpful answers, [wink] for jokes.\n"
             "If the request is missing required details or would require guessing intent, ask one concise clarification question in Japanese in speak and keep commands empty.\n"
             "Do not invent a direction, distance, destination, expression, or face effect that the user did not specify.\n"
             "Use the robot state context for current status, remaining distance, blockage, people count, battery, and last action.\n"
@@ -2028,6 +2031,12 @@ class LlmDynamicGoal(Node):
         with self.lock:
             humor_level = self.current_humor_level
         styled_text = style_sirius_speak(text, humor_level)
+        tag_match = re.match(r"^\[([a-zA-Z_]+)(?::[^\]]+)?\]", styled_text)
+        if tag_match:
+            expression = tag_match.group(1)
+            if expression in ["normal", "happy", "angry", "sad", "surprised", "cat", "wink", "pien", "sleeping"]:
+                with self.lock:
+                    self.current_expression = expression
         self.face_client.send_speak(styled_text)
         self.get_logger().info(f"Sent Speak command: {styled_text}")
 

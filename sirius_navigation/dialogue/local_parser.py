@@ -237,12 +237,31 @@ def strip_expression_tag(text):
         return match.group(1), match.group(2)
     return "", text or ""
 
+def infer_expression_tag(body):
+    text = body or ""
+    lowered = text.lower()
+    if re.match(r"^\[[^\]]+\]", text):
+        return ""
+    if any(word in text for word in ["ごめん", "申し訳", "失敗", "無理", "できない", "確認できない", "わから", "分から", "障害物"]):
+        return "[sad]"
+    if any(word in text for word in ["どこ", "どの", "どう", "何を", "教えて", "詳しい", "指定", "かな", "やろか", "ですか"]):
+        return "[normal]"
+    if any(word in text for word in ["うわ", "びっくり", "危な", "アカン", "だめ", "ダメ"]):
+        return "[surprised]"
+    if any(word in text for word in ["ダジャレ", "ジョーク", "冗談", "ウインク", "布団", "ミカン"]) or "wink" in lowered:
+        return "[wink]"
+    if any(word in text for word in ["了解", "到着", "できる", "行く", "向かう", "進む", "再開", "サービス", "最高", "よろしく"]):
+        return "[happy]"
+    return "[normal]"
+
 def style_sirius_speak(text, humor_level=DEFAULT_HUMOR_LEVEL):
     """SiriusFace のユーモアレベルに合わせて、ナビ側の定型文も軽く口調統一する。"""
     tag, body = strip_expression_tag(text)
     humor = clamp_humor_level(humor_level)
     if not body:
         return text
+    if not tag:
+        tag = infer_expression_tag(body)
 
     if humor <= 0.0:
         polite = body

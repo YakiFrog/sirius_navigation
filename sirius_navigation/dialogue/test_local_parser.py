@@ -113,6 +113,10 @@ class TestLocalParser(unittest.TestCase):
         self.assertIn("したで", style_sirius_speak("[happy]目的地に到着したのだ！", 0.9))
         self.assertIn("しました", style_sirius_speak("[happy]目的地に到着したのだ！", 0.0))
 
+        self.assertTrue(style_sirius_speak("どこの廊下ですか？", 0.9).startswith("[normal]"))
+        self.assertTrue(style_sirius_speak("ごめん、確認できないのだ。", 0.9).startswith("[sad]"))
+        self.assertTrue(style_sirius_speak("布団が吹っ飛んだのだ！", 0.9).startswith("[wink]"))
+
     def test_forward_word_inside_non_motion_word_does_not_move(self):
         res = parse_local_rules("あなたの名前は", self.state_info)
         self.assertIsNotNone(res)
