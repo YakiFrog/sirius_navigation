@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 import unittest
-from local_parser import parse_local_rules
+try:
+    from .local_parser import parse_local_rules
+except ImportError:
+    try:
+        from sirius_navigation.dialogue.local_parser import parse_local_rules
+    except ImportError:
+        from local_parser import parse_local_rules
 
 class TestLocalParser(unittest.TestCase):
     def setUp(self):

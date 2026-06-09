@@ -7,13 +7,12 @@ import tempfile
 import yaml
 from geometry_msgs.msg import TransformStamped
 
-# Ensure src is available for imports
-sys.path.insert(0, str(Path.cwd()))
-sys.path.insert(0, str(Path.cwd().joinpath('src')))
-sys.path.insert(0, str(Path.cwd().joinpath('src', 'sirius')))
+# Ensure package directory is available for imports
+pkg_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(pkg_dir))
 
 import importlib.util
-gpe_spec = importlib.util.spec_from_file_location('get_position_enter', str(Path.cwd().joinpath('src', 'sirius', 'sirius_navigation', 'sirius_navigation', 'get_position_enter.py')))
+gpe_spec = importlib.util.spec_from_file_location('get_position_enter', str(pkg_dir.joinpath('get_position_enter.py')))
 gpe = importlib.util.module_from_spec(gpe_spec)
 gpe_spec.loader.exec_module(gpe)
 

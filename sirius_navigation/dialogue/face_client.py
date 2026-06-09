@@ -214,3 +214,7 @@ class FaceClient:
             charging_str = "放電中（使用中）"
         
         return f"[happy]現在のバッテリー残量は {level:.1f}パーセントなのだ！状態は {charging_str} なのだ。"
+
+    def stop_speak(self):
+        """現在の発話を停止・キャンセルする（無音タグを送信して既存の再生キューをクリアする）"""
+        return self.send_speak("[normal] ")

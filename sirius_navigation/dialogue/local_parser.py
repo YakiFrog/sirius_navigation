@@ -351,7 +351,23 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
             battery_msg = battery_callback()
             return {"commands": [], "cancel": False, "fast_path": True, "speak": battery_msg}
         return {"commands": [], "cancel": False, "fast_path": True}
-
+    # 2.1 障害物情報の判定
+    obstacle_keywords = ["障害物", "しょうがいぶつ", "壁", "かべ"]
+    if any(q in norm_inst for q in obstacle_keywords) and any(q in norm_inst for q in ["ある", "どこ", "状況", "検知", "確認", "位置"]):
+        obs_dists = state_info.get("obstacle_distances", {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0})
+        detected = []
+        for direction in ["front", "back", "left", "right"]:
+            dist = obs_dists.get(direction, 999.0)
+            if dist < 2.5:
+                dir_ja = "前方" if direction == "front" else "後方" if direction == "back" else "左側" if direction == "left" else "右側"
+                detected.append(f"{dir_ja} {dist:.1f}メートル")
+        if detected:
+            min_dist = min([obs_dists.get(d, 999.0) for d in ["front", "back", "left", "right"]])
+            tag = "[sad]" if min_dist < 0.8 else "[normal]"
+            speak_msg = f"{tag}障害物があるのだ！{', '.join(detected)}の位置に検知しているのだ。"
+        else:
+            speak_msg = "[happy]周囲 2.5メートル以内には、目立った障害物は見当たらないのだ！"
+        return {"commands": [], "cancel": False, "fast_path": True, "speak": speak_msg}
     # 2.2 原点復帰は「直前動作の取り消し」より優先して、map座標(0,0)への移動として扱う
     if any(x in norm_inst for x in ["原点", "げんてん", "origin", "ホーム", "home"]):
         if any(x in norm_inst for x in ["戻", "もど", "行", "い", "移動", "向か", "帰", "かえ"]):

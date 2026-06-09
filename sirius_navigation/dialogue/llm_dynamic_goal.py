@@ -11,7 +11,7 @@ import rclpy
 
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import Bool, String
 from action_msgs.srv import CancelGoal
 from action_msgs.msg import GoalInfo
@@ -50,6 +50,10 @@ class LlmDynamicGoal(Node):
         self.marker_pub = self.create_publisher(Marker, '/dynamic_goal_marker', 10)
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
         self.nav_control_pub = self.create_publisher(String, '/nav_control', 10)
+        self.stuck_pub = self.create_publisher(Bool, '/sirius_is_stuck', 10)
+        self.costmap_sub = self.create_subscription(OccupancyGrid, '/local_costmap/costmap', self.costmap_callback, 10)
+        self.last_costmap_time = 0.0
+        self.obstacle_distances = {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}
         
         # オドメトリサブスクライバー（リアルタイム速度取得用）
         self.odom_sub = self.create_subscription(
@@ -198,6 +202,84 @@ class LlmDynamicGoal(Node):
         with self.lock:
             self.current_vel_x = msg.twist.twist.linear.x
             self.current_vel_theta = msg.twist.twist.angular.z
+
+    def costmap_callback(self, msg):
+        """local_costmap を解析し、ロボットから見た前後左右の障害物までの最短距離を計算・更新する"""
+        now = self.get_clock().now().nanoseconds / 1e9
+        if now - self.last_costmap_time < 0.95:
+            return
+        self.last_costmap_time = now
+
+        try:
+            trans = self.tf_buffer.lookup_transform(
+                'sirius3/base_footprint',
+                msg.header.frame_id,
+                rclpy.time.Time()
+            )
+        except Exception as e:
+            return
+
+        tx = trans.transform.translation.x
+        ty = trans.transform.translation.y
+        qx = trans.transform.rotation.x
+        qy = trans.transform.rotation.y
+        qz = trans.transform.rotation.z
+        qw = trans.transform.rotation.w
+        
+        siny_cosp = 2 * (qw * qz + qx * qy)
+        cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+
+        res = msg.info.resolution
+        width = msg.info.width
+        origin_x = msg.info.origin.position.x
+        origin_y = msg.info.origin.position.y
+
+        front_dist = 999.0
+        left_dist = 999.0
+        right_dist = 999.0
+        back_dist = 999.0
+
+        for idx, cost in enumerate(msg.data):
+            if cost >= 99:  # Inscribed / Lethal obstacle size
+                row = idx // width
+                col = idx % width
+                
+                mx = origin_x + (col + 0.5) * res
+                my = origin_y + (row + 0.5) * res
+                
+                x_robot = cos_yaw * mx - sin_yaw * my + tx
+                y_robot = sin_yaw * mx + cos_yaw * my + ty
+                
+                dist = math.sqrt(x_robot**2 + y_robot**2)
+                if dist == 0.0:
+                    continue
+                angle_deg = math.degrees(math.atan2(y_robot, x_robot))
+                angle_deg = (angle_deg + 180) % 360 - 180
+                
+                if -20.0 <= angle_deg <= 20.0:
+                    if dist < front_dist:
+                        front_dist = dist
+                elif 20.0 < angle_deg <= 80.0:
+                    if dist < left_dist:
+                        left_dist = dist
+                elif -80.0 <= angle_deg < -20.0:
+                    if dist < right_dist:
+                        right_dist = dist
+                elif angle_deg > 135.0 or angle_deg < -135.0:
+                    if dist < back_dist:
+                        back_dist = dist
+
+        with self.lock:
+            self.obstacle_distances = {
+                "front": front_dist,
+                "left": left_dist,
+                "right": right_dist,
+                "back": back_dist
+            }
 
     def marker_array_callback(self, msg):
         """周辺の人間トラッキングマーカーから人数をカウントする"""
@@ -672,6 +754,7 @@ class LlmDynamicGoal(Node):
             vel_theta = self.current_vel_theta
             queue_len = len(self.command_queue)
             executing = self.executing_command
+            obs_dists = getattr(self, 'obstacle_distances', {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0})
             
         with self.lock:
             last_status = self.last_action_status
@@ -714,6 +797,7 @@ class LlmDynamicGoal(Node):
             state_str = (
                 "【Robot Current Hardware State Feedback】: Status=Idle. No active navigation goal. Robot is stationary.\n"
                 f"- Current Robot Pose: X={current_x:.2f}, Y={current_y:.2f}, Yaw={current_yaw_deg:+.1f}deg\n"
+                f"- Obstacle distances (meters): front={obs_dists.get('front', 999.0):.2f}, back={obs_dists.get('back', 999.0):.2f}, left={obs_dists.get('left', 999.0):.2f}, right={obs_dists.get('right', 999.0):.2f}\n"
                 f"- Last Action Status: {last_status} (type: {last_type}, target: {last_target}, final distance error: {last_dist_err:.2f}m, final yaw error: {last_yaw_err:.1f}deg)\n"
                 f"- Last Action Actual Execution Result: {last_move_str}"
             )
@@ -737,6 +821,7 @@ class LlmDynamicGoal(Node):
             f"- Distance remaining to target: {distance:.2f} meters\n"
             f"- Current velocities: {vel_str}\n"
             f"- Physical obstacles / blockage state: {stuck_str}\n"
+            f"- Obstacle distances (meters): front={obs_dists.get('front', 999.0):.2f}, back={obs_dists.get('back', 999.0):.2f}, left={obs_dists.get('left', 999.0):.2f}, right={obs_dists.get('right', 999.0):.2f}\n"
             f"- Actions left in sequence queue: {queue_len} commands\n"
             f"- Last Action Status: {last_status} (type: {last_type}, target: {last_target}, final distance error: {last_dist_err:.2f}m, final yaw error: {last_yaw_err:.1f}deg)\n"
             f"- Last Action Actual Execution Result: {last_move_str}"
@@ -778,6 +863,7 @@ class LlmDynamicGoal(Node):
                             break
                     except Exception:
                         pass
+            obs_dists = getattr(self, 'obstacle_distances', {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0})
 
         return {
             "current_x": current_x,
@@ -799,6 +885,7 @@ class LlmDynamicGoal(Node):
             "last_action_start_yaw": last_action_start_yaw,
             "last_cmd_was_backward": last_cmd_was_backward,
             "last_cmd_was_forward": last_cmd_was_forward,
+            "obstacle_distances": obs_dists,
         }
 
     def query_lm_studio(self, instruction):
@@ -1088,6 +1175,11 @@ class LlmDynamicGoal(Node):
 
     def monitor_goal_distance(self):
         """現在の自己位置と目標位置の距離を比較し、到達やスタック状態を監視する"""
+        stuck_msg_bool = Bool()
+        with self.lock:
+            stuck_msg_bool.data = self.is_stuck
+        self.stuck_pub.publish(stuck_msg_bool)
+
         with self.lock:
             goal_x = self.active_goal_x
             goal_y = self.active_goal_y
@@ -1195,8 +1287,23 @@ class LlmDynamicGoal(Node):
                     "content": "【System Feedback】Robot detected physical blockage/stuck state. Navigation has been automatically cancelled."
                 })
             
+            # Determine distance and details based on direction
+            with self.lock:
+                last_type = self.last_active_cmd_type
+                obs_dists = getattr(self, 'obstacle_distances', {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0})
+            
+            speak_msg = DIALOGUE_TEMPLATES["stuck"]
+            if last_type == "backward":
+                dist = obs_dists.get("back", 999.0)
+                if dist < 2.0:
+                    speak_msg = f"[sad]後方 {dist:.1f}メートルに障害物があって、進めなくなっちゃったのだ！"
+            elif last_type in ["forward", "goto"] or last_type is None:
+                dist = obs_dists.get("front", 999.0)
+                if dist < 2.0:
+                    speak_msg = f"[sad]前方 {dist:.1f}メートルに障害物があって、進めなくなっちゃったのだ！"
+            
             # 安全のためロックの外側でキャンセルを実行
-            self.send_sirius_speak(DIALOGUE_TEMPLATES["stuck"])
+            self.send_sirius_speak(speak_msg)
             self.cancel_navigation(preserve_current_goal=True)
             
             print(f"\n⚠️ {stuck_msg.split(']')[-1].strip()} 目標をキャンセルして停止します。")
@@ -1433,6 +1540,12 @@ class LlmDynamicGoal(Node):
     def cancel_navigation(self, clear_queue=True, preserve_current_goal=False):
         """実行中のナビゲーションをキャンセル"""
         self.delete_marker()
+        self.face_client.stop_speak()
+        
+        # Publish not stuck status instantly
+        stuck_msg_bool = Bool()
+        stuck_msg_bool.data = False
+        self.stuck_pub.publish(stuck_msg_bool)
         
         # Spinアクションが動いていればキャンセル
         with self.lock:

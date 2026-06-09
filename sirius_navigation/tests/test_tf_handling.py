@@ -2,13 +2,13 @@ import unittest
 import rclpy
 from pathlib import Path
 import sys
-sys.path.insert(0, str(Path.cwd()))
-sys.path.insert(0, str(Path.cwd().joinpath('src')))
-sys.path.insert(0, str(Path.cwd().joinpath('src', 'sirius')))
+# Ensure package directory is available for imports
+pkg_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(pkg_dir))
 
 import tf2_py as tf2
 import importlib.util
-gpd_spec = importlib.util.spec_from_file_location('get_position_distance', str(Path.cwd().joinpath('src', 'sirius', 'sirius_navigation', 'sirius_navigation', 'get_position_distance.py')))
+gpd_spec = importlib.util.spec_from_file_location('get_position_distance', str(pkg_dir.joinpath('get_position_distance.py')))
 gpd = importlib.util.module_from_spec(gpd_spec)
 gpd_spec.loader.exec_module(gpd)
 GetPose = gpd.GetPose
