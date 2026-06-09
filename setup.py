@@ -42,6 +42,7 @@ setup(
             'twist_mux_monitor = sirius_navigation.twist_mux_monitor:main',
             'status_monitor = sirius_navigation.dialogue.status_monitor:main',
             'odom_path_publisher = sirius_navigation.odom_path_publisher:main',
+            'sirius_ble_gateway = sirius_navigation.sirius_ble_gateway:main',
         ],
     },
 )
