@@ -129,6 +129,12 @@ class LlmDynamicGoal(Node):
             self.marker_array_callback,
             10
         )
+        self.target_follow_status_sub = self.create_subscription(
+            String,
+            '/target_follower/status',
+            self.target_follow_status_callback,
+            10
+        )
 
         self.lock = threading.Lock()
         self.get_logger().info(f'LLM Dynamic Goal Node initialized with State-Feedback loop.')
@@ -347,6 +353,27 @@ class LlmDynamicGoal(Node):
                 tracked_ids.add(m.id)
         with self.lock:
             self.surrounding_people_count = len(tracked_ids)
+
+    def target_follow_status_callback(self, msg):
+        """追従ノードからの状態通知を受けて、人に分かる形で報告する。"""
+        if msg.data == "tracking_lost":
+            self.get_logger().warning("[TargetFollow] tracking target lost")
+            self.send_sirius_speak("[sad]追従対象を見失ったのだ。いったん停止するのだ。")
+        elif msg.data == "tracking_recovered":
+            self.get_logger().info("[TargetFollow] tracking target recovered")
+            self.send_sirius_speak("[happy]追従対象を見つけたのだ。追従を再開するのだ。")
+        elif msg.data.startswith("tracking_soft_far"):
+            self.get_logger().warning(f"[TargetFollow] tracking target is getting far: {msg.data}")
+            self.send_sirius_speak("[cry]あんまり僕から離れないでね、追いかけるのちょっと大変なのだ。")
+        elif msg.data.startswith("tracking_far"):
+            distance_text = ""
+            try:
+                _, raw_distance = msg.data.split(":", 1)
+                distance_text = f"いま約{float(raw_distance):.1f}メートル離れているのだ。"
+            except (ValueError, TypeError):
+                pass
+            self.get_logger().warning(f"[TargetFollow] tracking target is far: {msg.data}")
+            self.send_sirius_speak(f"[surprised]{distance_text}それ以上離れたら見失うかもしれないのだ。")
 
     def battery_status_callback(self, msg):
         """BLE Gateway が配信する最新バッテリー情報を、顔gRPC失敗時の予備として保持する"""

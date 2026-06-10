@@ -8,6 +8,7 @@ from tf2_ros import Buffer, TransformListener, LookupException
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 from rcl_interfaces.msg import SetParametersResult
 from action_msgs.srv import CancelGoal
 from action_msgs.msg import GoalInfo
@@ -29,6 +30,8 @@ class TargetFollower(Node):
         self.declare_parameter('control_rate', 2.0)           # 制御ループの実行頻度（Hz）
         self.declare_parameter('deadband', 0.1)               # 停止判定用の不感帯（維持距離±10cm）
         self.declare_parameter('robot_base_frame', 'sirius3/base_footprint') # ロボットのベースフレーム
+        self.declare_parameter('tracking_soft_warning_distance', 4.0) # 軽い距離警告を出す距離（m）
+        self.declare_parameter('tracking_warning_distance', 8.0) # 見失い警告を出す距離（m）
         
         # パラメータ値の取得
         self.enable_following = self.get_parameter('enable_following').value
@@ -37,6 +40,8 @@ class TargetFollower(Node):
         self.control_rate = self.get_parameter('control_rate').value
         self.deadband = self.get_parameter('deadband').value
         self.robot_base_frame = self.get_parameter('robot_base_frame').value
+        self.tracking_soft_warning_distance = self.get_parameter('tracking_soft_warning_distance').value
+        self.tracking_warning_distance = self.get_parameter('tracking_warning_distance').value
         
         # パラメータが動的に変更された際のコールバック関数を登録
         self.add_on_set_parameters_callback(self.parameter_callback)
@@ -58,6 +63,7 @@ class TargetFollower(Node):
             self.target_callback,
             10
         )
+        self.status_pub = self.create_publisher(String, '/target_follower/status', 10)
         
         # 各種状態変数の初期化
         self.target_pose = None             # 最新のターゲット座標
@@ -66,6 +72,10 @@ class TargetFollower(Node):
         self.goal_handle = None             # アクションのゴールハンドル（予備キャンセル用）
         self.goal_sending_in_progress = False # 多重送信防止フラグ
         self.is_goal_active = False         # アクション実行中フラグ
+        self.has_seen_target_while_following = False
+        self.tracking_lost_reported = False
+        self.tracking_soft_far_reported = False
+        self.tracking_far_reported = False
 
         
         # 制御ループタイマーの開始
@@ -87,8 +97,17 @@ class TargetFollower(Node):
             if param.name == 'enable_following':
                 self.enable_following = param.value
                 self.get_logger().info(f"パラメータ 'enable_following' が更新されました: {self.enable_following}")
+                if self.enable_following:
+                    self.has_seen_target_while_following = self.target_pose is not None
+                    self.tracking_lost_reported = False
+                    self.tracking_soft_far_reported = False
+                    self.tracking_far_reported = False
                 # 追従が無効化された場合は、現在動いているロボットを即座に停止する
                 if not self.enable_following:
+                    self.has_seen_target_while_following = False
+                    self.tracking_lost_reported = False
+                    self.tracking_soft_far_reported = False
+                    self.tracking_far_reported = False
                     self.cancel_current_goal()
             elif param.name == 'follow_distance':
                 self.follow_distance = param.value
@@ -108,6 +127,12 @@ class TargetFollower(Node):
             elif param.name == 'robot_base_frame':
                 self.robot_base_frame = param.value
                 self.get_logger().info(f"パラメータ 'robot_base_frame' が更新されました: {self.robot_base_frame}")
+            elif param.name == 'tracking_soft_warning_distance':
+                self.tracking_soft_warning_distance = param.value
+                self.get_logger().info(f"パラメータ 'tracking_soft_warning_distance' が更新されました: {self.tracking_soft_warning_distance}m")
+            elif param.name == 'tracking_warning_distance':
+                self.tracking_warning_distance = param.value
+                self.get_logger().info(f"パラメータ 'tracking_warning_distance' が更新されました: {self.tracking_warning_distance}m")
         return SetParametersResult(successful=True)
 
     def target_callback(self, msg: Odometry):
@@ -116,6 +141,18 @@ class TargetFollower(Node):
         """
         self.target_pose = msg.pose.pose
         self.last_target_time = self.get_clock().now()
+        if self.enable_following:
+            if self.tracking_lost_reported:
+                self.publish_status("tracking_recovered")
+            self.has_seen_target_while_following = True
+            self.tracking_lost_reported = False
+            self.tracking_soft_far_reported = False
+            self.tracking_far_reported = False
+
+    def publish_status(self, status: str):
+        msg = String()
+        msg.data = status
+        self.status_pub.publish(msg)
 
     def cancel_current_goal(self, force=False):
         """
@@ -163,6 +200,9 @@ class TargetFollower(Node):
             elapsed = (now - self.last_target_time).nanoseconds / 1e9
             if elapsed > 5.0:  # 2秒→5秒に延長（一時的なトラッキングロストでキャンセルしない）
                 self.get_logger().warning("ターゲットからのデータ更新が途絶えました。追従を一時停止します。", throttle_duration_sec=5.0)
+                if self.has_seen_target_while_following and not self.tracking_lost_reported:
+                    self.publish_status("tracking_lost")
+                    self.tracking_lost_reported = True
                 self.target_pose = None
                 self.cancel_current_goal()
                 return
@@ -196,6 +236,20 @@ class TargetFollower(Node):
 
         # 目標距離とのズレを計算 (例: 現在距離 1.3m - 目標 1.2m = +0.1m)
         dist_diff = dist - self.follow_distance
+
+        soft_warning_reset_distance = max(self.follow_distance + 0.5, self.tracking_soft_warning_distance - 0.75)
+        warning_reset_distance = max(self.follow_distance + 0.5, self.tracking_warning_distance - 1.0)
+        if dist >= self.tracking_soft_warning_distance and not self.tracking_soft_far_reported:
+            self.publish_status(f"tracking_soft_far:{dist:.2f}")
+            self.tracking_soft_far_reported = True
+        elif dist < soft_warning_reset_distance:
+            self.tracking_soft_far_reported = False
+
+        if dist >= self.tracking_warning_distance and not self.tracking_far_reported:
+            self.publish_status(f"tracking_far:{dist:.2f}")
+            self.tracking_far_reported = True
+        elif dist < warning_reset_distance:
+            self.tracking_far_reported = False
 
         # 2. ターゲットが不感帯内（維持目標距離の前後 deadband）に入った場合は停止
         if abs(dist_diff) <= self.deadband:
