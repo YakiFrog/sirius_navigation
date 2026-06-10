@@ -1971,7 +1971,11 @@ class LlmDynamicGoal(Node):
         if payload.get("type") != "manual_teleop":
             return False
 
-        assisted = bool(payload.get("assisted", True))
+        assisted_value = payload.get("assisted", True)
+        if isinstance(assisted_value, str):
+            assisted = assisted_value.lower() not in ["0", "false", "no", "off"]
+        else:
+            assisted = bool(assisted_value)
         linear = max(-0.35, min(0.35, float(payload.get("linear", 0.0) or 0.0)))
         angular = max(-1.2, min(1.2, float(payload.get("angular", 0.0) or 0.0)))
 
@@ -1980,19 +1984,25 @@ class LlmDynamicGoal(Node):
         twist.angular.z = angular
 
         self.publish_nav_control("pause_silent")
+        teleop_subscribers = self.cmd_vel_teleop_pub.get_subscription_count()
+        route = "cmd_vel"
         if assisted:
             self.cmd_vel_teleop_pub.publish(twist)
-            if self.cmd_vel_teleop_pub.get_subscription_count() == 0:
+            route = "cmd_vel_teleop"
+            if teleop_subscribers == 0:
                 self.cmd_vel_direct_pub.publish(twist)
+                route = "cmd_vel_teleop+cmd_vel fallback"
         else:
             self.cmd_vel_direct_pub.publish(twist)
 
         if abs(linear) < 0.001 and abs(angular) < 0.001:
-            self.get_logger().info("[ManualTeleop] stop")
+            mode_label = "AssistedTeleop" if assisted else "DirectTeleop"
+            self.get_logger().info(f"[{mode_label}] stop route={route} teleop_subscribers={teleop_subscribers}")
         else:
-            mode = "assisted" if assisted else "direct"
             self.get_logger().debug(
-                f"[ManualTeleop] mode={mode} linear={linear:.2f} angular={angular:.2f}"
+                f"[{'AssistedTeleop' if assisted else 'DirectTeleop'}] "
+                f"linear={linear:.2f} angular={angular:.2f} "
+                f"route={route} teleop_subscribers={teleop_subscribers}"
             )
         return True
 
