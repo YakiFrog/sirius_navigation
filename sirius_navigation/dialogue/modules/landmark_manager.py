@@ -283,6 +283,10 @@ class LandmarkManager:
     def handle_landmark_navigation_instruction(self, instruction):
         """「リビングを経由して庭に行って」のようなランドマーク指定の経由移動を処理する"""
         normalized = self.normalize_landmark_key(instruction)
+        loop_match = re.search(r"(\d+)\s*(?:回|周|回繰り返して|回繰り返し)", normalized)
+        loop_times = int(loop_match.group(1)) if loop_match else 1
+        if loop_times < 1:
+            loop_times = 1
         vague_reference_tokens = [
             "さっき目指してた場所", "さっきの場所", "前に目指してた場所", "前の場所",
             "さっき向かってた場所", "前回の場所", "さっき目指した場所", "直前の場所",
@@ -311,6 +315,9 @@ class LandmarkManager:
             else:
                 return False
 
+        if loop_times > 1:
+            landmarks = landmarks * loop_times
+
         movement_keywords = [
             "行", "いって", "向か", "移動", "案内", "連れて", "つれて",
             "go", "goto", "navigate", "move", "経由", "けいゆ", "通って", "とおって",
@@ -331,7 +338,10 @@ class LandmarkManager:
 
         names = [lm["name"] for lm in landmarks]
         if len(landmarks) > 1:
-            speak = f"[happy]" + "を経由して".join(names[:-1]) + f"を経由し、{names[-1]}に向かうのだ！"
+            if loop_times > 1:
+                speak = f"[happy]{names[0]}から{names[-1]}までのルートを{loop_times}回くり返すのだ！"
+            else:
+                speak = f"[happy]" + "を経由して".join(names[:-1]) + f"を経由し、{names[-1]}に向かうのだ！"
             # 2番目以降の目標地を command_queue に追加
             sorted_commands = []
             for lm in landmarks[1:]:
