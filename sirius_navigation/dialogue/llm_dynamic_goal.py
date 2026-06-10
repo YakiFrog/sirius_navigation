@@ -395,6 +395,9 @@ class LlmDynamicGoal(Node):
         """指示文を解析し、適切なROS 2アクションを実行する"""
         # 全角英数字などを半角に正規化 (例: "１０ｍ" -> "10m", "０．５" -> "0.5")
         instruction = normalize_instruction_text(instruction)
+
+        if self.handle_manual_teleop_instruction(instruction):
+            return
         
         # 1. 停止・キャンセル指示の簡易キーワード判定（高速応答のため）
         cancel_keywords = ["キャンセル", "cancel", "中止", "取り消", "とりけし"]
@@ -1953,6 +1956,45 @@ class LlmDynamicGoal(Node):
         msg = String()
         msg.data = command
         self.nav_control_pub.publish(msg)
+
+    def handle_manual_teleop_instruction(self, instruction: str) -> bool:
+        """Remote Controller のタッチ操縦JSONをTwistへ変換する。"""
+        stripped = instruction.strip()
+        if not stripped.startswith("{"):
+            return False
+
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return False
+
+        if payload.get("type") != "manual_teleop":
+            return False
+
+        assisted = bool(payload.get("assisted", True))
+        linear = max(-0.35, min(0.35, float(payload.get("linear", 0.0) or 0.0)))
+        angular = max(-1.2, min(1.2, float(payload.get("angular", 0.0) or 0.0)))
+
+        twist = Twist()
+        twist.linear.x = linear
+        twist.angular.z = angular
+
+        self.publish_nav_control("pause_silent")
+        if assisted:
+            self.cmd_vel_teleop_pub.publish(twist)
+            if self.cmd_vel_teleop_pub.get_subscription_count() == 0:
+                self.cmd_vel_direct_pub.publish(twist)
+        else:
+            self.cmd_vel_direct_pub.publish(twist)
+
+        if abs(linear) < 0.001 and abs(angular) < 0.001:
+            self.get_logger().info("[ManualTeleop] stop")
+        else:
+            mode = "assisted" if assisted else "direct"
+            self.get_logger().debug(
+                f"[ManualTeleop] mode={mode} linear={linear:.2f} angular={angular:.2f}"
+            )
+        return True
 
     def publish_assisted_drive_twist(self, twist: Twist):
         """前後移動の速度指令を publish する。
