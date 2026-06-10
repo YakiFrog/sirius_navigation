@@ -21,9 +21,10 @@ from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import Bool, String
 from action_msgs.srv import CancelGoal
 from action_msgs.msg import GoalInfo
+from builtin_interfaces.msg import Duration
 from tf2_ros import Buffer, TransformListener
 from rclpy.action import ActionClient
-from nav2_msgs.action import Spin
+from nav2_msgs.action import Spin, AssistedTeleop
 from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 from visualization_msgs.msg import Marker, MarkerArray
@@ -72,7 +73,7 @@ class LlmDynamicGoal(Node):
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
         self.nav_control_pub = self.create_publisher(String, '/nav_control', 10)
         self.cmd_vel_teleop_pub = self.create_publisher(Twist, 'cmd_vel_teleop', 10)
-        self.cmd_vel_direct_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.cmd_vel_direct_pub = self.create_publisher(Twist, 'cmd_vel_direct', 10)
         self.stuck_pub = self.create_publisher(Bool, '/sirius_is_stuck', 10)
         self.costmap_sub = self.create_subscription(OccupancyGrid, '/local_costmap/costmap', self.costmap_callback, 10)
         self.last_costmap_time = 0.0
@@ -94,6 +95,9 @@ class LlmDynamicGoal(Node):
         # アクションキャンセルのためのサービス
         self.cancel_client = self.create_client(CancelGoal, '/navigate_to_pose/_action/cancel_goal')
         self.spin_client = ActionClient(self, Spin, 'spin')
+        self.assisted_teleop_client = ActionClient(self, AssistedTeleop, 'assisted_teleop')
+        self.assisted_teleop_goal_handle = None
+        self.assisted_teleop_goal_pending = False
         self.param_client = self.create_client(SetParameters, '/controller_server/set_parameters')
 
 
@@ -1957,6 +1961,49 @@ class LlmDynamicGoal(Node):
         msg.data = command
         self.nav_control_pub.publish(msg)
 
+    def ensure_assisted_teleop_goal(self):
+        """Nav2 AssistedTeleop action を開始して、cmd_vel_teleop を安全経路に通す。"""
+        if self.assisted_teleop_goal_handle or self.assisted_teleop_goal_pending:
+            return
+
+        if not self.assisted_teleop_client.server_is_ready():
+            self.get_logger().warning(
+                "[AssistedTeleop] action server is not ready. "
+                "cmd_vel_teleop may not be obstacle-filtered yet."
+            )
+            return
+
+        goal_msg = AssistedTeleop.Goal()
+        goal_msg.time_allowance = Duration(sec=600)
+        self.assisted_teleop_goal_pending = True
+        future = self.assisted_teleop_client.send_goal_async(goal_msg)
+        future.add_done_callback(self._assisted_teleop_goal_response_callback)
+
+    def _assisted_teleop_goal_response_callback(self, future):
+        self.assisted_teleop_goal_pending = False
+        try:
+            goal_handle = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"[AssistedTeleop] failed to start action: {exc}")
+            return
+
+        if not goal_handle.accepted:
+            self.get_logger().error("[AssistedTeleop] action goal was rejected")
+            return
+
+        self.assisted_teleop_goal_handle = goal_handle
+        self.get_logger().info("[AssistedTeleop] action goal accepted")
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._assisted_teleop_result_callback)
+
+    def _assisted_teleop_result_callback(self, future):
+        self.assisted_teleop_goal_handle = None
+        try:
+            result = future.result()
+            self.get_logger().info(f"[AssistedTeleop] action finished status={result.status}")
+        except Exception as exc:
+            self.get_logger().warning(f"[AssistedTeleop] action result error: {exc}")
+
     def handle_manual_teleop_instruction(self, instruction: str) -> bool:
         """Remote Controller のタッチ操縦JSONをTwistへ変換する。"""
         stripped = instruction.strip()
@@ -1985,13 +2032,17 @@ class LlmDynamicGoal(Node):
 
         self.publish_nav_control("pause_silent")
         teleop_subscribers = self.cmd_vel_teleop_pub.get_subscription_count()
-        route = "cmd_vel"
+        route = "cmd_vel_direct"
         if assisted:
+            self.ensure_assisted_teleop_goal()
             self.cmd_vel_teleop_pub.publish(twist)
             route = "cmd_vel_teleop"
             if teleop_subscribers == 0:
-                self.cmd_vel_direct_pub.publish(twist)
-                route = "cmd_vel_teleop+cmd_vel fallback"
+                route = "cmd_vel_teleop unavailable"
+                self.get_logger().warning(
+                    "[AssistedTeleop] /cmd_vel_teleop has no subscribers. "
+                    "Not falling back to direct velocity because obstacle avoidance would be bypassed."
+                )
         else:
             self.cmd_vel_direct_pub.publish(twist)
 
@@ -2009,15 +2060,14 @@ class LlmDynamicGoal(Node):
     def publish_assisted_drive_twist(self, twist: Twist):
         """前後移動の速度指令を publish する。
 
-        通常は twist_mux の teleop 入力に流す。twist_mux が起動していない場合だけ
-        cmd_vel に直接 publish して、起動構成の抜けで完全に動かなくなるのを避ける。
+        通常は behavior_server の AssistedTeleop 入力に流す。
+        障害物回避を迂回しないように、cmd_vel への直接フォールバックはしない。
         """
         self.cmd_vel_teleop_pub.publish(twist)
 
         teleop_subscribers = self.cmd_vel_teleop_pub.get_subscription_count()
         now = self.get_clock().now().nanoseconds / 1e9
         if teleop_subscribers == 0:
-            self.cmd_vel_direct_pub.publish(twist)
             with self.lock:
                 should_log = now - self.assisted_drive_last_route_log_time > 1.0
                 if should_log:
@@ -2025,7 +2075,7 @@ class LlmDynamicGoal(Node):
             if should_log:
                 self.get_logger().warning(
                     "[AssistDrive] cmd_vel_teleop has no subscribers. "
-                    "Publishing fallback directly to cmd_vel. Is twist_mux running?"
+                    "Not publishing fallback directly to cmd_vel because obstacle avoidance would be bypassed."
                 )
         else:
             with self.lock:
