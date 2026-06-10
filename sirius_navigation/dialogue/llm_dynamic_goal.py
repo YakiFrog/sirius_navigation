@@ -630,6 +630,9 @@ class LlmDynamicGoal(Node):
         if self.teleop_ctrl.handle_manual_teleop_instruction(instruction):
             return
 
+        if self.landmark_mgr.handle_nearest_landmark_question(instruction):
+            return
+
         if self.landmark_mgr.handle_landmark_list_question(instruction):
             return
 

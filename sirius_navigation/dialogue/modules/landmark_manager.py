@@ -149,6 +149,9 @@ class LandmarkManager:
             "どこにいけ", "どこへいけ", "どこ行け", "行ける場所", "いける場所",
             "場所一覧", "ランドマーク", "目的地一覧", "どこまで", "wherecan",
         ]
+        near_tokens = ["近い", "ちかい", "最寄", "最も近", "いちばん近"]
+        if any(token in normalized for token in near_tokens):
+            return False
         if not any(token in normalized for token in question_tokens):
             return False
 
@@ -164,6 +167,57 @@ class LandmarkManager:
         joined = "、".join(names)
         speak = f"[happy]今行ける場所は、{joined}なのだ。"
         self.node.get_logger().info(f"[Landmark] Available destinations: {joined}")
+        self.node.llm_client._append_dialogue_history(instruction, speak)
+        self.node.send_sirius_speak(speak)
+        return True
+
+    def handle_nearest_landmark_question(self, instruction):
+        """「今の座標に近いランドマークは？」に答える"""
+        normalized = self.normalize_landmark_key(instruction)
+        tokens = ["近い", "ちかい", "最寄", "最も近", "いちばん近", "nearest", "nearby"]
+        if not any(token in normalized for token in tokens):
+            return False
+
+        self.load_landmarks_for_current_map()
+        if not self.landmarks:
+            speak = "[sad]ランドマークがまだ読み込めていないのだ。"
+            self.node.llm_client._append_dialogue_history(instruction, speak)
+            self.node.send_sirius_speak(speak)
+            return True
+
+        try:
+            trans = self.node.tf_buffer.lookup_transform(
+                "map",
+                "sirius3/base_footprint",
+                rclpy.time.Time(),
+            )
+            current_x = float(trans.transform.translation.x)
+            current_y = float(trans.transform.translation.y)
+        except Exception as e:
+            self.node.get_logger().warning(f"[Landmark] failed to get current pose for nearest query: {e}")
+            speak = "[sad]今の位置が取れないから、近いランドマークを判定できないのだ。"
+            self.node.llm_client._append_dialogue_history(instruction, speak)
+            self.node.send_sirius_speak(speak)
+            return True
+
+        nearest = None
+        nearest_dist = None
+        for landmark in self.landmarks.values():
+            dist = math.hypot(float(landmark["x"]) - current_x, float(landmark["y"]) - current_y)
+            if nearest is None or dist < nearest_dist:
+                nearest = landmark
+                nearest_dist = dist
+
+        if nearest is None:
+            speak = "[sad]近いランドマークが見つからないのだ。"
+            self.node.llm_client._append_dialogue_history(instruction, speak)
+            self.node.send_sirius_speak(speak)
+            return True
+
+        speak = f"[happy]いちばん近いのは、{nearest['name']}やで。だいたい{nearest_dist:.1f}メートルくらいなのだ。"
+        self.node.get_logger().info(
+            f"[Landmark] Nearest landmark: {nearest['name']} distance={nearest_dist:.2f}m from X={current_x:.2f}, Y={current_y:.2f}"
+        )
         self.node.llm_client._append_dialogue_history(instruction, speak)
         self.node.send_sirius_speak(speak)
         return True
@@ -237,10 +291,12 @@ class LandmarkManager:
         if any(token in normalized for token in vague_reference_tokens):
             if self.last_target_landmark is not None:
                 landmarks = [self.last_target_landmark]
+                is_vague_reference = True
             else:
                 return False
         else:
             landmarks = self.find_all_landmarks_in_instruction(instruction)
+            is_vague_reference = False
 
         # 条件付き指示（例:「〜だったら」「〜のとき」）の場合は、直接のナビゲーション処理をスキップしてLLMに判断を委ねる
         conditional_tokens = ["たら", "なら", "のとき", "の時", "ときに", "時に", "もし", "if", "when"]
@@ -255,21 +311,18 @@ class LandmarkManager:
             else:
                 return False
 
-        if len(landmarks) == 1:
-            only_name = landmarks[0]["name"]
-            if normalized == self.normalize_landmark_key(only_name):
-                pass
-            else:
-                # 単語単体でランドマーク名だけ入っていても、移動の意図とみなす
-                if not any(keyword in normalized for keyword in ["行", "いって", "向か", "移動", "案内", "連れて", "つれて", "go", "goto", "navigate", "move"]):
-                    return False
-
-        if not any(keyword in normalized for keyword in [
+        movement_keywords = [
             "行", "いって", "向か", "移動", "案内", "連れて", "つれて",
             "go", "goto", "navigate", "move", "経由", "けいゆ", "通って", "とおって",
-        ]):
-            # ここでは「地名だけ」の入力をナビゲーションと見なす
-            return False
+        ]
+        if not is_vague_reference and len(landmarks) == 1:
+            only_name = self.normalize_landmark_key(landmarks[0]["name"])
+            input_is_just_landmark = normalized == only_name
+            if not input_is_just_landmark and not any(keyword in normalized for keyword in movement_keywords):
+                return False
+        elif not is_vague_reference and not any(keyword in normalized for keyword in movement_keywords):
+            # 複数ランドマークを含むときも、地名だけならナビゲーションとして扱う
+            pass
 
         self.node.set_target_following(False, speak_on_failure=False)
         self.node.publish_nav_control("pause_silent")
