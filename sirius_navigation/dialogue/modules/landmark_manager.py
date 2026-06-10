@@ -176,32 +176,80 @@ class LandmarkManager:
                 return self.landmarks.get(canonical_key)
         return None
 
+    def find_all_landmarks_in_instruction(self, instruction):
+        """指示文に含まれるすべてのランドマークを出現順に取得する"""
+        self.load_landmarks_for_current_map()
+        normalized = self.normalize_landmark_key(instruction)
+        
+        matches = []
+        for alias_key, canonical_key in self.landmark_aliases.items():
+            if not alias_key:
+                continue
+            start = 0
+            while True:
+                idx = normalized.find(alias_key, start)
+                if idx == -1:
+                    break
+                landmark = self.landmarks.get(canonical_key)
+                if landmark:
+                    matches.append((idx, landmark))
+                start = idx + len(alias_key)
+                
+        # 出現インデックス順に並べ替え
+        matches.sort(key=lambda x: x[0])
+        
+        # 重複するランドマークを除去
+        seen_names = set()
+        landmarks = []
+        for _, lm in matches:
+            if lm["name"] not in seen_names:
+                seen_names.add(lm["name"])
+                landmarks.append(lm)
+        return landmarks
+
     def handle_landmark_navigation_instruction(self, instruction):
-        """「リビングに行って」のようなランドマーク名指定の移動を処理する"""
-        landmark = self.find_landmark_in_instruction(instruction)
-        if not landmark:
+        """「リビングを経由して庭に行って」のようなランドマーク指定の経由移動を処理する"""
+        landmarks = self.find_all_landmarks_in_instruction(instruction)
+        if not landmarks:
             return False
 
         normalized = self.normalize_landmark_key(instruction)
         navigation_keywords = [
             "行", "いって", "向か", "移動", "案内", "連れて", "つれて",
-            "go", "goto", "navigate", "move",
+            "go", "goto", "navigate", "move", "経由", "けいゆ", "通って", "とおって",
         ]
         if not any(keyword in normalized for keyword in navigation_keywords):
             return False
 
-        self.node.get_logger().info(
-            f"[Landmark] Navigation requested: {landmark['name']} "
-            f"({landmark['x']:.2f}, {landmark['y']:.2f}, yaw={math.degrees(landmark['yaw']):+.1f}deg)"
-        )
         self.node.set_target_following(False, speak_on_failure=False)
         self.node.publish_nav_control("pause_silent")
         self.node.cancel_navigation(clear_queue=True, preserve_current_goal=False)
         self.node.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
-        speak = f"[happy]{landmark['name']}に向かうのだ！"
+
+        names = [lm["name"] for lm in landmarks]
+        if len(landmarks) > 1:
+            speak = f"[happy]" + "を経由して".join(names[:-1]) + f"を経由し、{names[-1]}に向かうのだ！"
+            # 2番目以降の目標地を command_queue に追加
+            sorted_commands = []
+            for lm in landmarks[1:]:
+                sorted_commands.append({
+                    "type": "goto",
+                    "value": [float(lm["x"]), float(lm["y"])],
+                    "speak": f"[happy]次は{lm['name']}に向かうのだ！"
+                })
+            with self.node.lock:
+                self.node.command_queue = sorted_commands
+        else:
+            speak = f"[happy]{landmarks[0]['name']}に向かうのだ！"
+
+        self.node.get_logger().info(
+            f"[Landmark] Navigation requested for sequence: {', '.join(names)}"
+        )
         self.node.llm_client._append_dialogue_history(instruction, speak)
         self.node.send_sirius_speak(speak)
-        self.node.publish_direct_map_goal(landmark["x"], landmark["y"], landmark["yaw"])
+        
+        # 最初の目標地に移動開始
+        self.node.publish_direct_map_goal(landmarks[0]["x"], landmarks[0]["y"], landmarks[0]["yaw"])
         return True
 
     def publish_landmark_markers(self):

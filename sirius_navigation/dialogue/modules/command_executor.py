@@ -345,7 +345,9 @@ class CommandExecutor:
                     self.node.current_xy_tolerance = tolerance
                 self.node.nav_ctrl.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': tolerance})
                 
-                if abs(target_x) < 0.001 and abs(target_y) < 0.001:
+                if speak_override:
+                    self.node.send_sirius_speak(speak_override)
+                elif abs(target_x) < 0.001 and abs(target_y) < 0.001:
                     self.node.send_sirius_speak("[happy]原点、Xゼロ、Yゼロに向かうのだ！")
                 else:
                     self.node.send_sirius_speak(DIALOGUE_TEMPLATES["goto_start"].format(x=target_x, y=target_y))

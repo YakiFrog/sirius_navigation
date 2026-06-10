@@ -108,14 +108,29 @@
 - 前後移動の距離計測ソース
 - `cmd_vel_teleop` の購読状況
 
+## 経由地（中間地点）の指定と順次移動
+
+「リビングを経由して、庭に行って」のように、指示文の中に複数のランドマーク名が含まれ、移動指示（「〜を経由」「〜に行って」等）がある場合、システムは中間地点を自動で経由しながら目的地へと向かいます。
+
+### 動作仕様
+
+1. **ランドマークの出現順抽出**:
+   指示文を左から解析し、出現順にマッチしたランドマーク（例: `[リビング, 庭]`）を取得します。
+2. **アナウンスと移動開始**:
+   `[happy]リビングを経由し、庭に向かうのだ！` のようにルート全体を発話し、最初の目標地（リビング）へ向けて `publish_direct_map_goal` で Nav2 移動を開始します。
+3. **コマンドキューの自動構築**:
+   2番目以降の目標地（例: 庭）は、カスタムの発話パラメータ（`"speak": "次は庭に向かうのだ！"`）を持った `goto` コマンドとして順次 `command_queue` にプッシュされます。
+4. **自動的な次のアクション実行**:
+   経由地に到達したタイミングで、キューから次の目標地が取り出され、ユーザーフレンドリーな発話（「次は〜に向かうのだ！」）を行った上で次の Nav2 アクションを自律的に開始します。
+
 ## 関連ファイル
 
 - [`llm_dynamic_goal.py`](./llm_dynamic_goal.py): メインの ROS 2 ノード（各モジュールのオーケストレータ及び各プロパティのバインディング）
 - [`modules/`](./modules/): 機能ごとに分割されたサブモジュールパッケージ
   - [`__init__.py`](./modules/__init__.py)
   - [`llm_client.py`](./modules/llm_client.py): LLM (LM Studio) との通信、Verifier実行、対話履歴の管理
-  - [`landmark_manager.py`](./modules/landmark_manager.py): 地図ランドマークYAMLの自動ロード、RViz2向けMarker Array発行（日本語→ローマ字/英字変換によるRViz2でのテキスト位置ズレ解消）
-  - [`nav_controller.py`](./modules/nav_controller.py): Nav2アクションクライアント (Spin)、パラメータ動的変更、ゴールキャンセル
+  - [`landmark_manager.py`](./modules/landmark_manager.py): 地図ランドマークYAMLの自動ロード、RViz2向けMarker Array発行（日本語→ローマ字/英字変換によるRViz2でのテキスト位置ズレ解消）、出現順経由地解析
+  - [`nav_controller.py`](./modules/nav_controller.py): Nav2アクションクライアント (Spin)、パラメータ動的変更、ゴールキャンセル、ナビゲーションの再開
   - [`teleop_handler.py`](./modules/teleop_handler.py): コストマップ障害物距離計算、補助付き前後移動 (Twist / cmd_vel / odom)
   - [`command_executor.py`](./modules/command_executor.py): シーケンスコマンドの実行状態管理・実行キュー制御
   - [`http_server.py`](./modules/http_server.py): 外部 Docker などから /instruction POST を受ける HTTP サーバー

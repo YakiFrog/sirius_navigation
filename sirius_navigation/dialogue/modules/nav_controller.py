@@ -166,6 +166,35 @@ class NavController:
             self.node.stop_pub.publish(msg)
         threading.Timer(1.0, reset_stop).start()
 
+    def resume_navigation(self):
+        """停止前の目標を再開する"""
+        with self.node.lock:
+            snapshot = self.node.paused_goal_snapshot
+
+        if not snapshot:
+            return False
+
+        if snapshot.get("active_goal_x") is not None and snapshot.get("active_goal_y") is not None:
+            self.publish_direct_map_goal(
+                snapshot["active_goal_x"],
+                snapshot["active_goal_y"],
+                snapshot["active_goal_yaw"] if snapshot.get("active_goal_yaw") is not None else 0.0,
+            )
+            with self.node.lock:
+                self.node.executing_command = True
+                self.node.command_start_time = self.node.get_clock().now()
+                self.node.last_active_cmd_type = snapshot.get("last_action_type", "goto")
+                self.node.current_xy_tolerance = snapshot.get("current_xy_tolerance", 0.50)
+                self.node.last_action_status = "none"
+                self.node.distance_remaining_history = []
+                self.node.yaw_diff_history = []
+                self.node.is_stuck = False
+                self.node.paused_goal_snapshot = None
+            self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': self.node.current_xy_tolerance})
+            return True
+
+        return False
+
     def publish_nav_control(self, command: str):
         """move_goal.py へ明示的な制御コマンドを送る"""
         msg = String()
@@ -504,5 +533,4 @@ class NavController:
             else:
                 self.node.send_sirius_speak(DIALOGUE_TEMPLATES["turn_failure"])
             print("\n✅ 旋回完了！次の指示をどうぞ。")
-            from llm_dynamic_goal import print_command_prompt
-            print_command_prompt()
+            self.node.print_prompt()

@@ -388,6 +388,9 @@ class LlmDynamicGoal(Node):
     def execute_next_command(self):
         return self.cmd_executor.execute_next_command()
 
+    def resume_navigation(self):
+        return self.nav_ctrl.resume_navigation()
+
     def normalize_landmark_key(self, text):
         return self.landmark_mgr.normalize_landmark_key(text)
 
@@ -752,7 +755,7 @@ class LlmDynamicGoal(Node):
             self.command_queue = sorted_commands
             self.executing_command = False
             
-            self.cmd_executor.execute_next_command()
+        self.cmd_executor.execute_next_command()
 
     # --- High-level Monitoring and Goal-checking Loops ---
     def timer_goal_publisher(self):
@@ -1042,6 +1045,9 @@ class LlmDynamicGoal(Node):
             self.get_logger().info(f"[TargetFollow] enable_following set to {enabled}")
         except Exception as exc:
             self.get_logger().error(f"[TargetFollow] parameter update failed: {exc}")
+
+    def print_prompt(self):
+        print_command_prompt()
 
     def send_sirius_speak(self, text):
         """face_client 経由で音声送信する薄いラッパー"""
