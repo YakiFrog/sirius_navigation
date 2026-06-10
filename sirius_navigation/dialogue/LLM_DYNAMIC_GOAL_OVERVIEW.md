@@ -110,7 +110,15 @@
 
 ## 関連ファイル
 
-- [`llm_dynamic_goal.py`](./llm_dynamic_goal.py)
+- [`llm_dynamic_goal.py`](./llm_dynamic_goal.py): メインの ROS 2 ノード（各モジュールのオーケストレータ及び各プロパティのバインディング）
+- [`modules/`](./modules/): 機能ごとに分割されたサブモジュールパッケージ
+  - [`__init__.py`](./modules/__init__.py)
+  - [`llm_client.py`](./modules/llm_client.py): LLM (LM Studio) との通信、Verifier実行、対話履歴の管理
+  - [`landmark_manager.py`](./modules/landmark_manager.py): 地図ランドマークYAMLの自動ロード、RViz2向けMarker Array発行（日本語→ローマ字/英字変換によるRViz2でのテキスト位置ズレ解消）
+  - [`nav_controller.py`](./modules/nav_controller.py): Nav2アクションクライアント (Spin)、パラメータ動的変更、ゴールキャンセル
+  - [`teleop_handler.py`](./modules/teleop_handler.py): コストマップ障害物距離計算、補助付き前後移動 (Twist / cmd_vel / odom)
+  - [`command_executor.py`](./modules/command_executor.py): シーケンスコマンドの実行状態管理・実行キュー制御
+  - [`http_server.py`](./modules/http_server.py): 外部 Docker などから /instruction POST を受ける HTTP サーバー
 - [`local_parser.py`](./local_parser.py)
 - [`test_local_parser.py`](./test_local_parser.py)
 - [`navigation.py`](./navigation.py)
