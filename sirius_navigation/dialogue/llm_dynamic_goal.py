@@ -1027,6 +1027,8 @@ class LlmDynamicGoal(Node):
 
     def _local_parse_needs_llm_check(self, instruction, local_result, norm_inst):
         """ローカルパースが少し不安なときだけ LLM verifier に回す。"""
+        if any(token in norm_inst for token in ["1周", "一周", "周"]):
+            return False
         if local_result.get("cancel", False):
             return False
 
@@ -1073,9 +1075,13 @@ class LlmDynamicGoal(Node):
                 content = "\n".join(lines[1:-1]).strip()
         return json.loads(content), content
 
-    def _validate_verifier_result(self, verifier_result, local_result):
+    def _validate_verifier_result(self, verifier_result, local_result, instruction=""):
         if not isinstance(verifier_result, dict):
             return None
+
+        normalized_instruction = normalize_instruction_text(instruction).strip().replace(" ", "").replace("　", "").lower()
+        if any(token in normalized_instruction for token in ["1周", "一周", "周"]):
+            return local_result
 
         decision = verifier_result.get("decision", "accept")
         if decision == "accept":
@@ -1166,7 +1172,7 @@ class LlmDynamicGoal(Node):
                 content = res_json["choices"][0]["message"]["content"]
                 verifier_json, cleaned_content = self._parse_llm_json_content(content)
 
-            checked = self._validate_verifier_result(verifier_json, local_result)
+            checked = self._validate_verifier_result(verifier_json, local_result, instruction)
             if checked is None:
                 self.get_logger().warning(f"LLM verifier returned unusable result: {verifier_json}")
                 return None

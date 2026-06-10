@@ -134,6 +134,10 @@ class TestLocalParser(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertEqual(res.get("commands", [])[0]["type"], "forward")
 
+        res = parse_local_rules("行け", self.state_info)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("commands", [])[0]["type"], "forward")
+
         # 数値直接指定
         res = parse_local_rules("速度を 0.5 にして", self.state_info)
         self.assertIsNotNone(res)
@@ -241,6 +245,13 @@ class TestLocalParser(unittest.TestCase):
 
     def test_one_full_rotation(self):
         res = parse_local_rules("左向きに1周して", self.state_info)
+        self.assertIsNotNone(res)
+        commands = res.get("commands", [])
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["type"], "spin")
+        self.assertAlmostEqual(commands[0]["value"], 360.0, places=4)
+
+        res = parse_local_rules("一周して", self.state_info)
         self.assertIsNotNone(res)
         commands = res.get("commands", [])
         self.assertEqual(len(commands), 1)

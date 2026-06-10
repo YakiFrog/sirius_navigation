@@ -114,6 +114,12 @@ def contains_motion_intent(text):
         ] + LATERAL_TURN_PATTERNS)
     )
 
+def has_destination_hint(text):
+    return any(x in text for x in [
+        "座標", "原点", "ホーム", "home", "goal", "目的地", "場所", "位置",
+        "そこ", "あそこ", "ここ", "あっち", "そっち", "前方", "後方", "左側", "右側"
+    ])
+
 
 def extract_expression_commands(part_norm):
     commands = []
@@ -350,7 +356,6 @@ def build_clarification_response(norm_inst):
         "動いて": "[normal]どう動きますか？前進、後退、右向き、左向き、座標移動などで指定してほしいのだ。",
         "動け": "[normal]どう動きますか？前進、後退、右向き、左向き、座標移動などで指定してほしいのだ。",
         "行って": "[normal]どこへ行きますか？目的地か方向を指定してほしいのだ。",
-        "行け": "[normal]どこへ行きますか？目的地か方向を指定してほしいのだ。",
         "回って": "[normal]どちらに何度回りますか？右90度、左に旋回、のように指定してほしいのだ。",
         "向いて": "[normal]どちらを向きますか？右、左、後ろ、北などを指定してほしいのだ。",
         "ナビして": "[normal]どこへ案内しますか？目的地か座標を指定してほしいのだ。",
@@ -565,6 +570,11 @@ def parse_no_number_part(part_raw):
         if any(x in part_norm for x in ["motto", "もっと", "大きく", "たくさん", "さらに"]):
             val = 2.0
         return {"type": "backward", "value": val}
+
+    if "行け" in part_norm or "いけ" in part_norm:
+        if any(x in part_norm for x in ["に", "へ", "まで"]) and has_destination_hint(part_norm):
+            return None
+        return {"type": "forward", "value": 1.0}
 
     if contains_forward_intent(part_norm):
         val = 1.5
