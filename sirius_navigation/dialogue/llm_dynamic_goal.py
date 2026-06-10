@@ -2072,7 +2072,7 @@ class LlmDynamicGoal(Node):
                     self.last_action_status = "failed_stuck"
                 self.send_sirius_speak(f"[sad]{blocked_side} {blocked_dist:.1f}メートルに障害物があって、これ以上動けないのだ！")
                 self.get_logger().warning(
-                    f"[AssistDrive] blocked by obstacle: side={blocked_side}, dist={blocked_dist:.2f}m, last_type={last_type}"
+                    f"[前後移動停止] 障害物で停止: 側={blocked_side}, 距離={blocked_dist:.2f}m, last_type={last_type}"
                 )
             self.stop_assisted_drive()
             return
@@ -2093,8 +2093,7 @@ class LlmDynamicGoal(Node):
 
         if end_time is not None and now >= end_time:
             self.get_logger().warning(
-                f"[AssistDrive] timeout before distance target. target={target_distance:.2f}m "
-                f"source={distance_source}"
+                f"[前後移動停止] 距離目標前にタイムアウト: target={target_distance:.2f}m source={distance_source}"
             )
             self.send_sirius_speak("[sad]距離を確認できないので、いったん止まるのだ。")
             self.stop_assisted_drive()
@@ -2179,13 +2178,13 @@ class LlmDynamicGoal(Node):
             result_msg = future.result()
             status = result_msg.status
             status_name = {
-                0: "STATUS_UNKNOWN",
-                1: "STATUS_ACCEPTED",
-                2: "STATUS_EXECUTING",
-                3: "STATUS_CANCELING",
-                4: "STATUS_SUCCEEDED",
-                5: "STATUS_CANCELED",
-                6: "STATUS_ABORTED",
+                0: "不明",
+                1: "受理済み",
+                2: "実行中",
+                3: "キャンセル中",
+                4: "成功",
+                5: "キャンセル完了",
+                6: "中止",
             }.get(status, f"STATUS_{status}")
             if status == 4: # STATUS_SUCCEEDED in ROS 2
                 success = True
@@ -2251,19 +2250,21 @@ class LlmDynamicGoal(Node):
                 self.is_stuck = nearest_obstacle < 0.8
                 self.chat_history.append({
                     "role": "assistant",
-                    "content": "【System Feedback】Spin/turn action failed. Nearby obstacle may have prevented safe rotation."
+                    "content": "【System Feedback】旋回に失敗しました。近くの障害物で安全に回れなかった可能性があります。"
                 })
 
         achieved_str = "unknown" if achieved_turn is None else f"{math.degrees(achieved_turn):+.1f}deg"
         requested_str = "unknown" if requested_turn is None else f"{math.degrees(requested_turn):+.1f}deg"
         yaw_error_str = "unknown" if yaw_error_deg is None else f"{yaw_error_deg:.1f}deg"
+        end_pose_str = (
+            f"({end_x:.3f}, {end_y:.3f})" if end_x is not None and end_y is not None else "不明"
+        )
         spin_result_msg = (
-            "[SpinResult] "
-            f"success={success} status={status_name}({status}) "
-            f"requested={requested_str} achieved={achieved_str} yaw_error={yaw_error_str} "
-            f"nearest_obstacle={nearest_obstacle:.2f}m obs={dict(obs_dists)} "
-            f"end_pose=({end_x if end_x is not None else 'unknown'}, {end_y if end_y is not None else 'unknown'}) "
-            f"result_error={result_error}"
+            "[旋回結果] "
+            f"成功={success} 状態={status_name}({status}) "
+            f"要求={requested_str} 実績={achieved_str} yaw誤差={yaw_error_str} "
+            f"最寄り障害物={nearest_obstacle:.2f}m 障害物={dict(obs_dists)} "
+            f"終了位置={end_pose_str} 取得エラー={result_error}"
         )
         if success:
             self.get_logger().info(spin_result_msg)
