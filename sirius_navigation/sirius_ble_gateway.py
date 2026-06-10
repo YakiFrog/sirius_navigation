@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import json
+import inspect
 import math
 import sys
 import threading
@@ -294,7 +295,10 @@ class SiriusBleGateway(Node):
 
         try:
             while not self._stopping.is_set():
-                is_connected = bool(server.is_connected())
+                is_connected_value = server.is_connected()
+                if inspect.isawaitable(is_connected_value):
+                    is_connected_value = await is_connected_value
+                is_connected = bool(is_connected_value)
                 self._remote_ble_link = is_connected
                 active = (time.time() - self._remote_last_activity) < 4.0
                 status = "connected" if active else "advertising"
