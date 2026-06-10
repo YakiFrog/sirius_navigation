@@ -106,8 +106,16 @@ class LlmDynamicGoal(Node):
             self.instruction_callback,
             10
         )
+        self.battery_status_sub = self.create_subscription(
+            String,
+            '/sirius/battery_status',
+            self.battery_status_callback,
+            10
+        )
         
         self.face_client = FaceClient(logger=self.get_logger())
+        self.latest_battery_status = None
+        self.latest_battery_status_time = 0.0
         self.surrounding_people_count = 0
         self.current_expression = "normal"
         self.current_humor_level = DEFAULT_HUMOR_LEVEL
@@ -331,6 +339,24 @@ class LlmDynamicGoal(Node):
                 tracked_ids.add(m.id)
         with self.lock:
             self.surrounding_people_count = len(tracked_ids)
+
+    def battery_status_callback(self, msg):
+        """BLE Gateway が配信する最新バッテリー情報を、顔gRPC失敗時の予備として保持する"""
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+
+        if data.get("status") != "connected":
+            return
+
+        level = float(data.get("battery_level", -1.0))
+        if level < 0.0:
+            return
+
+        with self.lock:
+            self.latest_battery_status = data
+            self.latest_battery_status_time = time.time()
 
     def instruction_callback(self, msg):
         """トピック経由で指示を受信したときのコールバック"""
@@ -2340,12 +2366,20 @@ class LlmDynamicGoal(Node):
             return "normal"
 
     def get_battery_report_string(self):
-        """face_client から生情報を取得し、DIALOGUE_TEMPLATES を使ってバッテリー状態をフォーマットする"""
+        """face_client を優先し、失敗時は BLE Gateway の ROS キャッシュからバッテリー状態を返す"""
         status = self.face_client.get_battery_status()
         if status is None:
-            return DIALOGUE_TEMPLATES.get("battery_fail", "[sad]バッテリー状態が確認できないのだ。")
-        
-        level, charging_val = status
+            with self.lock:
+                cached = dict(self.latest_battery_status) if self.latest_battery_status else None
+                cache_age = time.time() - self.latest_battery_status_time
+            if cached and cache_age <= 30.0:
+                level = float(cached.get("battery_level", -1.0))
+                charging_val = 1.0 if cached.get("is_charging") else 2.0
+            else:
+                return DIALOGUE_TEMPLATES.get("battery_fail", "[sad]バッテリー状態が確認できないのだ。")
+        else:
+            level, charging_val = status
+
         if level < 0.0:
             return DIALOGUE_TEMPLATES.get("battery_error", "[sad]バッテリー残量データが不正なのだ。")
 
