@@ -202,6 +202,16 @@ class CommandExecutor:
             self.execute_next_command()
             return
 
+        if cmd_type == "register_landmark":
+            try:
+                landmark_name = str(value).strip()
+                ok, speak = self.node.landmark_mgr.register_current_pose_as_landmark(landmark_name)
+                self.node.send_sirius_speak(speak)
+            except Exception as e:
+                self.node.get_logger().error(f"Failed to register landmark via executor: {e}")
+            self.execute_next_command()
+            return
+
         try:
             trans = self.node.tf_buffer.lookup_transform(
                 'map',

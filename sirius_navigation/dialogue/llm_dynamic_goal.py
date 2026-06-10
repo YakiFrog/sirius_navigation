@@ -391,6 +391,9 @@ class LlmDynamicGoal(Node):
     def resume_navigation(self):
         return self.nav_ctrl.resume_navigation()
 
+    def register_landmark(self, name):
+        return self.landmark_mgr.register_current_pose_as_landmark(name)
+
     def normalize_landmark_key(self, text):
         return self.landmark_mgr.normalize_landmark_key(text)
 
@@ -608,6 +611,9 @@ class LlmDynamicGoal(Node):
             return
 
         if self.landmark_mgr.handle_landmark_navigation_instruction(instruction):
+            return
+
+        if self.landmark_mgr.handle_landmark_registration_instruction(instruction):
             return
         
         # 1. 停止・キャンセル指示の簡易キーワード判定（高速応答のため）

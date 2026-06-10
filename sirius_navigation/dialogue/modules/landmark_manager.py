@@ -2,6 +2,7 @@
 import os
 import json
 import math
+import re
 import yaml
 import rclpy
 from std_msgs.msg import String
@@ -209,11 +210,16 @@ class LandmarkManager:
 
     def handle_landmark_navigation_instruction(self, instruction):
         """「リビングを経由して庭に行って」のようなランドマーク指定の経由移動を処理する"""
+        normalized = self.normalize_landmark_key(instruction)
+        # 条件付き指示（例:「〜だったら」「〜のとき」）の場合は、直接のナビゲーション処理をスキップしてLLMに判断を委ねる
+        conditional_tokens = ["たら", "なら", "のとき", "の時", "ときに", "時に", "もし", "if", "when"]
+        if any(token in normalized for token in conditional_tokens):
+            return False
+
         landmarks = self.find_all_landmarks_in_instruction(instruction)
         if not landmarks:
             return False
 
-        normalized = self.normalize_landmark_key(instruction)
         navigation_keywords = [
             "行", "いって", "向か", "移動", "案内", "連れて", "つれて",
             "go", "goto", "navigate", "move", "経由", "けいゆ", "通って", "とおって",
@@ -250,6 +256,108 @@ class LandmarkManager:
         
         # 最初の目標地に移動開始
         self.node.publish_direct_map_goal(landmarks[0]["x"], landmarks[0]["y"], landmarks[0]["yaw"])
+        return True
+
+    def register_current_pose_as_landmark(self, name: str):
+        """現在のロボット位置（TF）を取得し、sim.yaml にランドマークとして登録または更新する"""
+        try:
+            trans = self.node.tf_buffer.lookup_transform(
+                'map',
+                'sirius3/base_footprint',
+                rclpy.time.Time()
+            )
+            x = float(trans.transform.translation.x)
+            y = float(trans.transform.translation.y)
+            q = trans.transform.rotation
+            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+            yaw = float(math.atan2(siny_cosp, cosy_cosp))
+        except Exception as e:
+            self.node.get_logger().error(f"Failed to lookup TF (map -> sirius3/base_footprint) for registration: {e}")
+            return False, "[sad]現在位置の取得に失敗したのだ。"
+
+        yaml_path = getattr(self, 'landmark_file_path', None)
+        if not yaml_path or not os.path.exists(yaml_path):
+            possible_paths = [
+                "/home/kotantu-desktop/sirius_jazzy_ws/maps_waypoints/landmarks/sim.yaml",
+                "/home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/maps_waypoints/landmarks/sim.yaml"
+            ]
+            for p in possible_paths:
+                if os.path.exists(p):
+                    yaml_path = p
+                    break
+        
+        if not yaml_path or not os.path.exists(yaml_path):
+            return False, "[sad]ランドマーク定義ファイルが見つからないのだ。"
+
+        try:
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            return False, f"[sad]ファイルの読み込みに失敗したのだ。{e}"
+
+        if "landmarks" not in data or data["landmarks"] is None:
+            data["landmarks"] = []
+
+        found = False
+        for lm in data["landmarks"]:
+            if lm.get("name") == name:
+                lm["x"] = round(x, 3)
+                lm["y"] = round(y, 3)
+                lm["yaw"] = round(yaw, 3)
+                found = True
+                break
+        
+        if not found:
+            data["landmarks"].append({
+                "name": name,
+                "x": round(x, 3),
+                "y": round(y, 3),
+                "yaw": round(yaw, 3),
+                "aliases": []
+            })
+
+        try:
+            with open(yaml_path, 'w', encoding='utf-8') as f:
+                yaml.safe_dump(data, f, allow_unicode=True, default_flow_style=False)
+        except Exception as e:
+            return False, f"[sad]ファイルの保存に失敗したのだ。{e}"
+
+        self.load_landmarks_for_current_map(force=True)
+        self.publish_landmark_markers()
+        self.publish_landmark_status()
+
+        action_word = "更新" if found else "新しく登録"
+        return True, f"[happy]現在位置を『{name}』として{action_word}したで！"
+
+    def handle_landmark_registration_instruction(self, instruction):
+        """「ここをリビングとして登録して」や「ここを玄関にして」のような登録・更新指令をルールベースでパースする"""
+        normalized = self.normalize_landmark_key(instruction)
+        
+        patterns = [
+            r"ここを(.+?)(?:として)?(?:登録|保存|記憶|記録|おぼえて|覚えて|設定)",
+            r"ここを(.+?)(?:に|と)(?:して|決定|覚える|記憶)",
+        ]
+        
+        target_name = None
+        for pat in patterns:
+            m = re.search(pat, normalized)
+            if m:
+                target_name = m.group(1).strip()
+                break
+                
+        if not target_name:
+            return False
+
+        self.node.get_logger().info(f"[Landmark] Voice registration requested for landmark name: {target_name}")
+        
+        self.node.set_target_following(False, speak_on_failure=False)
+        self.node.publish_nav_control("pause_silent")
+        self.node.cancel_navigation(clear_queue=True, preserve_current_goal=False)
+        
+        ok, speak = self.register_current_pose_as_landmark(target_name)
+        self.node.llm_client._append_dialogue_history(instruction, speak)
+        self.node.send_sirius_speak(speak)
         return True
 
     def publish_landmark_markers(self):
