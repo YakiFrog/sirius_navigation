@@ -69,6 +69,8 @@ class TargetDetector(Node):
         self.declare_parameter('active_fov_deg', 270.0)         # 追従中の視野角（270度）
         self.declare_parameter('lockon_max_range', 1.2)         # ロックオン時の最大距離（m）
         self.declare_parameter('lockon_max_lateral', 0.30)       # ロックオン時の横方向最大距離（m、正面のみに限定）
+        self.declare_parameter('primary_jump_distance', 0.8)     # 追従対象odomの最大許容ジャンプ距離（m）
+        self.declare_parameter('primary_jump_speed', 2.0)        # 追従対象odomの最大許容速度（m/s）
 
         # パラメータの取得
         self.leg_scan_topic = self.get_parameter('leg_scan_topic').value
@@ -98,6 +100,8 @@ class TargetDetector(Node):
         self.active_fov_deg = self.get_parameter('active_fov_deg').value
         self.lockon_max_range = self.get_parameter('lockon_max_range').value
         self.lockon_max_lateral = self.get_parameter('lockon_max_lateral').value
+        self.primary_jump_distance = self.get_parameter('primary_jump_distance').value
+        self.primary_jump_speed = self.get_parameter('primary_jump_speed').value
 
         # パブリッシャーとサブスクライバーのセットアップ
         self.odom_pub = self.create_publisher(Odometry, self.odom_topic, 10)
@@ -117,6 +121,7 @@ class TargetDetector(Node):
         self.tracks = []               # Trackオブジェクトのリスト
         self.next_track_id = 0         # 次に割り当てるTrack ID
         self.primary_track_id = None   # ロボットが追従するプライマリ・ターゲットのID
+        self.last_primary_odom = None  # (x, y, time_sec): 追従対象の直前publish位置
         
         # 各種カルマンフィルターのパラメータ
         # プロセスノイズ共分散 Q
@@ -559,6 +564,7 @@ class TargetDetector(Node):
                 self.get_logger().warn(f"Track {track.id} lost. Removed.")
                 if track.id == self.primary_track_id:
                     self.primary_track_id = None
+                    self.last_primary_odom = None
         self.tracks = active_tracks
 
         # 6. 新規ターゲットの登録
@@ -622,6 +628,7 @@ class TargetDetector(Node):
             
             if best_track is not None:
                 self.primary_track_id = best_track.id
+                self.last_primary_odom = None
                 self.get_logger().info(f"Target follow locked onto Track {self.primary_track_id}!")
 
         # 8. オドメトリとマーカーのパブリッシュ
@@ -633,6 +640,7 @@ class TargetDetector(Node):
                 if primary_track.is_static:
                     self.get_logger().warn(f"Locked target Track {self.primary_track_id} determined to be static. Unlocking.")
                     self.primary_track_id = None
+                    self.last_primary_odom = None
                 else:
                     self.publish_odom(primary_track, msg.header.stamp, msg.header.frame_id)
 
@@ -784,14 +792,35 @@ class TargetDetector(Node):
         self.target_marker_pub.publish(marker_array)
 
     def publish_odom(self, track: Track, stamp, sensor_frame_id):
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        x = float(track.state[0])
+        y = float(track.state[1])
+
+        if self.last_primary_odom is not None:
+            last_x, last_y, last_sec = self.last_primary_odom
+            dt = max(now_sec - last_sec, 0.01)
+            jump_dist = math.sqrt((x - last_x)**2 + (y - last_y)**2)
+            jump_speed = jump_dist / dt
+            allowed_dist = max(self.primary_jump_distance, self.primary_jump_speed * dt + 0.2)
+
+            if jump_dist > allowed_dist:
+                self.get_logger().warn(
+                    f"Primary target Track {track.id} jumped {jump_dist:.2f}m "
+                    f"({jump_speed:.2f}m/s). Unlocking to avoid following a wrong target."
+                )
+                if track.id == self.primary_track_id:
+                    self.primary_track_id = None
+                self.last_primary_odom = None
+                return
+
         odom_msg = Odometry()
         odom_msg.header.stamp = stamp
         odom_msg.header.frame_id = 'map'
         odom_msg.child_frame_id = 'npc/base_link'
 
         # Position
-        odom_msg.pose.pose.position.x = track.state[0]
-        odom_msg.pose.pose.position.y = track.state[1]
+        odom_msg.pose.pose.position.x = x
+        odom_msg.pose.pose.position.y = y
         odom_msg.pose.pose.position.z = 0.0
 
         # Orientation (角度)
@@ -823,6 +852,7 @@ class TargetDetector(Node):
         odom_msg.twist.twist.linear.y = map_vy
 
         self.odom_pub.publish(odom_msg)
+        self.last_primary_odom = (x, y, now_sec)
 
     def publish_range_marker(self, frame_id, stamp):
         # 検出範囲マーカー（必要に応じて動作）

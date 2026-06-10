@@ -47,9 +47,10 @@ class FaceClient:
 
     def send_speak(self, text):
         """指定したテキストを喋らせる (gRPC ポート 50052)"""
-        # TTSが「0人」を不自然に読むことがあるので、読み上げ用にだけ整形する
-        text = re.sub(r"0\s*人", "ゼロ人", text)
         print(f"{_color('Command >', _CYAN)} {_color('[Speech]', _GREEN)} {text}")
+        # TTS読み上げ用にだけ整形する。表示やログでは元の表記を保つ。
+        tts_text = re.sub(r"0\s*人", "ゼロ人", text)
+        tts_text = tts_text.replace("追従", "ついじゅう")
         if not self._should_attempt_connection():
             return False
 
@@ -63,7 +64,7 @@ class FaceClient:
 
             with grpc.insecure_channel('localhost:50052') as channel:
                 stub = face_control_pb2_grpc.PythonControlServiceStub(channel)
-                req = face_control_pb2.SpeakRequest(text=text)
+                req = face_control_pb2.SpeakRequest(text=tts_text)
                 stub.Speak(req, timeout=3.0)
                 self.face_server_active = True
                 return True

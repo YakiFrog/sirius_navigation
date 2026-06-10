@@ -76,6 +76,7 @@ class TargetFollower(Node):
         self.tracking_lost_reported = False
         self.tracking_soft_far_reported = False
         self.tracking_far_reported = False
+        self.tracking_waiting_reported = False
 
         
         # 制御ループタイマーの開始
@@ -102,12 +103,14 @@ class TargetFollower(Node):
                     self.tracking_lost_reported = False
                     self.tracking_soft_far_reported = False
                     self.tracking_far_reported = False
+                    self.tracking_waiting_reported = False
                 # 追従が無効化された場合は、現在動いているロボットを即座に停止する
                 if not self.enable_following:
                     self.has_seen_target_while_following = False
                     self.tracking_lost_reported = False
                     self.tracking_soft_far_reported = False
                     self.tracking_far_reported = False
+                    self.tracking_waiting_reported = False
                     self.cancel_current_goal()
             elif param.name == 'follow_distance':
                 self.follow_distance = param.value
@@ -144,10 +147,11 @@ class TargetFollower(Node):
         if self.enable_following:
             if self.tracking_lost_reported:
                 self.publish_status("tracking_recovered")
+                self.tracking_soft_far_reported = False
+                self.tracking_far_reported = False
             self.has_seen_target_while_following = True
             self.tracking_lost_reported = False
-            self.tracking_soft_far_reported = False
-            self.tracking_far_reported = False
+            self.tracking_waiting_reported = False
 
     def publish_status(self, status: str):
         msg = String()
@@ -193,6 +197,9 @@ class TargetFollower(Node):
         # ターゲットの位置情報がまだ届いていない場合は待機
         now = self.get_clock().now()
         if self.target_pose is None:
+            if not self.tracking_waiting_reported:
+                self.publish_status("tracking_waiting")
+                self.tracking_waiting_reported = True
             self.get_logger().info("トピック /npc/odom からターゲット位置が届くのを待っています...", throttle_duration_sec=5.0)
             return
 

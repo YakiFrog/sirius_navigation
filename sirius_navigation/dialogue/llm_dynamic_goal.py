@@ -123,6 +123,7 @@ class LlmDynamicGoal(Node):
         self.surrounding_people_count = 0
         self.current_expression = "normal"
         self.current_humor_level = DEFAULT_HUMOR_LEVEL
+        self.target_follow_status_last_spoken = {}
         self.marker_array_sub = self.create_subscription(
             MarkerArray,
             '/target_detector/target_markers',
@@ -354,16 +355,35 @@ class LlmDynamicGoal(Node):
         with self.lock:
             self.surrounding_people_count = len(tracked_ids)
 
+    def should_speak_target_follow_status(self, status_key: str, cooldown_sec: float) -> bool:
+        now = time.time()
+        last_time = self.target_follow_status_last_spoken.get(status_key, 0.0)
+        if now - last_time < cooldown_sec:
+            return False
+        self.target_follow_status_last_spoken[status_key] = now
+        return True
+
     def target_follow_status_callback(self, msg):
         """追従ノードからの状態通知を受けて、人に分かる形で報告する。"""
         if msg.data == "tracking_lost":
             self.get_logger().warning("[TargetFollow] tracking target lost")
+            if not self.should_speak_target_follow_status("tracking_lost", 5.0):
+                return
             self.send_sirius_speak("[sad]追従対象を見失ったのだ。いったん停止するのだ。")
         elif msg.data == "tracking_recovered":
             self.get_logger().info("[TargetFollow] tracking target recovered")
+            if not self.should_speak_target_follow_status("tracking_recovered", 5.0):
+                return
             self.send_sirius_speak("[happy]追従対象を見つけたのだ。追従を再開するのだ。")
+        elif msg.data == "tracking_waiting":
+            self.get_logger().warning("[TargetFollow] no tracking target available yet")
+            if not self.should_speak_target_follow_status("tracking_waiting", 10.0):
+                return
+            self.send_sirius_speak("[sad]今は追従できる人を見つけられていないのだ。僕の前に来てから、もう一度言ってほしいのだ。")
         elif msg.data.startswith("tracking_soft_far"):
             self.get_logger().warning(f"[TargetFollow] tracking target is getting far: {msg.data}")
+            if not self.should_speak_target_follow_status("tracking_soft_far", 20.0):
+                return
             self.send_sirius_speak("[cry]あんまり僕から離れないでね、追いかけるのちょっと大変なのだ。")
         elif msg.data.startswith("tracking_far"):
             distance_text = ""
@@ -373,6 +393,8 @@ class LlmDynamicGoal(Node):
             except (ValueError, TypeError):
                 pass
             self.get_logger().warning(f"[TargetFollow] tracking target is far: {msg.data}")
+            if not self.should_speak_target_follow_status("tracking_far", 15.0):
+                return
             self.send_sirius_speak(f"[surprised]{distance_text}それ以上離れたら見失うかもしれないのだ。")
 
     def battery_status_callback(self, msg):
@@ -2045,6 +2067,26 @@ class LlmDynamicGoal(Node):
     def handle_follow_me_instruction(self, instruction: str) -> bool:
         """「ついてきて」を、検出済みプライマリターゲットへの追従開始に割り当てる。"""
         normalized = instruction.strip().replace(" ", "").replace("　", "").lower()
+        stop_follow_keywords = [
+            "もういいよ",
+            "もういい",
+            "ついてこないで",
+            "付いてこないで",
+            "ついてくるのやめて",
+            "付いてくるのやめて",
+            "追従終了",
+            "追従やめ",
+            "追従停止",
+            "followstop",
+            "stopfollowing",
+        ]
+        if any(keyword.lower().replace(" ", "") in normalized for keyword in stop_follow_keywords):
+            self.get_logger().info("Stop-follow keyword detected. Disabling target_follower.")
+            self.set_target_following(False, speak_on_failure=False)
+            self.cancel_navigation(clear_queue=True, preserve_current_goal=False)
+            self.send_sirius_speak("[happy]了解、ついていくのを終わるのだ。")
+            return True
+
         follow_keywords = [
             "ついてきて",
             "付いてきて",
