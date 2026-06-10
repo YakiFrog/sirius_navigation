@@ -404,6 +404,9 @@ class LlmDynamicGoal(Node):
         # 全角英数字などを半角に正規化 (例: "１０ｍ" -> "10m", "０．５" -> "0.5")
         instruction = normalize_instruction_text(instruction)
 
+        if self.handle_follow_me_instruction(instruction):
+            return
+
         if self.handle_manual_teleop_instruction(instruction):
             return
         
@@ -411,6 +414,7 @@ class LlmDynamicGoal(Node):
         cancel_keywords = ["キャンセル", "cancel", "中止", "取り消", "とりけし"]
         if any(kw in instruction.lower() for kw in cancel_keywords):
             self.get_logger().warning("Cancel keyword detected. Clearing active goal.")
+            self.set_target_following(False, speak_on_failure=False)
             self.publish_nav_control("cancel")
             self.cancel_navigation(clear_queue=True, preserve_current_goal=False)
             self.send_sirius_speak("[sad]了解、目標を取り消したのだ。")
@@ -419,6 +423,7 @@ class LlmDynamicGoal(Node):
         stop_keywords = ["止ま", "とまれ", "止め", "とめ", "ストップ", "停止", "stop", "とまって", "待機"]
         if any(kw in instruction.lower() for kw in stop_keywords):
             self.get_logger().warning("Stop keyword detected. Pausing active goal.")
+            self.set_target_following(False, speak_on_failure=False)
             self.publish_nav_control("pause")
             self.cancel_navigation(preserve_current_goal=True)
             self.send_sirius_speak("[surprised]了解、止まるのだ！")
@@ -453,6 +458,7 @@ class LlmDynamicGoal(Node):
         is_cancel = result.get("cancel", False)
         if is_cancel:
             self.get_logger().warning("LLM interpreted instruction as STOP/CANCEL.")
+            self.set_target_following(False, speak_on_failure=False)
             self.publish_nav_control("cancel")
             self.cancel_navigation(clear_queue=True, preserve_current_goal=False)
             self.send_sirius_speak("[sad]了解、目標を取り消したのだ。")
@@ -547,6 +553,7 @@ class LlmDynamicGoal(Node):
         
         # 進行中の動作があれば、新しいコマンドを開始する前に一度キャンセルして停止させる（割り込み処理）
         if any(c.get("type") in ["forward", "backward", "turn", "spin", "face", "goto"] for c in sorted_commands):
+            self.set_target_following(False, speak_on_failure=False)
             self.publish_nav_control("pause_silent")
         self.cancel_navigation(clear_queue=False)
         
@@ -2007,6 +2014,66 @@ class LlmDynamicGoal(Node):
             self.get_logger().info(f"[AssistedTeleop] action finished status={result.status}")
         except Exception as exc:
             self.get_logger().warning(f"[AssistedTeleop] action result error: {exc}")
+
+    def handle_follow_me_instruction(self, instruction: str) -> bool:
+        """「ついてきて」を、検出済みプライマリターゲットへの追従開始に割り当てる。"""
+        normalized = instruction.strip().replace(" ", "").replace("　", "").lower()
+        follow_keywords = [
+            "ついてきて",
+            "付いてきて",
+            "ついて来て",
+            "付いて来て",
+            "ついてきな",
+            "ついておいで",
+            "ついて来な",
+            "followme",
+        ]
+        if not any(keyword.lower().replace(" ", "") in normalized for keyword in follow_keywords):
+            return False
+
+        self.get_logger().info("Follow-me keyword detected. Enabling target_follower.")
+        self.publish_nav_control("pause_silent")
+        self.cancel_navigation(clear_queue=True, preserve_current_goal=False)
+        if self.set_target_following(True):
+            self.send_sirius_speak("[happy]了解、ロックしている人についていくのだ！")
+        return True
+
+    def set_target_following(self, enabled: bool, speak_on_failure: bool = True) -> bool:
+        """target_follower を常駐ノードとして扱い、追従のON/OFFだけを切り替える。"""
+        srv_name = "/target_follower/set_parameters"
+        client = self.create_client(SetParameters, srv_name)
+
+        if not client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warning(f"Service {srv_name} not available. target_follower may not be running.")
+            if enabled and speak_on_failure:
+                self.send_sirius_speak("[sad]追従ノードが起動していないのだ。先に人検知と追従ノードを起動してほしいのだ。")
+            return False
+
+        req = SetParameters.Request()
+        param = Parameter()
+        param.name = "enable_following"
+        p_val = ParameterValue()
+        p_val.type = ParameterType.PARAMETER_BOOL
+        p_val.bool_value = bool(enabled)
+        param.value = p_val
+        req.parameters.append(param)
+
+        future = client.call_async(req)
+        future.add_done_callback(
+            lambda fut, state=enabled: self._target_following_param_callback(fut, state)
+        )
+        return True
+
+    def _target_following_param_callback(self, future, enabled: bool):
+        try:
+            response = future.result()
+            if response.results and not all(result.successful for result in response.results):
+                reasons = ", ".join(result.reason for result in response.results if result.reason)
+                self.get_logger().warning(f"[TargetFollow] failed to set enable_following={enabled}: {reasons}")
+                return
+            self.get_logger().info(f"[TargetFollow] enable_following set to {enabled}")
+        except Exception as exc:
+            self.get_logger().error(f"[TargetFollow] parameter update failed: {exc}")
 
     def handle_manual_teleop_instruction(self, instruction: str) -> bool:
         """Remote Controller のタッチ操縦JSONをTwistへ変換する。"""
