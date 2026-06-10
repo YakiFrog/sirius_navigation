@@ -190,6 +190,7 @@ class LlmDynamicGoal(Node):
         self.assisted_drive_distance_source = "unknown"
         self.assisted_drive_blocked_reported = False
         self.assisted_drive_last_route_log_time = 0.0
+        self.assisted_drive_last_commanded_x = 0.0
         self.assisted_drive_timer = self.create_timer(0.1, self.timer_assisted_drive_publisher)
         
         # 1Hzで自己位置と目標位置の距離を監視するタイマー
@@ -209,6 +210,9 @@ class LlmDynamicGoal(Node):
     def start_http_instruction_server(self):
         from http.server import BaseHTTPRequestHandler, HTTPServer
         import json
+
+        class ReusableHTTPServer(HTTPServer):
+            allow_reuse_address = True
         
         class InstructionHTTPHandler(BaseHTTPRequestHandler):
             node = self
@@ -240,7 +244,7 @@ class LlmDynamicGoal(Node):
         def run_server():
             server_address = ('', 50060)
             try:
-                httpd = HTTPServer(server_address, InstructionHTTPHandler)
+                httpd = ReusableHTTPServer(server_address, InstructionHTTPHandler)
                 self.get_logger().info("=== Instruction HTTP Server running on port 50060 ===")
                 httpd.serve_forever()
             except Exception as e:
@@ -2060,29 +2064,34 @@ class LlmDynamicGoal(Node):
     def publish_assisted_drive_twist(self, twist: Twist):
         """前後移動の速度指令を publish する。
 
-        通常は behavior_server の AssistedTeleop 入力に流す。
-        障害物回避を迂回しないように、cmd_vel への直接フォールバックはしない。
+        AssistedTeleop 入力へも流しつつ、現在の twist_mux が見ている
+        cmd_vel_direct にも流して実機の /cmd_vel まで到達させる。
+        前後移動中の近接障害物停止は timer_assisted_drive_publisher 側で行う。
         """
         self.cmd_vel_teleop_pub.publish(twist)
+        self.cmd_vel_direct_pub.publish(twist)
 
         teleop_subscribers = self.cmd_vel_teleop_pub.get_subscription_count()
+        direct_subscribers = self.cmd_vel_direct_pub.get_subscription_count()
         now = self.get_clock().now().nanoseconds / 1e9
-        if teleop_subscribers == 0:
-            with self.lock:
-                should_log = now - self.assisted_drive_last_route_log_time > 1.0
-                if should_log:
-                    self.assisted_drive_last_route_log_time = now
+        with self.lock:
+            should_log = now - self.assisted_drive_last_route_log_time > 1.0
             if should_log:
-                self.get_logger().warning(
-                    "[AssistDrive] cmd_vel_teleop has no subscribers. "
-                    "Not publishing fallback directly to cmd_vel because obstacle avoidance would be bypassed."
+                self.assisted_drive_last_route_log_time = now
+
+        if should_log:
+            if direct_subscribers > 0:
+                self.get_logger().info(
+                    f"[AssistDrive] publishing to cmd_vel_direct "
+                    f"(direct_subscribers={direct_subscribers}, "
+                    f"teleop_subscribers={teleop_subscribers}, linear.x={twist.linear.x:.2f})"
                 )
-        else:
-            with self.lock:
-                should_log = now - self.assisted_drive_last_route_log_time > 1.0
-                if should_log:
-                    self.assisted_drive_last_route_log_time = now
-            if should_log:
+            elif teleop_subscribers == 0:
+                self.get_logger().warning(
+                    "[AssistDrive] no subscribers on cmd_vel_direct or cmd_vel_teleop. "
+                    "Velocity command may not reach the robot."
+                )
+            else:
                 self.get_logger().info(
                     f"[AssistDrive] publishing to cmd_vel_teleop "
                     f"(subscribers={teleop_subscribers}, linear.x={twist.linear.x:.2f})"
@@ -2106,6 +2115,8 @@ class LlmDynamicGoal(Node):
 
     def start_assisted_drive(self, direction: float, distance: float, should_speak: bool = True):
         """前後移動を assisted teleop 系の速度指示に切り替える。"""
+        self.ensure_assisted_teleop_goal()
+
         try:
             if isinstance(distance, dict):
                 distance = distance.get("value", 1.0)
@@ -2144,6 +2155,7 @@ class LlmDynamicGoal(Node):
             self.assisted_drive_distance_source = distance_source
             self.assisted_drive_blocked_reported = False
             self.assisted_drive_last_route_log_time = 0.0
+            self.assisted_drive_last_commanded_x = 0.0
 
         if should_speak:
             if direction > 0.0:
@@ -2172,6 +2184,7 @@ class LlmDynamicGoal(Node):
             self.assisted_drive_start_y = None
             self.assisted_drive_distance_source = "unknown"
             self.assisted_drive_blocked_reported = False
+            self.assisted_drive_last_commanded_x = 0.0
 
         if should_publish_stop:
             self.publish_assisted_drive_twist(Twist())
@@ -2188,6 +2201,7 @@ class LlmDynamicGoal(Node):
             start_y = self.assisted_drive_start_y
             distance_source = self.assisted_drive_distance_source
             blocked_reported = self.assisted_drive_blocked_reported
+            last_commanded_x = self.assisted_drive_last_commanded_x
             last_type = self.last_active_cmd_type
             obs_dists = dict(getattr(self, 'obstacle_distances', {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}))
 
@@ -2213,7 +2227,16 @@ class LlmDynamicGoal(Node):
         nearest_back = obs_dists.get("back", 999.0)
         blocked_dist = nearest_back if direction < 0.0 else nearest_front
         blocked_side = "後方" if direction < 0.0 else "前方"
-        if blocked_dist < 0.40:
+        hard_stop_dist = 0.34
+        slow_start_dist = 0.85 if direction < 0.0 else 0.70
+        min_creep_speed = 0.055
+        target_speed = speed
+        if blocked_dist < slow_start_dist:
+            denom = max(slow_start_dist - hard_stop_dist, 0.01)
+            scale = max(0.0, min(1.0, (blocked_dist - hard_stop_dist) / denom))
+            target_speed = max(min_creep_speed, speed * scale)
+
+        if blocked_dist <= hard_stop_dist:
             if not blocked_reported:
                 with self.lock:
                     self.assisted_drive_blocked_reported = True
@@ -2249,7 +2272,16 @@ class LlmDynamicGoal(Node):
             return
 
         twist = Twist()
-        twist.linear.x = speed * direction
+        target_x = target_speed * direction
+        max_delta_per_tick = 0.025
+        delta = target_x - last_commanded_x
+        if abs(delta) > max_delta_per_tick:
+            target_x = last_commanded_x + math.copysign(max_delta_per_tick, delta)
+
+        with self.lock:
+            self.assisted_drive_last_commanded_x = target_x
+
+        twist.linear.x = target_x
         self.publish_assisted_drive_twist(twist)
 
     def resume_navigation(self):
