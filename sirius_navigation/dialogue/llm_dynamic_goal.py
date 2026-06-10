@@ -471,6 +471,21 @@ class LlmDynamicGoal(Node):
                     deg_value = math.degrees(c_value)
                     self.get_logger().warning(f"Sanitizer: Detected 'spin' with small float value {c_value}. Converting radians to degrees: {deg_value:.1f}.")
                     cmd = {"type": "spin", "value": deg_value}
+
+            if cmd.get("type") == "turn" and isinstance(cmd.get("value"), (int, float)):
+                has_left = any(word in instruction for word in ["左", "hidari", "ひだり", "left"])
+                has_right = any(word in instruction for word in ["右", "migi", "みぎ", "right"])
+                turn_val = float(cmd.get("value"))
+                if has_left and not has_right and turn_val < 0.0:
+                    self.get_logger().warning(
+                        f"Sanitizer: instruction indicates LEFT but turn value was {turn_val:.4f}; flipping sign."
+                    )
+                    cmd = {"type": "turn", "value": abs(turn_val)}
+                elif has_right and not has_left and turn_val > 0.0:
+                    self.get_logger().warning(
+                        f"Sanitizer: instruction indicates RIGHT but turn value was {turn_val:.4f}; flipping sign."
+                    )
+                    cmd = {"type": "turn", "value": -abs(turn_val)}
                     
             sanitized_commands.append(cmd)
         commands = sanitized_commands

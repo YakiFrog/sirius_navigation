@@ -239,5 +239,20 @@ class TestLocalParser(unittest.TestCase):
             self.assertEqual(c["type"], "turn")
             self.assertAlmostEqual(c["value"], -1.570796, places=4)
 
+    def test_one_full_rotation(self):
+        res = parse_local_rules("左向きに1周して", self.state_info)
+        self.assertIsNotNone(res)
+        commands = res.get("commands", [])
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["type"], "spin")
+        self.assertAlmostEqual(commands[0]["value"], 360.0, places=4)
+
+        res = parse_local_rules("右向きに1周して", self.state_info)
+        self.assertIsNotNone(res)
+        commands = res.get("commands", [])
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["type"], "spin")
+        self.assertAlmostEqual(commands[0]["value"], -360.0, places=4)
+
 if __name__ == '__main__':
     unittest.main()

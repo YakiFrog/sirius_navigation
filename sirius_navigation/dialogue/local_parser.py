@@ -467,7 +467,7 @@ def parse_part(part_raw):
             return {"type": "face", "value": angle}
 
     # 4. Turn/Spin with numbers
-    angle_match = re.search(r"(\d+(?:\.\d+)?)\s*(度|deg|°|rad|ラジアン|回転|旋回)", part_norm)
+    angle_match = re.search(r"(\d+(?:\.\d+)?)\s*(度|deg|°|rad|ラジアン|回転|旋回|周)", part_norm)
     if not angle_match:
         angle_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:に)?\s*(右|左|migi|hidari|旋回|回転|時計回り|反時計回り)", part_norm)
         
@@ -488,7 +488,7 @@ def parse_part(part_raw):
                 return {"type": "turn", "value": rad_val}
         else:
             unit_str = angle_match.group(2) if len(angle_match.groups()) > 1 else ""
-            if unit_str in ["回転", "旋回"]:
+            if unit_str in ["回転", "旋回", "周"]:
                 deg_val = val * 360.0 * direction_sign
                 return {"type": "spin", "value": deg_val}
             
@@ -543,10 +543,12 @@ def parse_no_number_part(part_raw):
     is_left = any(pat in part_norm for pat in ["左", "hidari", "ひだり", "ひだりむ"])
     is_back = any(pat in part_norm for pat in ["後ろ", "うしろ", "ushiro", "裏", "うら"])
 
-    if any(x in part_norm for x in ["旋回", "回転", "senkai", "spin", "まわ", "回っ", "回って"]):
+    if any(x in part_norm for x in ["旋回", "回転", "senkai", "spin", "まわ", "回っ", "回って", "周", "一周", "1周"]):
         deg = 360.0
         if is_right or "時計回り" in part_norm:
             deg = -360.0
+        if is_left or "反時計回り" in part_norm:
+            deg = 360.0
         return {"type": "spin", "value": deg}
     
     if (is_right or is_left or is_back) and not (contains_forward_intent(part_norm) or contains_any(part_norm, BACKWARD_PATTERNS)):
