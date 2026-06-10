@@ -2367,18 +2367,34 @@ class LlmDynamicGoal(Node):
 
     def get_battery_report_string(self):
         """face_client を優先し、失敗時は BLE Gateway の ROS キャッシュからバッテリー状態を返す"""
-        status = self.face_client.get_battery_status()
-        if status is None:
+        def cached_status():
             with self.lock:
                 cached = dict(self.latest_battery_status) if self.latest_battery_status else None
                 cache_age = time.time() - self.latest_battery_status_time
-            if cached and cache_age <= 30.0:
-                level = float(cached.get("battery_level", -1.0))
-                charging_val = 1.0 if cached.get("is_charging") else 2.0
-            else:
+            if not cached or cache_age > 30.0:
+                return None
+            level = float(cached.get("battery_level", -1.0))
+            if level < 0.0:
+                return None
+            charging_val = 1.0 if cached.get("is_charging") else 2.0
+            return level, charging_val
+
+        status = self.face_client.get_battery_status()
+        if status is None:
+            status = cached_status()
+            if status is None:
                 return DIALOGUE_TEMPLATES.get("battery_fail", "[sad]バッテリー状態が確認できないのだ。")
-        else:
-            level, charging_val = status
+
+        level, charging_val = status
+        if level < 0.0:
+            cached = cached_status()
+            if cached is not None:
+                level, charging_val = cached
+            else:
+                self.get_logger().warning(
+                    "Face battery status returned invalid level and no fresh /sirius/battery_status cache is available."
+                )
+                return DIALOGUE_TEMPLATES.get("battery_error", "[sad]バッテリー残量データが不正なのだ。")
 
         if level < 0.0:
             return DIALOGUE_TEMPLATES.get("battery_error", "[sad]バッテリー残量データが不正なのだ。")
