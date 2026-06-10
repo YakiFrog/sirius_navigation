@@ -178,7 +178,7 @@ class LandmarkManager:
         return None
 
     def find_all_landmarks_in_instruction(self, instruction):
-        """指示文に含まれるすべてのランドマークを出現順に取得する"""
+        """指示文に含まれるすべてのランドマークを出現順に取得する（仮想の「原点」を含む）"""
         self.load_landmarks_for_current_map()
         normalized = self.normalize_landmark_key(instruction)
         
@@ -195,6 +195,23 @@ class LandmarkManager:
                 if landmark:
                     matches.append((idx, landmark))
                 start = idx + len(alias_key)
+
+        # 仮想の「原点/ホーム」の抽出
+        origin_keywords = ["原点", "げんてん", "ホーム", "ほーむ", "home"]
+        for kw in origin_keywords:
+            start = 0
+            while True:
+                idx = normalized.find(kw, start)
+                if idx == -1:
+                    break
+                virtual_landmark = {
+                    "name": "原点",
+                    "x": 0.0,
+                    "y": 0.0,
+                    "yaw": 0.0
+                }
+                matches.append((idx, virtual_landmark))
+                start = idx + len(kw)
                 
         # 出現インデックス順に並べ替え
         matches.sort(key=lambda x: x[0])
@@ -335,7 +352,7 @@ class LandmarkManager:
         normalized = self.normalize_landmark_key(instruction)
         
         patterns = [
-            r"ここを(.+?)(?:として)?(?:登録|保存|記憶|記録|おぼえて|覚えて|設定)",
+            r"ここを(.+?)(?:として|と|に)?(?:登録|保存|記憶|記録|おぼえて|覚えて|設定)",
             r"ここを(.+?)(?:に|と)(?:して|決定|覚える|記憶)",
         ]
         
@@ -346,6 +363,13 @@ class LandmarkManager:
                 target_name = m.group(1).strip()
                 break
                 
+        if target_name:
+            # 助詞などの余分な語尾をトリミングする安全策
+            for suffix in ["として", "と", "に"]:
+                if target_name.endswith(suffix):
+                    target_name = target_name[:-len(suffix)]
+                    break
+
         if not target_name:
             return False
 
@@ -356,6 +380,95 @@ class LandmarkManager:
         self.node.cancel_navigation(clear_queue=True, preserve_current_goal=False)
         
         ok, speak = self.register_current_pose_as_landmark(target_name)
+        self.node.llm_client._append_dialogue_history(instruction, speak)
+        self.node.send_sirius_speak(speak)
+        return True
+
+    def remove_landmark_by_name(self, name: str):
+        """指定された名前のランドマークを sim.yaml から削除する"""
+        yaml_path = getattr(self, 'landmark_file_path', None)
+        if not yaml_path or not os.path.exists(yaml_path):
+            possible_paths = [
+                "/home/kotantu-desktop/sirius_jazzy_ws/maps_waypoints/landmarks/sim.yaml",
+                "/home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/maps_waypoints/landmarks/sim.yaml"
+            ]
+            for p in possible_paths:
+                if os.path.exists(p):
+                    yaml_path = p
+                    break
+        
+        if not yaml_path or not os.path.exists(yaml_path):
+            return False, "[sad]ランドマーク定義ファイルが見つからないのだ。"
+
+        try:
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            return False, f"[sad]ファイルの読み込みに失敗したのだ。{e}"
+
+        if "landmarks" not in data or not data["landmarks"]:
+            return False, f"[sad]『{name}』というランドマークは登録されていないのだ。"
+
+        # 対象ランドマークをリストから除去
+        original_len = len(data["landmarks"])
+        data["landmarks"] = [lm for lm in data["landmarks"] if lm.get("name") != name]
+        
+        if len(data["landmarks"]) == original_len:
+            return False, f"[sad]『{name}』というランドマークは登録されていないのだ。"
+
+        try:
+            with open(yaml_path, 'w', encoding='utf-8') as f:
+                yaml.safe_dump(data, f, allow_unicode=True, default_flow_style=False)
+        except Exception as e:
+            return False, f"[sad]ファイルの保存に失敗したのだ。{e}"
+
+        # メモリ内のランドマーク情報をリロード
+        self.load_landmarks_for_current_map(force=True)
+        # RVizマーカー更新 (不要になったマーカーは自動的にDELETEされる)
+        self.publish_landmark_markers()
+        self.publish_landmark_status()
+
+        return True, f"[happy]『{name}』の登録を消したで！"
+
+    def handle_landmark_deletion_instruction(self, instruction):
+        """「リビングの登録を消して」のような削除指令をルールベースでパースする"""
+        normalized = self.normalize_landmark_key(instruction)
+        
+        patterns = [
+            r"(.+?)(?:の登録|のランドマーク)?を(?:消して|削除|取り消して|クリア|消去)",
+            r"(.+?)(?:の登録|のランドマーク)?(?:取り消し|削除|消去)",
+        ]
+        
+        target_name = None
+        for pat in patterns:
+            m = re.search(pat, normalized)
+            if m:
+                target_name = m.group(1).strip()
+                break
+                
+        # 登録指令や他の指令に誤爆しないようフィルタ
+        if not target_name or any(w in normalized for w in ["ここを", "行って", "向かって", "経由"]):
+            return False
+
+        # 存在するランドマーク名か判定
+        canonical_key = self.normalize_landmark_key(target_name)
+        if canonical_key not in self.landmarks and canonical_key not in self.landmark_aliases:
+            return False
+
+        # エイリアスの解決
+        resolved_key = self.landmark_aliases.get(canonical_key, canonical_key)
+        landmark = self.landmarks.get(resolved_key)
+        if not landmark:
+            return False
+        
+        target_name = landmark["name"]
+        self.node.get_logger().info(f"[Landmark] Voice deletion requested for landmark name: {target_name}")
+        
+        self.node.set_target_following(False, speak_on_failure=False)
+        self.node.publish_nav_control("pause_silent")
+        self.node.cancel_navigation(clear_queue=True, preserve_current_goal=False)
+        
+        ok, speak = self.remove_landmark_by_name(target_name)
         self.node.llm_client._append_dialogue_history(instruction, speak)
         self.node.send_sirius_speak(speak)
         return True
