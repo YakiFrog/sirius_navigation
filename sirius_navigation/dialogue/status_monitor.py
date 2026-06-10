@@ -59,6 +59,7 @@ class SiriusStatusMonitor(Node):
         "直前の動作状態",
         "経路実行中かどうか",
         "障害物で停止中かどうか",
+        "何を覚えているか / 何を忘れているか",
     ]
 
     MOVE_CAPABILITIES = [
@@ -109,6 +110,10 @@ class SiriusStatusMonitor(Node):
         landmark_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         landmark_qos.reliability = ReliabilityPolicy.RELIABLE
         self.create_subscription(String, '/sirius/landmark_status', self.landmark_status_callback, landmark_qos)
+        self.active_command = None
+        self.command_queue = []
+        self.command_history = []
+        self.create_subscription(String, '/sirius/command_queue', self.queue_callback, landmark_qos)
         self.create_subscription(LaserScan, '/hokuyo_scan', lambda msg: self.scan_callback(msg, '/hokuyo_scan'), 10)
         self.create_subscription(LaserScan, '/scan3', lambda msg: self.scan_callback(msg, '/scan3'), 10)
         self.obstacle_distances = {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}
@@ -121,6 +126,15 @@ class SiriusStatusMonitor(Node):
             '/scan3': deque(maxlen=40),
         }
         self._last_scan_hz_time = {}
+
+    def queue_callback(self, msg):
+        try:
+            data = json.loads(msg.data)
+            self.active_command = data.get("active")
+            self.command_queue = data.get("queue", [])
+            self.command_history = data.get("history", [])
+        except Exception:
+            pass
 
     def odom_callback(self, msg):
         self.current_vel_x = msg.twist.twist.linear.x
@@ -331,6 +345,15 @@ class SiriusStatusMonitor(Node):
             joined += f", ... +{len(names) - 6}"
         return f"map={map_name} / {count} loaded: {joined}"
 
+    def _format_memory(self):
+        landmarks = self.landmark_status.get("names", [])
+        active = self.active_command.get("name", "idle") if isinstance(self.active_command, dict) else "idle"
+        queue_len = len(self.command_queue)
+        history_len = len(self.command_history)
+        goal_text = "none" if self.active_goal is None else "active"
+        landmark_text = "none" if not landmarks else f"{len(landmarks)} landmarks"
+        return f"goal={goal_text} / active={active} / queue={queue_len} / history={history_len} / landmarks={landmark_text}"
+
     def _direction_from_angle(self, angle_deg):
         if -20.0 <= angle_deg <= 20.0:
             return "front"
@@ -435,6 +458,7 @@ class SiriusStatusMonitor(Node):
             "scan_hz": self._format_scan_hz(now),
             "footprint": self._format_footprint(),
             "landmarks": self._format_landmarks(),
+            "memory": self._format_memory(),
             "people": str(self.surrounding_people_count),
             "face": f"{'on' if self.face_active else 'off'} / {self.current_expression}",
             "battery": self._battery_cache_text,
@@ -600,7 +624,7 @@ class StatusMonitorWidget(QWidget):
 
         # PyQt5 ウィンドウの基本設定
         self.setWindowTitle("Sirius Telemetry Status Monitor")
-        self.resize(900, 600)
+        self.resize(930, 680)
 
         # プレミアムダークテーマスタイルシート
         self.setStyleSheet("""
@@ -704,7 +728,42 @@ class StatusMonitorWidget(QWidget):
             self.grid_layout.addWidget(val_lbl, idx, 1)
 
         left_layout.addLayout(self.grid_layout)
-        left_layout.addStretch()
+        
+        # Command Queue Visualizer Section
+        queue_sec = QFrame()
+        queue_sec.setStyleSheet("background-color: #1a1a1c; border-radius: 6px; padding: 10px; margin-top: 10px;")
+        queue_sec_layout = QVBoxLayout(queue_sec)
+        
+        queue_title = QLabel("📋 Execution Command Queue / History")
+        queue_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #fbc531;")
+        queue_sec_layout.addWidget(queue_title)
+        
+        self.active_cmd_lbl = QLabel("Active: Idle")
+        self.active_cmd_lbl.setStyleSheet("""
+            background-color: #272822;
+            color: #75715e;
+            font-weight: bold;
+            font-size: 12px;
+            padding: 6px;
+            border-radius: 4px;
+            border: 1px solid #3e3d32;
+        """)
+        queue_sec_layout.addWidget(self.active_cmd_lbl)
+        
+        queue_scroll = QScrollArea()
+        queue_scroll.setFixedHeight(120)
+        queue_scroll.setWidgetResizable(True)
+        
+        self.queue_list_widget = QWidget()
+        self.queue_list_layout = QVBoxLayout(self.queue_list_widget)
+        self.queue_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.queue_list_layout.setSpacing(4)
+        self.queue_list_layout.addStretch() # bottom anchor
+        
+        queue_scroll.setWidget(self.queue_list_widget)
+        queue_sec_layout.addWidget(queue_scroll)
+        
+        left_layout.addWidget(queue_sec)
 
         # アクションエリア
         button_layout = QHBoxLayout()
@@ -812,6 +871,64 @@ class StatusMonitorWidget(QWidget):
         self.radar_widget.set_distances(self.node.obstacle_distances)
         self.radar_widget.set_points(self.node.obstacle_points)
 
+        # コマンドキュー/履歴の表示更新
+        active = self.node.active_command
+        if active:
+            self.active_cmd_lbl.setText(f"Active: {active.get('name', 'Executing')} [{active.get('time', '')}]")
+            self.active_cmd_lbl.setStyleSheet("""
+                background-color: #1e272c;
+                color: #2ecc71;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 6px;
+                border-radius: 4px;
+                border: 1px solid #2ecc71;
+            """)
+        else:
+            self.active_cmd_lbl.setText("Active: Idle")
+            self.active_cmd_lbl.setStyleSheet("""
+                background-color: #272822;
+                color: #75715e;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 6px;
+                border-radius: 4px;
+                border: 1px solid #3e3d32;
+            """)
+
+        # Clear queue scroll layout children (except the stretch at bottom)
+        while self.queue_list_layout.count() > 1:
+            child = self.queue_list_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        # Add upcoming queue items
+        for cmd in self.node.command_queue:
+            lbl = QLabel(f"  ➜ {cmd.get('name', 'Command')}")
+            lbl.setStyleSheet("color: #00d2ff; font-size: 11px; font-weight: bold;")
+            self.queue_list_layout.insertWidget(self.queue_list_layout.count() - 1, lbl)
+
+        # Add command history items (most recent first)
+        for cmd in reversed(self.node.command_history):
+            status = cmd.get("status", "unknown")
+            time_str = cmd.get("time", "")
+            name_str = cmd.get("name", "Command")
+            
+            if status == "completed":
+                lbl = QLabel(f"  ✓ {name_str} ({time_str})")
+                lbl.setStyleSheet("color: #2ecc71; font-size: 11px;")
+            elif status in ["cancelled", "cleared"]:
+                lbl = QLabel(f"  ✗ {name_str} ({time_str})")
+                lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; text-decoration: line-through;")
+            elif status == "failed_stuck":
+                lbl = QLabel(f"  ⚠️ {name_str} ({time_str}) - Stuck/Blocked")
+                lbl.setStyleSheet("color: #e74c3c; font-size: 11px; font-weight: bold;")
+            else:
+                lbl = QLabel(f"  • {name_str} ({time_str}) - {status}")
+                lbl.setStyleSheet("color: #95a5a6; font-size: 11px;")
+            
+            self.queue_list_layout.insertWidget(self.queue_list_layout.count() - 1, lbl)
+
     def copy_to_clipboard(self):
         data = self.node.get_status_data()
         text_lines = [
@@ -828,6 +945,7 @@ class StatusMonitorWidget(QWidget):
             f"LiDAR Hz  : {data['scan_hz']}",
             f"Footprint : {data['footprint']}",
             f"Landmarks : {data['landmarks']}",
+            f"Memory    : {data['memory']}",
             f"People    : {data['people']}",
             f"Face      : {data['face']}",
             f"Battery   : {data['battery']}",

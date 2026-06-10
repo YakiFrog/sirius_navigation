@@ -136,9 +136,25 @@ class NavController:
                 self.node.last_action_status = "failed_cancelled"
             
             if clear_queue:
+                import time
+                t_str = time.strftime('%H:%M:%S')
+                if self.node.active_command:
+                    self.node.active_command["status"] = "cancelled"
+                    self.node.active_command["time"] = t_str
+                    self.node.command_history.append(self.node.active_command)
+                    self.node.active_command = None
+                
+                for cmd in self.node.command_queue:
+                    cmd_copy = dict(cmd)
+                    cmd_copy["status"] = "cancelled"
+                    cmd_copy["time"] = t_str
+                    self.node.command_history.append(cmd_copy)
+                
                 self.node.command_queue = []
                 self.node.executing_command = False
                 self.node.current_xy_tolerance = 0.50
+        
+        self.node.publish_queue_status()
         self.node.get_logger().info(
             "Navigation state updated: "
             f"{'pause' if preserve_current_goal else 'cancel'} "

@@ -32,13 +32,27 @@ class CommandExecutor:
 
     def execute_next_command(self):
         """キューから次のコマンドを取り出して実行する"""
+        import time
+        t_str = time.strftime('%H:%M:%S')
         with self.node.lock:
+            # Archive previous active command if exists
+            if self.node.active_command:
+                status = self.node.last_action_status
+                if status == "none":
+                    status = "completed"
+                self.node.active_command["status"] = status
+                self.node.active_command["time"] = t_str
+                self.node.command_history.append(self.node.active_command)
+                self.node.active_command = None
+                self.node.last_action_status = "none"
+
             if not self.node.command_queue:
                 self.node.executing_command = False
                 self.node.current_xy_tolerance = 0.50
                 self.node.suppress_step_speech = False
                 self.node.get_logger().info("All commands in sequence finished.")
                 self.node.nav_ctrl.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
+                self.node.publish_queue_status()
                 return
             cmd = self.node.command_queue.pop(0)
             self.node.executing_command = True
@@ -52,7 +66,57 @@ class CommandExecutor:
         value = cmd.get("value", 0.0)
         speak_override = cmd.get("speak")
         
+        # Formulate human-readable command name
+        cmd_name = ""
+        if cmd_type == "goto":
+            cmd_name = cmd.get("name")
+            if not cmd_name:
+                if isinstance(value, list) and len(value) == 2:
+                    tx, ty = value[0], value[1]
+                    matched_name = None
+                    for lm_key, lm_val in self.node.landmarks.items():
+                        if abs(lm_val["x"] - tx) < 0.1 and abs(lm_val["y"] - ty) < 0.1:
+                            matched_name = lm_val["name"]
+                            break
+                    if matched_name:
+                        cmd_name = f"{matched_name}に移動"
+                    else:
+                        cmd_name = f"座標({tx:.2f}, {ty:.2f})に移動"
+                else:
+                    cmd_name = "目的地に移動"
+            else:
+                cmd_name = f"{cmd_name}に移動"
+        elif cmd_type == "forward":
+            cmd_name = f"前進 ({value}m)"
+        elif cmd_type == "backward":
+            cmd_name = f"後退 ({value}m)"
+        elif cmd_type == "turn":
+            deg = round(math.degrees(value))
+            cmd_name = f"{'右' if value < 0 else '左'}に{abs(deg)}度旋回"
+        elif cmd_type == "spin":
+            cmd_name = f"その場旋回 ({value}度)"
+        elif cmd_type == "face":
+            cmd_name = f"方位 {value}度を向く"
+        elif cmd_type == "register_landmark":
+            cmd_name = f"ランドマーク登録 '{value}'"
+        elif cmd_type == "remove_landmark":
+            cmd_name = f"ランドマーク削除 '{value}'"
+        elif cmd_type == "expression":
+            cmd_name = f"表情変更 '{value}'"
+        elif cmd_type == "speed":
+            cmd_name = f"速度係数変更 '{value}'"
+        else:
+            cmd_name = f"コマンド '{cmd_type}'"
+        
         with self.node.lock:
+            self.node.active_command = {
+                "type": cmd_type,
+                "value": value,
+                "name": cmd_name,
+                "status": "executing",
+                "time": t_str
+            }
+            
             self.node.last_action_type = cmd_type
             if isinstance(value, list):
                 self.node.last_target_value = value
@@ -64,6 +128,7 @@ class CommandExecutor:
                 except (TypeError, ValueError):
                     self.node.last_target_value = value
         
+        self.node.publish_queue_status()
         self.node.get_logger().info(f"Executing next sequence command -> type: {cmd_type}, value: {value}")
         
         if cmd_type == "speed":

@@ -97,6 +97,7 @@ class LlmDynamicGoal(Node):
         marker_qos.reliability = ReliabilityPolicy.RELIABLE
         self.landmark_marker_pub = self.create_publisher(MarkerArray, '/sirius/landmark_markers', marker_qos)
         self.landmark_status_pub = self.create_publisher(String, '/sirius/landmark_status', marker_qos)
+        self.queue_pub = self.create_publisher(String, '/sirius/command_queue', marker_qos)
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
         self.nav_control_pub = self.create_publisher(String, '/nav_control', 10)
         self.cmd_vel_teleop_pub = self.create_publisher(Twist, 'cmd_vel_teleop', 10)
@@ -172,6 +173,8 @@ class LlmDynamicGoal(Node):
         self.paused_goal_snapshot = None
         
         self.command_queue = []
+        self.command_history = []
+        self.active_command = None
         self.executing_command = False
         self.current_xy_tolerance = 0.50
         self.current_speed_setting = 0.90
@@ -324,6 +327,23 @@ class LlmDynamicGoal(Node):
 
     def publish_landmark_status(self):
         return self.landmark_mgr.publish_landmark_status()
+
+    def publish_queue_status(self):
+        """現在のキュー情報、実行中コマンド、および履歴をJSON形式で `/sirius/command_queue` トピックに配信する"""
+        import time
+        with self.lock:
+            if len(self.command_history) > 10:
+                self.command_history = self.command_history[-10:]
+            
+            queue_data = {
+                "active": self.active_command,
+                "queue": self.command_queue,
+                "history": self.command_history
+            }
+        
+        msg = String()
+        msg.data = json.dumps(queue_data, ensure_ascii=False)
+        self.queue_pub.publish(msg)
 
     def handle_landmark_list_question(self, instruction):
         return self.landmark_mgr.handle_landmark_list_question(instruction)
@@ -637,7 +657,7 @@ class LlmDynamicGoal(Node):
             self.get_logger().warning("Stop keyword detected. Pausing active goal.")
             self.set_target_following(False, speak_on_failure=False)
             self.nav_ctrl.publish_nav_control("pause")
-            self.nav_ctrl.cancel_navigation(preserve_current_goal=True)
+            self.nav_ctrl.cancel_navigation(clear_queue=False, preserve_current_goal=True)
             self.send_sirius_speak("[surprised]了解、止まるのだ！")
             return
 
@@ -767,6 +787,7 @@ class LlmDynamicGoal(Node):
             self.command_queue = sorted_commands
             self.executing_command = False
             
+        self.publish_queue_status()
         self.cmd_executor.execute_next_command()
 
     # --- High-level Monitoring and Goal-checking Loops ---
@@ -941,7 +962,7 @@ class LlmDynamicGoal(Node):
                     speak_msg = f"[sad]前方 {dist:.1f}メートルに障害物があって、進めなくなっちゃったのだ！"
             
             self.send_sirius_speak(speak_msg)
-            self.cancel_navigation(preserve_current_goal=True)
+            self.cancel_navigation(clear_queue=False, preserve_current_goal=True)
             
             print(color_text(f"\n⚠️ {stuck_msg.split(']')[-1].strip()} 目標をキャンセルして停止します。", _YELLOW))
             print_command_prompt()

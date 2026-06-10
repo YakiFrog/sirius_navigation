@@ -47,6 +47,7 @@ class LandmarkManager:
         self.landmark_file_mtime = None
         self.current_landmark_map_name = None
         self.last_landmark_marker_count = 0
+        self.last_target_landmark = None
 
     def normalize_landmark_key(self, text):
         """ランドマーク名照合用の正規化"""
@@ -228,20 +229,46 @@ class LandmarkManager:
     def handle_landmark_navigation_instruction(self, instruction):
         """「リビングを経由して庭に行って」のようなランドマーク指定の経由移動を処理する"""
         normalized = self.normalize_landmark_key(instruction)
+        vague_reference_tokens = [
+            "さっき目指してた場所", "さっきの場所", "前に目指してた場所", "前の場所",
+            "さっき向かってた場所", "前回の場所", "さっき目指した場所", "直前の場所",
+            "さっきの目的地", "前の目的地", "さっき向かってた先"
+        ]
+        if any(token in normalized for token in vague_reference_tokens):
+            if self.last_target_landmark is not None:
+                landmarks = [self.last_target_landmark]
+            else:
+                return False
+        else:
+            landmarks = self.find_all_landmarks_in_instruction(instruction)
+
         # 条件付き指示（例:「〜だったら」「〜のとき」）の場合は、直接のナビゲーション処理をスキップしてLLMに判断を委ねる
         conditional_tokens = ["たら", "なら", "のとき", "の時", "ときに", "時に", "もし", "if", "when"]
         if any(token in normalized for token in conditional_tokens):
             return False
 
-        landmarks = self.find_all_landmarks_in_instruction(instruction)
         if not landmarks:
-            return False
+            # ランドマーク名だけが入っている場合は、ナビゲーション指示として扱う
+            exact_landmark = self.find_landmark_in_instruction(instruction)
+            if exact_landmark is not None:
+                landmarks = [exact_landmark]
+            else:
+                return False
 
-        navigation_keywords = [
+        if len(landmarks) == 1:
+            only_name = landmarks[0]["name"]
+            if normalized == self.normalize_landmark_key(only_name):
+                pass
+            else:
+                # 単語単体でランドマーク名だけ入っていても、移動の意図とみなす
+                if not any(keyword in normalized for keyword in ["行", "いって", "向か", "移動", "案内", "連れて", "つれて", "go", "goto", "navigate", "move"]):
+                    return False
+
+        if not any(keyword in normalized for keyword in [
             "行", "いって", "向か", "移動", "案内", "連れて", "つれて",
             "go", "goto", "navigate", "move", "経由", "けいゆ", "通って", "とおって",
-        ]
-        if not any(keyword in normalized for keyword in navigation_keywords):
+        ]):
+            # ここでは「地名だけ」の入力をナビゲーションと見なす
             return False
 
         self.node.set_target_following(False, speak_on_failure=False)
@@ -271,7 +298,19 @@ class LandmarkManager:
         self.node.llm_client._append_dialogue_history(instruction, speak)
         self.node.send_sirius_speak(speak)
         
+        import time
+        with self.node.lock:
+            self.node.active_command = {
+                "type": "goto",
+                "value": [float(landmarks[0]["x"]), float(landmarks[0]["y"])],
+                "name": f"{landmarks[0]['name']}に移動",
+                "status": "executing",
+                "time": time.strftime('%H:%M:%S')
+            }
+        self.node.publish_queue_status()
+
         # 最初の目標地に移動開始
+        self.last_target_landmark = landmarks[0]
         self.node.publish_direct_map_goal(landmarks[0]["x"], landmarks[0]["y"], landmarks[0]["yaw"])
         return True
 
