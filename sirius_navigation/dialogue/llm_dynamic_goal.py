@@ -9,6 +9,7 @@ import urllib.error
 import threading
 import unicodedata
 import os
+import yaml
 
 os.environ.setdefault("RCUTILS_COLORIZED_OUTPUT", "1")
 os.environ.setdefault("RCUTILS_CONSOLE_OUTPUT_FORMAT", "[{severity}] [{time}] [{name}]: {message}")
@@ -16,6 +17,7 @@ os.environ.setdefault("RCUTILS_CONSOLE_OUTPUT_FORMAT", "[{severity}] [{time}] [{
 import rclpy
 
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import Bool, String
@@ -59,9 +61,11 @@ class LlmDynamicGoal(Node):
         # パラメータ設定
         self.declare_parameter('lm_studio_url', 'http://localhost:1234/v1/chat/completions')
         self.declare_parameter('model_name', 'meta-llama-3-8b-instruct')
+        self.declare_parameter('current_map_state_file', os.path.expanduser('~/.sirius_nav2_current_map.yaml'))
         
         self.lm_studio_url = self.get_parameter('lm_studio_url').get_parameter_value().string_value
         self.model_name = self.get_parameter('model_name').get_parameter_value().string_value
+        self.current_map_state_file = self.get_parameter('current_map_state_file').get_parameter_value().string_value
         
         # TFのリスナーを初期化
         self.tf_buffer = Buffer()
@@ -70,6 +74,11 @@ class LlmDynamicGoal(Node):
         # パブリッシャーの定義
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         self.marker_pub = self.create_publisher(Marker, '/dynamic_goal_marker', 10)
+        marker_qos = QoSProfile(depth=1)
+        marker_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        marker_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.landmark_marker_pub = self.create_publisher(MarkerArray, '/sirius/landmark_markers', marker_qos)
+        self.landmark_status_pub = self.create_publisher(String, '/sirius/landmark_status', marker_qos)
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
         self.nav_control_pub = self.create_publisher(String, '/nav_control', 10)
         self.cmd_vel_teleop_pub = self.create_publisher(Twist, 'cmd_vel_teleop', 10)
@@ -124,6 +133,13 @@ class LlmDynamicGoal(Node):
         self.current_expression = "normal"
         self.current_humor_level = DEFAULT_HUMOR_LEVEL
         self.target_follow_status_last_spoken = {}
+        self.landmarks = {}
+        self.landmark_aliases = {}
+        self.landmark_file_path = None
+        self.landmark_file_mtime = None
+        self.current_landmark_map_name = None
+        self.last_landmark_marker_count = 0
+        self.load_landmarks_for_current_map(force=True)
         self.marker_array_sub = self.create_subscription(
             MarkerArray,
             '/target_detector/target_markers',
@@ -205,6 +221,8 @@ class LlmDynamicGoal(Node):
         
         # 10Hz (0.1秒周期)で旋回中の角度監視を行うタイマー（preemptionを防ぐため再発行は行わない）
         self.dynamic_goal_timer = self.create_timer(0.1, self.timer_goal_publisher)
+        self.landmark_reload_timer = self.create_timer(2.0, self.load_landmarks_for_current_map)
+        self.landmark_marker_timer = self.create_timer(2.0, self.publish_landmark_markers)
 
         # 対話型コマンドライン入力を別スレッドで開始
         self.running = True
@@ -458,6 +476,12 @@ class LlmDynamicGoal(Node):
 
         if self.handle_manual_teleop_instruction(instruction):
             return
+
+        if self.handle_landmark_list_question(instruction):
+            return
+
+        if self.handle_landmark_navigation_instruction(instruction):
+            return
         
         # 1. 停止・キャンセル指示の簡易キーワード判定（高速応答のため）
         cancel_keywords = ["キャンセル", "cancel", "中止", "取り消", "とりけし"]
@@ -611,7 +635,159 @@ class LlmDynamicGoal(Node):
             self.command_queue = sorted_commands
             self.executing_command = False
             
-        self.execute_next_command()
+            self.execute_next_command()
+
+    def normalize_landmark_key(self, text):
+        """ランドマーク名照合用の正規化"""
+        return normalize_instruction_text(str(text)).strip().replace(" ", "").replace("　", "").lower()
+
+    def load_landmarks_for_current_map(self, force=False):
+        """Nav2起動スクリプトが書いた現在map情報からランドマークを自動読み込みする"""
+        try:
+            state_path = os.path.expanduser(self.current_map_state_file)
+            if not os.path.exists(state_path):
+                return
+            with open(state_path, "r") as f:
+                state = yaml.safe_load(f) or {}
+
+            landmark_path = state.get("current_landmarks") or ""
+            if not landmark_path:
+                if force:
+                    self.get_logger().info("[Landmark] current map has no associated landmark file yet.")
+                return
+            landmark_path = os.path.expanduser(landmark_path)
+            if not os.path.exists(landmark_path):
+                self.get_logger().warning(f"[Landmark] landmark file does not exist: {landmark_path}")
+                return
+
+            mtime = os.path.getmtime(landmark_path)
+            if not force and landmark_path == self.landmark_file_path and mtime == self.landmark_file_mtime:
+                return
+
+            with open(landmark_path, "r") as f:
+                data = yaml.safe_load(f) or {}
+
+            landmarks = {}
+            aliases = {}
+            for item in data.get("landmarks", []):
+                name = str(item.get("name", "")).strip()
+                if not name:
+                    continue
+                try:
+                    pose = {
+                        "name": name,
+                        "x": float(item["x"]),
+                        "y": float(item["y"]),
+                        "yaw": float(item.get("yaw", item.get("angle_radians", 0.0))),
+                    }
+                except (KeyError, TypeError, ValueError) as e:
+                    self.get_logger().warning(f"[Landmark] skipping invalid landmark '{name}': {e}")
+                    continue
+
+                key = self.normalize_landmark_key(name)
+                landmarks[key] = pose
+                aliases[key] = key
+                for alias in item.get("aliases", []) or []:
+                    alias_key = self.normalize_landmark_key(alias)
+                    if alias_key:
+                        aliases[alias_key] = key
+
+            self.landmarks = landmarks
+            self.landmark_aliases = aliases
+            self.landmark_file_path = landmark_path
+            self.landmark_file_mtime = mtime
+            self.current_landmark_map_name = state.get("current_map_name") or data.get("map", {}).get("name")
+            self.get_logger().info(
+                f"[Landmark] loaded {len(self.landmarks)} landmarks from {os.path.basename(landmark_path)} "
+                f"for map={self.current_landmark_map_name or 'unknown'}"
+            )
+            self.publish_landmark_markers()
+            self.publish_landmark_status()
+        except Exception as e:
+            self.get_logger().warning(f"[Landmark] failed to load landmarks: {e}")
+
+    def get_landmark_names(self):
+        self.load_landmarks_for_current_map()
+        return [item["name"] for item in sorted(self.landmarks.values(), key=lambda lm: lm["name"])]
+
+    def publish_landmark_status(self):
+        names = self.get_landmark_names() if self.landmarks else []
+        msg = String()
+        if names:
+            map_name = self.current_landmark_map_name or "unknown"
+            msg.data = json.dumps({
+                "map": map_name,
+                "count": len(names),
+                "names": names,
+                "file": self.landmark_file_path or "",
+            }, ensure_ascii=False)
+        else:
+            msg.data = json.dumps({
+                "map": self.current_landmark_map_name or "unknown",
+                "count": 0,
+                "names": [],
+                "file": self.landmark_file_path or "",
+            }, ensure_ascii=False)
+        self.landmark_status_pub.publish(msg)
+
+    def handle_landmark_list_question(self, instruction):
+        """「どこに行ける？」に、読み込み済みランドマーク名で答える"""
+        normalized = self.normalize_landmark_key(instruction)
+        question_tokens = [
+            "どこにいけ", "どこへいけ", "どこ行け", "行ける場所", "いける場所",
+            "場所一覧", "ランドマーク", "目的地一覧", "どこまで", "wherecan",
+        ]
+        if not any(token in normalized for token in question_tokens):
+            return False
+
+        names = self.get_landmark_names()
+        self.publish_landmark_markers()
+        self.publish_landmark_status()
+        if not names:
+            self.send_sirius_speak("[sad]今の地図に対応するランドマークがまだ読み込めていないのだ。")
+            return True
+
+        joined = "、".join(names)
+        self.send_sirius_speak(f"[happy]今行ける場所は、{joined}なのだ。")
+        self.get_logger().info(f"[Landmark] Available destinations: {joined}")
+        return True
+
+    def find_landmark_in_instruction(self, instruction):
+        """指示文に含まれるランドマークを探す"""
+        self.load_landmarks_for_current_map()
+        normalized = self.normalize_landmark_key(instruction)
+        # 長い名前を優先して部分一致させる
+        for alias_key in sorted(self.landmark_aliases.keys(), key=len, reverse=True):
+            if alias_key and alias_key in normalized:
+                canonical_key = self.landmark_aliases[alias_key]
+                return self.landmarks.get(canonical_key)
+        return None
+
+    def handle_landmark_navigation_instruction(self, instruction):
+        """「リビングに行って」のようなランドマーク名指定の移動を処理する"""
+        landmark = self.find_landmark_in_instruction(instruction)
+        if not landmark:
+            return False
+
+        normalized = self.normalize_landmark_key(instruction)
+        navigation_keywords = [
+            "行", "いって", "向か", "移動", "案内", "連れて", "つれて",
+            "go", "goto", "navigate", "move",
+        ]
+        if not any(keyword in normalized for keyword in navigation_keywords):
+            return False
+
+        self.get_logger().info(
+            f"[Landmark] Navigation requested: {landmark['name']} "
+            f"({landmark['x']:.2f}, {landmark['y']:.2f}, yaw={math.degrees(landmark['yaw']):+.1f}deg)"
+        )
+        self.set_target_following(False, speak_on_failure=False)
+        self.publish_nav_control("pause_silent")
+        self.cancel_navigation(clear_queue=True, preserve_current_goal=False)
+        self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
+        self.send_sirius_speak(f"[happy]{landmark['name']}に向かうのだ！")
+        self.publish_direct_map_goal(landmark["x"], landmark["y"], landmark["yaw"])
+        return True
 
     def execute_next_command(self):
         """キューから次のコマンドを取り出して実行する"""
@@ -1938,6 +2114,100 @@ class LlmDynamicGoal(Node):
         marker.id = 1
         marker.action = Marker.DELETE
         self.marker_pub.publish(marker)
+
+    def publish_landmark_markers(self):
+        """読み込み済みランドマークをRViz2向けMarkerArrayとして発行する"""
+        marker_array = MarkerArray()
+        now = self.get_clock().now().to_msg()
+
+        landmarks = list(self.landmarks.values())
+        sorted_landmarks = sorted(landmarks, key=lambda item: item["name"])
+        for index, landmark in enumerate(sorted_landmarks):
+            yaw = float(landmark.get("yaw", 0.0))
+            x = float(landmark["x"])
+            y = float(landmark["y"])
+
+            arrow = Marker()
+            arrow.header.frame_id = 'map'
+            arrow.header.stamp = now
+            arrow.ns = 'sirius_landmarks'
+            arrow.id = index * 3
+            arrow.type = Marker.ARROW
+            arrow.action = Marker.ADD
+            arrow.pose.position.x = x
+            arrow.pose.position.y = y
+            arrow.pose.position.z = 0.05
+            arrow.pose.orientation.z = math.sin(yaw / 2.0)
+            arrow.pose.orientation.w = math.cos(yaw / 2.0)
+            arrow.scale.x = 0.55
+            arrow.scale.y = 0.12
+            arrow.scale.z = 0.12
+            arrow.color.r = 0.1
+            arrow.color.g = 0.8
+            arrow.color.b = 0.25
+            arrow.color.a = 0.9
+            arrow.lifetime = rclpy.duration.Duration(seconds=0.0).to_msg()
+            marker_array.markers.append(arrow)
+
+            point = Marker()
+            point.header.frame_id = 'map'
+            point.header.stamp = now
+            point.ns = 'sirius_landmarks'
+            point.id = index * 3 + 1
+            point.type = Marker.SPHERE
+            point.action = Marker.ADD
+            point.pose.position.x = x
+            point.pose.position.y = y
+            point.pose.position.z = 0.08
+            point.pose.orientation.w = 1.0
+            point.scale.x = 0.24
+            point.scale.y = 0.24
+            point.scale.z = 0.12
+            point.color.r = 0.0
+            point.color.g = 0.45
+            point.color.b = 1.0
+            point.color.a = 0.85
+            point.lifetime = rclpy.duration.Duration(seconds=0.0).to_msg()
+            marker_array.markers.append(point)
+
+            label = Marker()
+            label.header.frame_id = 'map'
+            label.header.stamp = now
+            label.ns = 'sirius_landmark_labels'
+            label.id = index * 3 + 2
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = x + 0.18
+            label.pose.position.y = y + 0.18
+            label.pose.position.z = 1.20
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.75
+            label.color.r = 0.0
+            label.color.g = 1.0
+            label.color.b = 1.0
+            label.color.a = 1.0
+            label.text = f"L{index + 1}: {landmark['name']}"
+            label.lifetime = rclpy.duration.Duration(seconds=0.0).to_msg()
+            marker_array.markers.append(label)
+
+        current_count = len(sorted_landmarks)
+        for index in range(current_count, self.last_landmark_marker_count):
+            for ns, marker_id in (
+                ('sirius_landmarks', index * 3),
+                ('sirius_landmarks', index * 3 + 1),
+                ('sirius_landmark_labels', index * 3 + 2),
+            ):
+                delete_marker = Marker()
+                delete_marker.header.frame_id = 'map'
+                delete_marker.header.stamp = now
+                delete_marker.ns = ns
+                delete_marker.id = marker_id
+                delete_marker.action = Marker.DELETE
+                marker_array.markers.append(delete_marker)
+
+        self.last_landmark_marker_count = current_count
+        self.landmark_marker_pub.publish(marker_array)
+        self.publish_landmark_status()
 
     def cancel_navigation(self, clear_queue=True, preserve_current_goal=False):
         """実行中のナビゲーションをキャンセル"""

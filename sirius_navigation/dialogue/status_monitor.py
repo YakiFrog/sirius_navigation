@@ -2,12 +2,14 @@
 import sys
 import os
 import ast
+import json
 import math
 import time
 from collections import deque
 import rclpy
 
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
@@ -50,6 +52,7 @@ class SiriusStatusMonitor(Node):
         "直近の制御 (/nav_control)",
         "現在速度 (/odom)",
         "周囲人数 (/target_detector/target_markers)",
+        "ランドマーク一覧 (/sirius/landmark_status)",
         "顔サーバー接続状態",
         "バッテリー残量 (Face GetStatus)",
         "表情状態",
@@ -64,6 +67,7 @@ class SiriusStatusMonitor(Node):
         "その場旋回",
         "絶対方位に向く",
         "座標へ移動",
+        "ランドマーク名で移動",
         "速度変更",
         "表情変更",
         "停止 / 再開 / キャンセル",
@@ -86,6 +90,7 @@ class SiriusStatusMonitor(Node):
         self.last_action_status = "n/a"
         self.last_action_type = "n/a"
         self.active_goal = None
+        self.landmark_status = {"map": "unknown", "count": 0, "names": [], "file": ""}
         self.goal_distance = None
         self.current_xy_tolerance = 0.50
         self.is_stuck = False
@@ -100,6 +105,10 @@ class SiriusStatusMonitor(Node):
         self.create_subscription(PoseStamped, '/goal_pose', self.goal_callback, 10)
         self.create_subscription(String, '/nav_control', self.nav_control_callback, 10)
         self.create_subscription(Bool, '/sirius_is_stuck', self.stuck_callback, 10)
+        landmark_qos = QoSProfile(depth=1)
+        landmark_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        landmark_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.create_subscription(String, '/sirius/landmark_status', self.landmark_status_callback, landmark_qos)
         self.create_subscription(LaserScan, '/hokuyo_scan', lambda msg: self.scan_callback(msg, '/hokuyo_scan'), 10)
         self.create_subscription(LaserScan, '/scan3', lambda msg: self.scan_callback(msg, '/scan3'), 10)
         self.obstacle_distances = {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}
@@ -136,6 +145,19 @@ class SiriusStatusMonitor(Node):
 
     def stuck_callback(self, msg):
         self.is_stuck = msg.data
+
+    def landmark_status_callback(self, msg):
+        try:
+            data = json.loads(msg.data)
+            if isinstance(data, dict):
+                self.landmark_status = {
+                    "map": str(data.get("map", "unknown")),
+                    "count": int(data.get("count", 0)),
+                    "names": [str(name) for name in data.get("names", [])],
+                    "file": str(data.get("file", "")),
+                }
+        except Exception:
+            self.landmark_status = {"map": "unknown", "count": 0, "names": [], "file": ""}
 
     def _load_nav2_footprint(self):
         fallback = [[0.50, 0.30], [0.50, -0.30], [-0.70, -0.30], [-0.70, 0.30]]
@@ -298,6 +320,17 @@ class SiriusStatusMonitor(Node):
     def _format_footprint(self):
         return " ".join(f"({x:+.2f},{y:+.2f})" for x, y in self.robot_footprint)
 
+    def _format_landmarks(self):
+        names = self.landmark_status.get("names", [])
+        count = self.landmark_status.get("count", len(names))
+        map_name = self.landmark_status.get("map", "unknown")
+        if not names:
+            return f"map={map_name} / 0 loaded"
+        joined = ", ".join(names[:6])
+        if len(names) > 6:
+            joined += f", ... +{len(names) - 6}"
+        return f"map={map_name} / {count} loaded: {joined}"
+
     def _direction_from_angle(self, angle_deg):
         if -20.0 <= angle_deg <= 20.0:
             return "front"
@@ -401,6 +434,7 @@ class SiriusStatusMonitor(Node):
             "velocity": f"linear={self.current_vel_x:.2f}m/s angular={self.current_vel_theta:.2f}rad/s",
             "scan_hz": self._format_scan_hz(now),
             "footprint": self._format_footprint(),
+            "landmarks": self._format_landmarks(),
             "people": str(self.surrounding_people_count),
             "face": f"{'on' if self.face_active else 'off'} / {self.current_expression}",
             "battery": self._battery_cache_text,
@@ -652,6 +686,7 @@ class StatusMonitorWidget(QWidget):
             ("Velocity", "velocity"),
             ("LiDAR Hz", "scan_hz"),
             ("Footprint", "footprint"),
+            ("Landmarks", "landmarks"),
             ("People", "people"),
             ("Face State", "face"),
             ("Battery", "battery")
@@ -792,6 +827,7 @@ class StatusMonitorWidget(QWidget):
             f"Velocity  : {data['velocity']}",
             f"LiDAR Hz  : {data['scan_hz']}",
             f"Footprint : {data['footprint']}",
+            f"Landmarks : {data['landmarks']}",
             f"People    : {data['people']}",
             f"Face      : {data['face']}",
             f"Battery   : {data['battery']}",
