@@ -139,6 +139,7 @@ class LlmDynamicGoal(Node):
         self.landmark_file_mtime = None
         self.current_landmark_map_name = None
         self.last_landmark_marker_count = 0
+        self.last_spoken_text = ""
         self.load_landmarks_for_current_map(force=True)
         self.marker_array_sub = self.create_subscription(
             MarkerArray,
@@ -540,6 +541,7 @@ class LlmDynamicGoal(Node):
         commands = result.get("commands", [])
         speak_text = result.get("speak", "")
         if speak_text:
+            self._append_dialogue_history(instruction, speak_text)
             self.send_sirius_speak(speak_text)
             
         if not commands:
@@ -744,12 +746,16 @@ class LlmDynamicGoal(Node):
         self.publish_landmark_markers()
         self.publish_landmark_status()
         if not names:
-            self.send_sirius_speak("[sad]今の地図に対応するランドマークがまだ読み込めていないのだ。")
+            speak = "[sad]今の地図に対応するランドマークがまだ読み込めていないのだ。"
+            self._append_dialogue_history(instruction, speak)
+            self.send_sirius_speak(speak)
             return True
 
         joined = "、".join(names)
-        self.send_sirius_speak(f"[happy]今行ける場所は、{joined}なのだ。")
+        speak = f"[happy]今行ける場所は、{joined}なのだ。"
         self.get_logger().info(f"[Landmark] Available destinations: {joined}")
+        self._append_dialogue_history(instruction, speak)
+        self.send_sirius_speak(speak)
         return True
 
     def find_landmark_in_instruction(self, instruction):
@@ -785,9 +791,23 @@ class LlmDynamicGoal(Node):
         self.publish_nav_control("pause_silent")
         self.cancel_navigation(clear_queue=True, preserve_current_goal=False)
         self.set_node_parameters('/controller_server', {'general_goal_checker.xy_goal_tolerance': 0.50})
-        self.send_sirius_speak(f"[happy]{landmark['name']}に向かうのだ！")
+        speak = f"[happy]{landmark['name']}に向かうのだ！"
+        self._append_dialogue_history(instruction, speak)
+        self.send_sirius_speak(speak)
         self.publish_direct_map_goal(landmark["x"], landmark["y"], landmark["yaw"])
         return True
+
+    def _append_dialogue_history(self, user_text, assistant_text):
+        """LLM に渡す会話履歴を、短い自然文で残す"""
+        user_text = normalize_instruction_text(str(user_text)).strip()
+        assistant_text = str(assistant_text).strip()
+        if not user_text and not assistant_text:
+            return
+        with self.lock:
+            self.chat_history.append({"role": "user", "content": f"ユーザー: {user_text}"})
+            self.chat_history.append({"role": "assistant", "content": f"シリウス: {assistant_text}"})
+            if len(self.chat_history) > self.history_max_turns * 2:
+                self.chat_history = self.chat_history[-self.history_max_turns * 2 :]
 
     def execute_next_command(self):
         """キューから次のコマンドを取り出して実行する"""
@@ -1490,18 +1510,20 @@ class LlmDynamicGoal(Node):
         # ルールベースで一致しなかった複雑な指示は LLM (LM Studio) へ問い合わせる
         # -------------------------------------------------------------------
         system_prompt = (
-            "You are a robotic navigator assistant. Output raw JSON only, no markdown, no reasoning, no extra text.\n"
+            "You are Sirius, a small outdoor navigation robot with a warm, playful Kansai-ben personality.\n"
+            "Keep the Sirius character in every reply. Sound friendly, a little cute, and confident.\n"
+            "Output raw JSON only, no markdown, no reasoning, no extra text.\n"
             "Schema: {\"commands\": [ {\"type\": one_of(forward, backward, turn, spin, face, goto, speed, expression, parameter, reset, effect, look, humor), \"value\": any } ], \"cancel\": boolean, \"speak\": string?}\n"
             "If the user asks a question, explain briefly in Japanese in speak and keep commands empty.\n"
             "If the user requests movement, output the exact command sequence.\n"
             "If the user asks to change humor level, output a humor command with value 0.0 to 1.0.\n"
-            "Character: you are Sirius, a cute outdoor autonomous robot. Use a short expression tag and speak like Sirius. "
-            "Humor 0.0 means polite Japanese. Humor >=0.5 means lively Kansai-ben with playful confidence.\n"
+            "Use a short expression tag and speak like Sirius. Humor 0.0 means polite Japanese. Humor >=0.5 means lively Kansai-ben with playful confidence.\n"
             "Always prefix speak with exactly one expression tag from [normal], [happy], [angry], [sad], [surprised], [cat], [wink], [pien], [sleeping]. "
             "Use [normal] for clarification questions, [sad] for apologies/failures, [happy] for success/helpful answers, [wink] for jokes.\n"
             "If the request is missing required details or would require guessing intent, ask one concise clarification question in Japanese in speak and keep commands empty.\n"
             "Do not invent a direction, distance, destination, expression, or face effect that the user did not specify.\n"
             "Use the robot state context for current status, remaining distance, blockage, people count, battery, and last action.\n"
+            "Conversation history may contain earlier user requests and Sirius replies; use it to preserve context and avoid asking redundant clarification.\n"
             "Always prefer a valid minimal JSON object. Do not wrap in code fences."
         )
         
@@ -2873,6 +2895,7 @@ class LlmDynamicGoal(Node):
         """face_client 経由で音声送信する薄いラッパー"""
         with self.lock:
             humor_level = self.current_humor_level
+            self.last_spoken_text = text
         styled_text = style_sirius_speak(text, humor_level)
         tag_match = re.match(r"^\[([a-zA-Z_]+)(?::[^\]]+)?\]", styled_text)
         if tag_match:
