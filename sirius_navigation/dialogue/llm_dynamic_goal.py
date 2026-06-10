@@ -52,6 +52,30 @@ try:
 except ImportError:
     from face_client import FaceClient
     from local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text, style_sirius_speak, DEFAULT_HUMOR_LEVEL, clamp_humor_level
+JAPANESE_TO_ROMAJI = {
+    "リビング": "living",
+    "庭": "garden",
+    "充電ステーション": "charging_station",
+    "充電器": "charger",
+    "充電": "charging",
+    "キッチン": "kitchen",
+    "台所": "kitchen",
+    "寝室": "bedroom",
+    "玄関": "entrance",
+    "廊下": "corridor",
+    "トイレ": "toilet",
+    "洗面所": "washroom",
+    "お風呂": "bathroom",
+    "風呂": "bathroom",
+    "書斎": "study",
+    "子供部屋": "kids_room",
+    "和室": "washitsu",
+    "バルコニー": "balcony",
+    "ベランダ": "veranda",
+    "食堂": "dining_room",
+    "ダイニング": "dining",
+    "応接室": "parlor",
+}
 
 
 class LlmDynamicGoal(Node):
@@ -2199,16 +2223,31 @@ class LlmDynamicGoal(Node):
             label.id = index * 3 + 2
             label.type = Marker.TEXT_VIEW_FACING
             label.action = Marker.ADD
-            label.pose.position.x = x + 0.18
-            label.pose.position.y = y + 0.18
-            label.pose.position.z = 1.20
+            label.pose.position.x = x
+            label.pose.position.y = y
+            label.pose.position.z = 0.15
+            label.pose.orientation.x = 0.0
+            label.pose.orientation.y = 0.0
+            label.pose.orientation.z = 0.0
             label.pose.orientation.w = 1.0
-            label.scale.z = 0.75
+            label.scale.x = 0.0
+            label.scale.y = 0.0
+            label.scale.z = 0.40
             label.color.r = 0.0
             label.color.g = 1.0
             label.color.b = 1.0
             label.color.a = 1.0
-            label.text = f"L{index + 1}: {landmark['name']}"
+            
+            name_ja = landmark['name']
+            name_en = JAPANESE_TO_ROMAJI.get(name_ja.strip(), "")
+            if name_en:
+                label.text = f"L{index + 1}: {name_en}"
+            else:
+                if any(ord(c) > 0x7F for c in name_ja):
+                    label.text = f"L{index + 1}"
+                else:
+                    label.text = f"L{index + 1}: {name_ja}"
+                    
             label.lifetime = rclpy.duration.Duration(seconds=0.0).to_msg()
             marker_array.markers.append(label)
 

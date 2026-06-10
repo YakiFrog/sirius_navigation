@@ -704,7 +704,12 @@ class TargetDetector(Node):
             text_marker.pose.position.x = track.state[0]
             text_marker.pose.position.y = track.state[1]
             text_marker.pose.position.z = 1.2
+            text_marker.pose.orientation.x = 0.0
+            text_marker.pose.orientation.y = 0.0
+            text_marker.pose.orientation.z = 0.0
             text_marker.pose.orientation.w = 1.0
+            text_marker.scale.x = 0.0
+            text_marker.scale.y = 0.0
             text_marker.scale.z = 0.25
             
             if track.id == self.primary_track_id:
