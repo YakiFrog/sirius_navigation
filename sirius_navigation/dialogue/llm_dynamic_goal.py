@@ -924,15 +924,15 @@ class LlmDynamicGoal(Node):
         else:
             with self.lock:
                 self.distance_remaining_history.append(distance)
-                if len(self.distance_remaining_history) > 5:
+                if len(self.distance_remaining_history) > 30:
                     self.distance_remaining_history.pop(0)
                 history_len = len(self.distance_remaining_history)
                 first_dist = self.distance_remaining_history[0] if history_len > 0 else 0
                 last_dist = self.distance_remaining_history[-1] if history_len > 0 else 0
             
-            if history_len == 5:
+            if history_len == 30:
                 dist_change = abs(first_dist - last_dist)
-                if dist_change < 0.005 and abs(vel_x) < 0.005 and abs(vel_theta) < 0.005 and elapsed_sec > 15.0:
+                if dist_change < 0.3 and elapsed_sec > 30.0:
                     should_cancel_due_to_stuck = True
                     stuck_msg = "🤖 [Stuck Detected during Translation] Robot path is blocked or unable to reach the target."
 
@@ -957,11 +957,11 @@ class LlmDynamicGoal(Node):
             speak_msg = DIALOGUE_TEMPLATES["stuck"]
             if last_type == "backward":
                 dist = obs_dists.get("back", 999.0)
-                if dist < 2.0:
+                if dist < 0.5:
                     speak_msg = f"[sad]後方 {dist:.1f}メートルに障害物があって、進めなくなっちゃったのだ！"
             elif last_type in ["forward", "goto"] or last_type is None:
                 dist = obs_dists.get("front", 999.0)
-                if dist < 2.0:
+                if dist < 0.5:
                     speak_msg = f"[sad]前方 {dist:.1f}メートルに障害物があって、進めなくなっちゃったのだ！"
             
             self.send_sirius_speak(speak_msg)
