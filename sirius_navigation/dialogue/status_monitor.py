@@ -179,8 +179,6 @@ class SiriusStatusMonitor(Node):
             os.environ.get('NAV2_PARAMS_FILE'),
             os.path.expanduser('~/sirius_jazzy_ws/params/nav2_params.yaml'),
             os.path.expanduser('~/sirius_jazzy_ws/params/nav2_params_sim.yaml'),
-            '/home/kotantu-desktop/sirius_jazzy_ws/params/nav2_params.yaml',
-            '/home/kotantu-desktop/sirius_jazzy_ws/params/nav2_params_sim.yaml',
         ]
 
         for path in candidate_paths:

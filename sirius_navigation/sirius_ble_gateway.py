@@ -46,9 +46,10 @@ class SiriusBleGateway(Node):
         self.declare_parameter("nav_http_target", "http://localhost:50060/instruction")
         self.declare_parameter("face_speak_grpc_target", "localhost:50052")
         self.declare_parameter("face_status_grpc_target", "localhost:50051")
+        import os
         self.declare_parameter(
             "face_stubs_dir",
-            "/home/kotantu-desktop/sirius_face_anim2/scripts/stubs",
+            os.path.expanduser("~/sirius_face_anim2/scripts/stubs"),
         )
         self.declare_parameter("publish_face_battery_params", True)
 
