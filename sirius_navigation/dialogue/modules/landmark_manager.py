@@ -53,6 +53,59 @@ class LandmarkManager:
         """ランドマーク名照合用の正規化"""
         return normalize_instruction_text(str(text)).strip().replace(" ", "").replace("　", "").lower()
 
+    def _ensure_landmark_file_path(self):
+        """現在の地図に紐づくランドマークファイルがなければ、保存先を自動生成する"""
+        state_path = os.path.expanduser(self.node.current_map_state_file)
+        current_map_name = None
+        current_landmark_path = None
+
+        try:
+            if os.path.exists(state_path):
+                with open(state_path, "r") as f:
+                    state = yaml.safe_load(f) or {}
+                current_map_name = state.get("current_map_name")
+                current_landmark_path = state.get("current_landmarks") or None
+        except Exception as e:
+            self.node.get_logger().warning(f"[Landmark] failed to read current map state: {e}")
+
+        if current_landmark_path:
+            path = os.path.expanduser(current_landmark_path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            return path
+
+        base_dir = "/home/kotantu-desktop/sirius_jazzy_ws/maps_waypoints/landmarks"
+        os.makedirs(base_dir, exist_ok=True)
+        map_name = current_map_name or "unknown_map"
+        file_name = f"{map_name}.yaml"
+        path = os.path.join(base_dir, file_name)
+        if not os.path.exists(path):
+            initial_data = {
+                "format_version": "1.0",
+                "map": {
+                    "name": map_name,
+                    "yaml": f"{map_name}.yaml",
+                },
+                "landmarks": [],
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(initial_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+        try:
+            if os.path.exists(state_path):
+                with open(state_path, "r") as f:
+                    state = yaml.safe_load(f) or {}
+            else:
+                state = {}
+            state["current_landmarks"] = path
+            if current_map_name:
+                state["current_map_name"] = current_map_name
+            with open(state_path, "w") as f:
+                yaml.safe_dump(state, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        except Exception as e:
+            self.node.get_logger().warning(f"[Landmark] failed to update current map state: {e}")
+
+        return path
+
     def load_landmarks_for_current_map(self, force=False):
         """Nav2起動スクリプトが書いた現在map情報からランドマークを自動読み込みする"""
         try:
@@ -397,17 +450,10 @@ class LandmarkManager:
 
         yaml_path = getattr(self, 'landmark_file_path', None)
         if not yaml_path or not os.path.exists(yaml_path):
-            possible_paths = [
-                "/home/kotantu-desktop/sirius_jazzy_ws/maps_waypoints/landmarks/sim.yaml",
-                "/home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/maps_waypoints/landmarks/sim.yaml"
-            ]
-            for p in possible_paths:
-                if os.path.exists(p):
-                    yaml_path = p
-                    break
+            yaml_path = self._ensure_landmark_file_path()
         
         if not yaml_path or not os.path.exists(yaml_path):
-            return False, "[sad]ランドマーク定義ファイルが見つからないのだ。"
+            return False, "[sad]ランドマーク定義ファイルを作れなかったのだ。"
 
         try:
             with open(yaml_path, 'r', encoding='utf-8') as f:
@@ -490,17 +536,10 @@ class LandmarkManager:
         """指定された名前のランドマークを sim.yaml から削除する"""
         yaml_path = getattr(self, 'landmark_file_path', None)
         if not yaml_path or not os.path.exists(yaml_path):
-            possible_paths = [
-                "/home/kotantu-desktop/sirius_jazzy_ws/maps_waypoints/landmarks/sim.yaml",
-                "/home/kotantu-desktop/sirius_jazzy_ws/src/sirius/sirius_navigation/maps_waypoints/landmarks/sim.yaml"
-            ]
-            for p in possible_paths:
-                if os.path.exists(p):
-                    yaml_path = p
-                    break
+            yaml_path = self._ensure_landmark_file_path()
         
         if not yaml_path or not os.path.exists(yaml_path):
-            return False, "[sad]ランドマーク定義ファイルが見つからないのだ。"
+            return False, "[sad]ランドマーク定義ファイルを作れなかったのだ。"
 
         try:
             with open(yaml_path, 'r', encoding='utf-8') as f:
