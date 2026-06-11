@@ -73,7 +73,8 @@ class LandmarkManager:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             return path
 
-        base_dir = "/home/kotantu-desktop/sirius_jazzy_ws/maps_waypoints/landmarks"
+        home_dir = os.path.expanduser("~")
+        base_dir = os.path.join(home_dir, "sirius_jazzy_ws", "maps_waypoints", "landmarks")
         os.makedirs(base_dir, exist_ok=True)
         map_name = current_map_name or "unknown_map"
         file_name = f"{map_name}.yaml"
