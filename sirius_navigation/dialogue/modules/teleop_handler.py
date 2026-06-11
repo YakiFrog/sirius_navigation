@@ -71,11 +71,14 @@ class TeleopHandler:
 
     def publish_assisted_drive_twist(self, twist: Twist):
         """前後移動の速度指令を publish する。"""
-        self.node.cmd_vel_teleop_pub.publish(twist)
-        self.node.cmd_vel_direct_pub.publish(twist)
-
         teleop_subscribers = self.node.cmd_vel_teleop_pub.get_subscription_count()
-        direct_subscribers = self.node.cmd_vel_direct_pub.get_subscription_count()
+        if teleop_subscribers > 0:
+            self.node.cmd_vel_teleop_pub.publish(twist)
+            route = "cmd_vel_teleop"
+        else:
+            self.node.cmd_vel_direct_pub.publish(twist)
+            route = "cmd_vel_direct"
+
         now = self.node.get_clock().now().nanoseconds / 1e9
         with self.node.lock:
             should_log = now - self.node.assisted_drive_last_route_log_time > 1.0
@@ -83,22 +86,10 @@ class TeleopHandler:
                 self.node.assisted_drive_last_route_log_time = now
 
         if should_log:
-            if direct_subscribers > 0:
-                self.node.get_logger().info(
-                    f"[AssistDrive] publishing to cmd_vel_direct "
-                    f"(direct_subscribers={direct_subscribers}, "
-                    f"teleop_subscribers={teleop_subscribers}, linear.x={twist.linear.x:.2f})"
-                )
-            elif teleop_subscribers == 0:
-                self.node.get_logger().warning(
-                    "[AssistDrive] no subscribers on cmd_vel_direct or cmd_vel_teleop. "
-                    "Velocity command may not reach the robot."
-                )
-            else:
-                self.node.get_logger().info(
-                    f"[AssistDrive] publishing to cmd_vel_teleop "
-                    f"(subscribers={teleop_subscribers}, linear.x={twist.linear.x:.2f})"
-                )
+            self.node.get_logger().info(
+                f"[AssistDrive] publishing to {route} "
+                f"(teleop_subscribers={teleop_subscribers}, linear.x={twist.linear.x:.2f})"
+            )
 
     def get_assisted_drive_position(self):
         """前後移動の距離測定用位置を取得する。/odom を優先する。"""

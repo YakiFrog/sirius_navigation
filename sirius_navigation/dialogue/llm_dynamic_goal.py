@@ -1065,22 +1065,19 @@ class LlmDynamicGoal(Node):
         param.value = p_val
         req.parameters.append(param)
 
-        future = client.call_async(req)
-        future.add_done_callback(
-            lambda fut, state=enabled: self._target_following_param_callback(fut, state)
-        )
-        return True
-
-    def _target_following_param_callback(self, future, enabled: bool):
         try:
-            response = future.result()
-            if response.results and not all(result.successful for result in response.results):
+            self.get_logger().info(f"Sending synchronous parameter request to disable/enable following: {enabled}")
+            response = client.call(req)
+            if response.results and all(result.successful for result in response.results):
+                self.get_logger().info(f"Successfully set target_follower enable_following parameter to {enabled}")
+                return True
+            else:
                 reasons = ", ".join(result.reason for result in response.results if result.reason)
-                self.get_logger().warning(f"[TargetFollow] failed to set enable_following={enabled}: {reasons}")
-                return
-            self.get_logger().info(f"[TargetFollow] enable_following set to {enabled}")
+                self.get_logger().warning(f"Failed to set target_follower enable_following to {enabled}: {reasons}")
+                return False
         except Exception as exc:
-            self.get_logger().error(f"[TargetFollow] parameter update failed: {exc}")
+            self.get_logger().error(f"Error calling /target_follower/set_parameters: {exc}")
+            return False
 
     def print_prompt(self):
         print_command_prompt()

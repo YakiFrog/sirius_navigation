@@ -15,10 +15,6 @@ twist_mux:
         topic: "cmd_vel_direct"
         timeout: 0.5
         priority: 100
-      docking:
-        topic: "cmd_vel_docking"
-        timeout: 0.5
-        priority: 50
       navigation:
         topic: "cmd_vel_smoothed"  # velocity_smootherの出力を受ける（deadband適用済み）
         timeout: 0.5
