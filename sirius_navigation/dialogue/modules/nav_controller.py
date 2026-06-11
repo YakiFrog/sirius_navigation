@@ -170,7 +170,16 @@ class NavController:
         
         req = CancelGoal.Request()
         req.goal_info = GoalInfo()
-        self.node.cancel_client.call_async(req)
+        try:
+            self.node.get_logger().info("Sending synchronous NavigateToPose cancel request...")
+            self.node.cancel_client.call(req)
+            self.node.get_logger().info("NavigateToPose cancel request completed.")
+        except Exception as e:
+            self.node.get_logger().error(f"Failed to call NavigateToPose cancel service: {e}")
+
+        # コントローラーが完全に減速停止し、Nav2状態が落ち着くまで少し待機する
+        import time
+        time.sleep(0.4)
         
         stop_msg = Bool()
         stop_msg.data = True
