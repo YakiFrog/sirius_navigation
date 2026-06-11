@@ -374,6 +374,7 @@ class LandmarkManager:
 
         movement_keywords = [
             "行", "いって", "向か", "移動", "案内", "連れて", "つれて",
+            "戻", "帰", "かえ",
             "go", "goto", "navigate", "move", "経由", "けいゆ", "通って", "とおって",
         ]
         if not is_vague_reference and len(landmarks) == 1:
