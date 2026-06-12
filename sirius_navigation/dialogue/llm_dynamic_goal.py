@@ -1066,8 +1066,12 @@ class LlmDynamicGoal(Node):
         req.parameters.append(param)
 
         try:
-            self.get_logger().info(f"Sending synchronous parameter request to disable/enable following: {enabled}")
-            response = client.call(req)
+            self.get_logger().info(f"Sending asynchronous parameter request to disable/enable following: {enabled}")
+            future = client.call_async(req)
+            
+            import concurrent.futures
+            response = future.result(timeout=2.0)
+            
             if response.results and all(result.successful for result in response.results):
                 self.get_logger().info(f"Successfully set target_follower enable_following parameter to {enabled}")
                 return True

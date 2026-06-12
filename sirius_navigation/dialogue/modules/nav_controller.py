@@ -171,8 +171,11 @@ class NavController:
         req = CancelGoal.Request()
         req.goal_info = GoalInfo()
         try:
-            self.node.get_logger().info("Sending synchronous NavigateToPose cancel request...")
-            self.node.cancel_client.call(req)
+            self.node.get_logger().info("Sending asynchronous NavigateToPose cancel request...")
+            future = self.node.cancel_client.call_async(req)
+            
+            import concurrent.futures
+            future.result(timeout=2.0)
             self.node.get_logger().info("NavigateToPose cancel request completed.")
         except Exception as e:
             self.node.get_logger().error(f"Failed to call NavigateToPose cancel service: {e}")
