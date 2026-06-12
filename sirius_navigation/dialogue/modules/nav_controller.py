@@ -183,9 +183,13 @@ class NavController:
             self.node.get_logger().info("Sending asynchronous NavigateToPose cancel request...")
             future = self.node.cancel_client.call_async(req)
             
-            import concurrent.futures
-            future.result(timeout=2.0)
-            self.node.get_logger().info("NavigateToPose cancel request completed.")
+            def done_callback(f):
+                try:
+                    f.result()
+                    self.node.get_logger().info("NavigateToPose cancel request completed.")
+                except Exception as e:
+                    self.node.get_logger().error(f"NavigateToPose cancel request failed: {e}")
+            future.add_done_callback(done_callback)
         except Exception as e:
             self.node.get_logger().error(f"Failed to call NavigateToPose cancel service: {e}")
 
