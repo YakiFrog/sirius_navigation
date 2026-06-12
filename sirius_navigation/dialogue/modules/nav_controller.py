@@ -96,6 +96,9 @@ class NavController:
         """実行中のナビゲーションをキャンセル"""
         self.delete_marker()
         
+        # 前進・後退のアシスト走行（タイマーパブリッシャー）を停止する
+        self.node.teleop_ctrl.stop_assisted_drive()
+        
         stuck_msg_bool = Bool()
         stuck_msg_bool.data = False
         self.node.stuck_pub.publish(stuck_msg_bool)
@@ -103,10 +106,16 @@ class NavController:
         with self.node.lock:
             spin_handle = self.node.spin_goal_handle
             self.node.spin_goal_handle = None
+            assisted_handle = self.node.assisted_teleop_goal_handle
+            self.node.assisted_teleop_goal_handle = None
             
         if spin_handle is not None:
             self.node.get_logger().info("Canceling active Spin action...")
             spin_handle.cancel_goal_async()
+
+        if assisted_handle is not None:
+            self.node.get_logger().info("Canceling active AssistedTeleop action...")
+            assisted_handle.cancel_goal_async()
             
         with self.node.lock:
             if preserve_current_goal and self.node.active_goal_x is not None and self.node.active_goal_y is not None:
