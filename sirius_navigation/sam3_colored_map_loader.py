@@ -24,7 +24,8 @@ class SAM3ColoredMapLoader(Node):
         self.declare_parameter('lethal_cost_threshold', 50)
         self.declare_parameter('soft_semantic_max_cost', 70)
         self.declare_parameter('soft_semantic_min_cost', 5)
-        self.declare_parameter('semantic_cost_classes', ['grass', 'tactile paving', 'roadway', 'wall'])
+        self.declare_parameter('semantic_cost_classes', ['grass', 'tactile paving', 'roadway'])
+        self.declare_parameter('global_lethal_classes', ['grass', 'roadway'])
         self.declare_parameter('soft_semantic_inflation_radius', 0.45)
         self.declare_parameter('soft_semantic_inflation_cost', 45)
         
@@ -38,6 +39,10 @@ class SAM3ColoredMapLoader(Node):
         self.semantic_cost_classes = {
             str(name).lower()
             for name in self.get_parameter('semantic_cost_classes').get_parameter_value().string_array_value
+        }
+        self.global_lethal_classes = {
+            str(name).lower()
+            for name in self.get_parameter('global_lethal_classes').get_parameter_value().string_array_value
         }
         self.soft_semantic_inflation_radius = (
             self.get_parameter('soft_semantic_inflation_radius').get_parameter_value().double_value
@@ -172,13 +177,13 @@ class SAM3ColoredMapLoader(Node):
                 idx = int(idx_str)
                 cost = info.get('default_cost', 0)
                 name = str(info.get('name', idx_str)).lower()
-                if name in self.semantic_cost_classes and cost >= self.lethal_cost_threshold:
+                if name in self.global_lethal_classes and cost >= self.lethal_cost_threshold:
                     cost_grid[grid == idx] = 100  # LETHAL
                     if info.get('name') not in lethal_classes:
                         lethal_classes.append(info.get('name', idx_str))
 
                 if name in self.semantic_cost_classes and cost > 0:
-                    if cost >= 254 or name in ('wall', 'roadway'):
+                    if cost >= 254 or name == 'roadway':
                         soft_cost = 100
                     else:
                         soft_cost = int(np.clip(cost, self.soft_semantic_min_cost, self.soft_semantic_max_cost))
@@ -188,9 +193,8 @@ class SAM3ColoredMapLoader(Node):
             except Exception:
                 pass
         
-        # インデックス1（壁）は常にLETHAL
-        cost_grid[grid == 1] = 100
-        soft_cost_grid[grid == 1] = 100
+        # 壁は通常のLiDAR/SLAM由来の /map に任せ、semantic gridでは扱わない。
+        # RTAB-Mapの床ノイズが通常PGMで黒になった場合でも、semantic側で壁コスト化しない。
 
         soft_inflation_cells = int(round(self.soft_semantic_inflation_radius / res))
         if soft_inflation_cells > 0 and self.soft_semantic_inflation_cost > 0:

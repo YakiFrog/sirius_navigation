@@ -39,6 +39,7 @@ class SAM3ROSBridge(Node):
         self.pub_obstacles = self.create_publisher(PointCloud2, '/sam3/obstacles', 10)
         self.pub_background = self.create_publisher(PointCloud2, '/sam3/background', 10)
         self.pub_full_cloud = self.create_publisher(PointCloud2, '/sam3/full_cloud', 10)
+        self.pub_full_cloud_semantic = self.create_publisher(PointCloud2, '/sam3/full_cloud_semantic', 10)
         
         # Latched publisher for dynamic class colors config
         qos_latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -93,13 +94,15 @@ class SAM3ROSBridge(Node):
 
         
         # Binary data decoding
-        # Format: [x, y, z, r, g, b, is_masked] (7 * float32)
+        # Format v2: [x, y, z, r, g, b, is_masked, semantic_id] (8 * float32)
+        # Format v1: [x, y, z, r, g, b, is_masked] (7 * float32)
         try:
             raw_data = np.frombuffer(message, dtype=np.float32)
-            if len(raw_data) % 7 != 0:
+            point_stride = 8 if len(raw_data) % 8 == 0 else 7 if len(raw_data) % 7 == 0 else 0
+            if point_stride == 0:
                 return
                 
-            data = raw_data.reshape(-1, 7)
+            data = raw_data.reshape(-1, point_stride)
             
             # Filter for masked points (segmented objects) vs background
             is_masked = data[:, 6] > self.mask_threshold
@@ -125,25 +128,46 @@ class SAM3ROSBridge(Node):
             else:
                 header.stamp = self.get_clock().now().to_msg()
             
-            # Define fields
-            fields = [
+            # RTAB-Map/RViz compatibility: keep the public mapping clouds as plain XYZRGB.
+            fields_xyzrgb = [
                 PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
                 PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
                 PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
                 PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
             ]
+            fields_semantic = [
+                PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+                PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+                PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+                PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
+                PointField(name='semantic_id', offset=16, datatype=PointField.UINT16, count=1),
+                PointField(name='is_masked', offset=18, datatype=PointField.UINT8, count=1),
+            ]
             
             # Vectorized packing function using Numpy structured arrays
-            def pack_cloud_data_fast(points):
+            def pack_cloud_data_fast(points, include_semantic=False):
                 if len(points) == 0:
                     return None
                 
                 N = len(points)
-                # Define structured array dtype matching PointField offsets
-                # x:f4(4), y:f4(4), z:f4(4), rgb:f4(4) = 16 bytes
-                cloud_arr = np.empty(N, dtype=[
-                    ('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('rgb', 'f4')
-                ])
+                if include_semantic:
+                    # x/y/z/rgb + semantic_id + is_masked + padding = 20 bytes.
+                    cloud_arr = np.empty(N, dtype=[
+                        ('x', 'f4'),
+                        ('y', 'f4'),
+                        ('z', 'f4'),
+                        ('rgb', 'f4'),
+                        ('semantic_id', 'u2'),
+                        ('is_masked', 'u1'),
+                        ('_pad', 'u1'),
+                    ])
+                else:
+                    cloud_arr = np.empty(N, dtype=[
+                        ('x', 'f4'),
+                        ('y', 'f4'),
+                        ('z', 'f4'),
+                        ('rgb', 'f4'),
+                    ])
                 
                 # Vectorized axis conversion: X=-Z, Y=-X, Z=Y
                 cloud_arr['x'] = -points[:, 2]
@@ -158,10 +182,18 @@ class SAM3ROSBridge(Node):
                 # Pack into 00RRGGBB.
                 rgb = (r << 16) | (g << 8) | b
                 cloud_arr['rgb'] = rgb.view(np.float32)
+                if include_semantic:
+                    if points.shape[1] >= 8:
+                        semantic_id = np.clip(np.round(points[:, 7]), 0, 65535).astype(np.uint16)
+                    else:
+                        semantic_id = np.zeros(N, dtype=np.uint16)
+                    cloud_arr['semantic_id'] = semantic_id
+                    cloud_arr['is_masked'] = (points[:, 6] > self.mask_threshold).astype(np.uint8)
+                    cloud_arr['_pad'] = 0
                 
                 return cloud_arr
 
-            def create_cloud_from_arr(header, fields, arr):
+            def create_cloud_from_arr(header, fields, arr, point_step):
                 if arr is None or len(arr) == 0:
                     return pc2.create_cloud(header, fields, [])
                 
@@ -172,7 +204,7 @@ class SAM3ROSBridge(Node):
                 msg.width = len(arr)
                 msg.fields = fields
                 msg.is_bigendian = False
-                msg.point_step = 16 # 4 * 4
+                msg.point_step = point_step
                 msg.row_step = msg.point_step * msg.width
                 msg.is_dense = False
                 msg.data = arr.tobytes()
@@ -180,19 +212,22 @@ class SAM3ROSBridge(Node):
 
             # Publish Obstacles
             masked_arr = pack_cloud_data_fast(masked_data)
-            cloud_msg_obs = create_cloud_from_arr(header, fields, masked_arr)
+            cloud_msg_obs = create_cloud_from_arr(header, fields_xyzrgb, masked_arr, 16)
             self.pub_obstacles.publish(cloud_msg_obs)
                 
             # Publish Background
             background_arr = pack_cloud_data_fast(background_data)
-            cloud_msg_bg = create_cloud_from_arr(header, fields, background_arr)
+            cloud_msg_bg = create_cloud_from_arr(header, fields_xyzrgb, background_arr, 16)
             self.pub_background.publish(cloud_msg_bg)
             
             # Publish Full Cloud (Combined) if requested
             if self.publish_full_cloud:
                 full_arr = pack_cloud_data_fast(data)
-                cloud_msg_full = create_cloud_from_arr(header, fields, full_arr)
+                cloud_msg_full = create_cloud_from_arr(header, fields_xyzrgb, full_arr, 16)
                 self.pub_full_cloud.publish(cloud_msg_full)
+                semantic_arr = pack_cloud_data_fast(data, include_semantic=True)
+                cloud_msg_semantic = create_cloud_from_arr(header, fields_semantic, semantic_arr, 20)
+                self.pub_full_cloud_semantic.publish(cloud_msg_semantic)
             
         except Exception as e:
             self.get_logger().error(f'Error processing point cloud: {e}')

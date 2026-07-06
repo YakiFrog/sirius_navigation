@@ -7,6 +7,16 @@ from std_msgs.msg import Header
 import numpy as np
 import struct
 
+SEMANTIC_CLASSES = {
+    0: {"name": "unknown", "color": [127, 127, 127]},
+    1: {"name": "wall", "color": [0, 0, 0]},
+    2: {"name": "floor", "color": [255, 255, 255]},
+    3: {"name": "grass", "color": [0, 255, 0]},
+    4: {"name": "tactile paving", "color": [255, 255, 0]},
+    5: {"name": "roadway", "color": [0, 0, 255]},
+    6: {"name": "sidewalk", "color": [128, 128, 128]},
+}
+
 class SAM3GridVisualizer(Node):
     def __init__(self):
         super().__init__('sam3_grid_visualizer')
@@ -34,8 +44,8 @@ class SAM3GridVisualizer(Node):
         self.get_logger().info('SAM3 Grid Visualizer started.')
 
     def _generate_default_palette(self):
-        # Index 0: Unknown (Gray), Index 1: Wall (Black), Index 2: Floor (White)
-        reserved = [[127, 127, 127], [0, 0, 0], [255, 255, 255]]
+        # Index 0: Unknown, 1: Wall, 2: Floor, 3+: semantic class ids.
+        reserved = [SEMANTIC_CLASSES[i]["color"] for i in sorted(SEMANTIC_CLASSES)]
         colors = []
         # 5 steps for 5x5x5 = 125 colors (R,G,B 0,64,128,192,255)
         # Total index stays <= 127, safe for int8 occupancy grid.
