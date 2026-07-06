@@ -7,10 +7,41 @@ import struct
 import json
 from sklearn.cluster import KMeans
 
+# Predefined semantic categories mapping to colors and default costmap costs
+PREDEFINED_CATEGORIES = {
+    "wall": {"color": [0, 0, 0], "default_cost": 254},
+    "floor": {"color": [255, 255, 255], "default_cost": 0},
+    "grass": {"color": [0, 255, 0], "default_cost": 120},
+    "tactile paving": {"color": [255, 255, 0], "default_cost": 50},
+    "roadway": {"color": [0, 0, 255], "default_cost": 254},
+    "sidewalk": {"color": [128, 128, 128], "default_cost": 10}
+}
+
+
+# Helper class to dynamically load dynamic class colors over ROS 2 topic
+class ClassColorsListener:
+    def __init__(self):
+        import rclpy
+        from rclpy.node import Node
+        from std_msgs.msg import String
+        from rclpy.qos import QoSProfile, DurabilityPolicy
+
+        self.node = Node('sam3_class_colors_listener')
+        self.received_config = None
+        qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.sub = self.node.create_subscription(String, '/sam3/class_colors', self.cb, qos)
+
+    def cb(self, msg):
+        try:
+            self.received_config = json.loads(msg.data)
+        except Exception as e:
+            print(f"Error parsing class colors from topic: {e}")
+
 def getColor(packed):
     # Depending on how it was packed in CloudToPly
     # pr = (packed >> 16) & 0xFF, pg = (packed >> 8) & 0xFF, pb = packed & 0xFF
     return ( (packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF )
+
 
 def main():
     if len(sys.argv) < 2:
@@ -26,7 +57,62 @@ def main():
         print(f"Error: Missing one of .pgm, .yaml, or .ply for {base}")
         sys.exit(1)
 
+    # Try to load dynamic class colors configuration
+    dynamic_colors = None
+    import time
+    
+    # Attempt 1: Load from ROS 2 Topic (Latched)
+    try:
+        import rclpy
+        print("Waiting for dynamic class colors config from ROS 2 topic /sam3/class_colors...")
+        rclpy.init()
+        listener = ClassColorsListener()
+        
+        # Spin with a short timeout to catch the latched topic message
+        start_time = time.time()
+        while time.time() - start_time < 2.0 and listener.received_config is None:
+            rclpy.spin_once(listener.node, timeout_sec=0.1)
+            
+        if listener.received_config:
+            dynamic_colors = listener.received_config
+            print(f"SUCCESS: Loaded class colors from ROS 2 topic /sam3/class_colors: {dynamic_colors}")
+        else:
+            print("Timeout: No class colors config received on topic. Checking local fallback file.")
+        listener.node.destroy_node()
+        rclpy.shutdown()
+    except Exception as e:
+        print(f"Notice: ROS 2 context not available or topic listener failed ({e}). Checking local fallback file.")
+
+    # Attempt 2: Fallback to local class_colors.json file
+    if dynamic_colors is None:
+        config_path = "/home/kotantu-desktop/DA3_SAM3_Project/sam3_da3_3d/sam3_server_export/class_colors.json"
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    dynamic_colors = json.load(f)
+                print(f"SUCCESS: Loaded class colors configuration from local file: {config_path}")
+            except Exception as e:
+                print(f"Warning: Failed to load dynamic class colors config from file: {e}")
+
+    # Overwrite PREDEFINED_CATEGORIES with dynamically loaded colors
+    if dynamic_colors:
+        for name, rgb in dynamic_colors.items():
+            cost = 100
+            if name in PREDEFINED_CATEGORIES:
+                cost = PREDEFINED_CATEGORIES[name]["default_cost"]
+            elif "grass" in name:
+                cost = 120
+            elif "tactile" in name:
+                cost = 50
+            elif "roadway" in name:
+                cost = 254
+            elif "sidewalk" in name:
+                cost = 10
+            PREDEFINED_CATEGORIES[name] = {"color": rgb, "default_cost": cost}
+
+
     print(f"Loading structural map: {pgm_file}")
+
     grid = cv2.imread(pgm_file, cv2.IMREAD_UNCHANGED)
     with open(yaml_file, 'r') as f:
         meta = yaml.safe_load(f)
@@ -146,17 +232,40 @@ def main():
         print(f"SUCCESS: Saved semantic map to {out_pgm}")
         print(f"SUCCESS: Saved visual map to {out_visual}")
         
+        # Map each palette entry to semantic labels using minimum distance in RGB
+        labels_out = {}
+        for idx, color_rgb in enumerate(palette.tolist()):
+            best_cat = "unknown"
+            best_dist = float('inf')
+            for cat_name, cat_info in PREDEFINED_CATEGORIES.items():
+                d = sum((c1 - c2)**2 for c1, c2 in zip(color_rgb, cat_info["color"]))
+                if d < best_dist:
+                    best_dist = d
+                    best_cat = cat_name
+            
+            # If color matches close enough to a predefined class
+            if best_dist < 2500:
+                labels_out[str(idx)] = {
+                    "name": best_cat,
+                    "color": color_rgb,
+                    "default_cost": PREDEFINED_CATEGORIES[best_cat]["default_cost"]
+                }
+
+
+        
         meta_out = {
             "resolution": resolution,
             "origin": [origin[0], origin[1]],
             "width": w,
             "height": h,
-            "palette": palette.tolist()
+            "palette": palette.tolist(),
+            "labels": labels_out
         }
         with open(out_json, 'w') as f:
             json.dump(meta_out, f, indent=4)
         
         print(f"SUCCESS: Saved colored map to {out_pgm}")
+
 
 if __name__ == "__main__":
     main()

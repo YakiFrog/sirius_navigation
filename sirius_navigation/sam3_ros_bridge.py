@@ -2,13 +2,14 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 import json
 import websocket
 import threading
 import numpy as np
 import time
 import struct
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
 class SAM3ROSBridge(Node):
     def __init__(self):
@@ -38,6 +39,11 @@ class SAM3ROSBridge(Node):
         self.pub_obstacles = self.create_publisher(PointCloud2, '/sam3/obstacles', 10)
         self.pub_background = self.create_publisher(PointCloud2, '/sam3/background', 10)
         self.pub_full_cloud = self.create_publisher(PointCloud2, '/sam3/full_cloud', 10)
+        
+        # Latched publisher for dynamic class colors config
+        qos_latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_class_colors = self.create_publisher(String, '/sam3/class_colors', qos_latched)
+
         
         # WebSocket setup
         self.running = True
@@ -73,9 +79,18 @@ class SAM3ROSBridge(Node):
                 stats = json.loads(message)
                 if 'sim_time' in stats:
                     self.latest_sim_time = stats['sim_time']
+                if 'class_colors' in stats and stats['class_colors']:
+                    colors_json = json.dumps(stats['class_colors'])
+                    if not hasattr(self, '_last_colors_json') or self._last_colors_json != colors_json:
+                        self._last_colors_json = colors_json
+                        msg = String()
+                        msg.data = colors_json
+                        self.pub_class_colors.publish(msg)
+                        self.get_logger().info(f"Published updated class colors to /sam3/class_colors: {colors_json}")
             except Exception as e:
                 self.get_logger().error(f"Error parsing JSON message: {e}")
             return
+
         
         # Binary data decoding
         # Format: [x, y, z, r, g, b, is_masked] (7 * float32)

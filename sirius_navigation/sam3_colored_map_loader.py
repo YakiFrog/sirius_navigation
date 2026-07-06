@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
+from nav_msgs.msg import OccupancyGrid, MapMetaData
 import sensor_msgs_py.point_cloud2 as pc2
 import numpy as np
 import cv2
@@ -18,16 +19,25 @@ class SAM3ColoredMapLoader(Node):
         self.declare_parameter('publish_rate', 1.0)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('z_offset', -0.2)
+        # コスト閾値: default_cost >= この値のクラスのみ LETHAL(100) として出力する
+        # 例: 50 に設定すれば grass(120) と tactile paving(50) のみが対象、sidewalk(10) は除外
+        self.declare_parameter('lethal_cost_threshold', 50)
         
         self.map_path = self.get_parameter('map_path').get_parameter_value().string_value
         self.publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
         self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
         self.z_offset = self.get_parameter('z_offset').get_parameter_value().double_value
+        self.lethal_cost_threshold = self.get_parameter('lethal_cost_threshold').get_parameter_value().integer_value
         
-        # Publisher
+        # Publishers
         self.pub_cloud = self.create_publisher(PointCloud2, '/sam3/static_colored_map_cloud', 10)
         
+        from rclpy.qos import QoSProfile, DurabilityPolicy
+        qos_latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_grid = self.create_publisher(OccupancyGrid, '/sam3/static_colored_map_grid', qos_latched)
+        
         self.cloud_msg = None
+        self.grid_msg = None
         
         if self.map_path:
             self.load_map(self.map_path)
@@ -41,15 +51,24 @@ class SAM3ColoredMapLoader(Node):
         # Handle extension-less path
         if path.endswith('.pgm') or path.endswith('.json'):
             base_path = os.path.splitext(path)[0]
+            if base_path.endswith('.colored'):
+                base_path = base_path[:-8]
         else:
             base_path = path
 
-        pgm_file = base_path + ".pgm"
-        json_file = base_path + ".json"
+        # Try to load .colored.pgm / .colored.json first (preferred)
+        pgm_file = base_path + ".colored.pgm"
+        json_file = base_path + ".colored.json"
+
+        # Fallback to standard .pgm / .json if .colored variants do not exist
+        if not os.path.exists(pgm_file) or not os.path.exists(json_file):
+            pgm_file = base_path + ".pgm"
+            json_file = base_path + ".json"
 
         if not os.path.exists(pgm_file) or not os.path.exists(json_file):
-            self.get_logger().error(f'File not found: {pgm_file} or {json_file}')
+            self.get_logger().error(f'File not found: {base_path}.colored.pgm or {base_path}.pgm')
             return
+
 
         self.get_logger().info(f'Loading map from {base_path}...')
         
@@ -114,13 +133,59 @@ class SAM3ColoredMapLoader(Node):
             ],
             points=points
         )
-        self.get_logger().info(f'Converted {len(points)} points to cloud with Z={self.z_offset}.')
+        # --- Generate OccupancyGrid for Costmap (Method A: Binary LETHAL mapping) ---
+        # Nav2の StaticLayer は OccupancyGrid の中間値（1〜98）を正しくコストとして扱わない。
+        # そのため、default_cost > 0 のセマンティッククラスはすべて LETHAL(100) に変換し、
+        # InflationLayer のグラデーションで経路計画への影響を制御する方式を採用する。
+        h, w = grid.shape
+        cost_grid = np.zeros((h, w), dtype=np.int8)
+        
+        labels = meta.get('labels', {})
+        
+        lethal_classes = []
+        # 登録されたラベルで default_cost >= lethal_cost_threshold のもの → LETHAL(100) として出力
+        for idx_str, info in labels.items():
+            try:
+                idx = int(idx_str)
+                cost = info.get('default_cost', 0)
+                if cost >= self.lethal_cost_threshold:
+                    cost_grid[grid == idx] = 100  # LETHAL
+                    if info.get('name') not in lethal_classes:
+                        lethal_classes.append(info.get('name', idx_str))
+            except Exception:
+                pass
+        
+        # インデックス1（壁）は常にLETHAL
+        cost_grid[grid == 1] = 100
+        
+        # ログ出力
+        semantic_cells = int(np.sum(cost_grid == 100))
+        self.get_logger().info(
+            f'Semantic costmap: {semantic_cells} LETHAL cells '
+            f'(threshold>={self.lethal_cost_threshold}, targets: {list(set(lethal_classes))})'
+        )
+        
+        self.grid_msg = OccupancyGrid()
+        self.grid_msg.header = Header(stamp=self.get_clock().now().to_msg(), frame_id=self.map_frame)
+        self.grid_msg.info = MapMetaData(
+            resolution=res,
+            width=w,
+            height=h
+        )
+        self.grid_msg.info.origin.position.x = origin[0]
+        self.grid_msg.info.origin.position.y = origin[1]
+        self.grid_msg.info.origin.orientation.w = 1.0
+        self.grid_msg.data = cost_grid.flatten().tolist()
+
 
     def timer_callback(self):
+        stamp = self.get_clock().now().to_msg()
         if self.cloud_msg is not None:
-            # Update timestamp for RViz
-            self.cloud_msg.header.stamp = self.get_clock().now().to_msg()
+            self.cloud_msg.header.stamp = stamp
             self.pub_cloud.publish(self.cloud_msg)
+        if self.grid_msg is not None:
+            self.grid_msg.header.stamp = stamp
+            self.pub_grid.publish(self.grid_msg)
 
 def main(args=None):
     rclpy.init(args=args)
