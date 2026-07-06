@@ -22,29 +22,12 @@ class SAM3ColoredMapLoader(Node):
         # コスト閾値: default_cost >= この値のクラスのみ LETHAL(100) として出力する
         # 例: 50 に設定すれば grass(120) と tactile paving(50) のみが対象、sidewalk(10) は除外
         self.declare_parameter('lethal_cost_threshold', 50)
-        self.declare_parameter('soft_semantic_max_cost', 70)
-        self.declare_parameter('soft_semantic_min_cost', 5)
-        self.declare_parameter('semantic_cost_classes', ['grass', 'tactile paving', 'roadway', 'wall'])
-        self.declare_parameter('soft_semantic_inflation_radius', 0.45)
-        self.declare_parameter('soft_semantic_inflation_cost', 45)
         
         self.map_path = self.get_parameter('map_path').get_parameter_value().string_value
         self.publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
         self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
         self.z_offset = self.get_parameter('z_offset').get_parameter_value().double_value
         self.lethal_cost_threshold = self.get_parameter('lethal_cost_threshold').get_parameter_value().integer_value
-        self.soft_semantic_max_cost = self.get_parameter('soft_semantic_max_cost').get_parameter_value().integer_value
-        self.soft_semantic_min_cost = self.get_parameter('soft_semantic_min_cost').get_parameter_value().integer_value
-        self.semantic_cost_classes = {
-            str(name).lower()
-            for name in self.get_parameter('semantic_cost_classes').get_parameter_value().string_array_value
-        }
-        self.soft_semantic_inflation_radius = (
-            self.get_parameter('soft_semantic_inflation_radius').get_parameter_value().double_value
-        )
-        self.soft_semantic_inflation_cost = (
-            self.get_parameter('soft_semantic_inflation_cost').get_parameter_value().integer_value
-        )
         
         # Publishers
         self.pub_cloud = self.create_publisher(PointCloud2, '/sam3/static_colored_map_cloud', 10)
@@ -52,11 +35,9 @@ class SAM3ColoredMapLoader(Node):
         from rclpy.qos import QoSProfile, DurabilityPolicy
         qos_latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_grid = self.create_publisher(OccupancyGrid, '/sam3/static_colored_map_grid', qos_latched)
-        self.pub_soft_grid = self.create_publisher(OccupancyGrid, '/sam3/static_semantic_cost_grid', qos_latched)
         
         self.cloud_msg = None
         self.grid_msg = None
-        self.soft_grid_msg = None
         
         if self.map_path:
             self.load_map(self.map_path)
@@ -153,74 +134,35 @@ class SAM3ColoredMapLoader(Node):
             points=points
         )
         # --- Generate OccupancyGrid for Costmap (Method A: Binary LETHAL mapping) ---
-        # Nav2のStaticLayerはtrinary_costmap=falseの場合、OccupancyGridの中間値を
-        # costmap costへ線形変換できる。グローバル用は従来どおり二値LETHAL、
-        # ローカル用は復帰可能な非LETHAL高コストとして別トピックへ出す。
-        # static_colored_map_grid: グローバル計画用。対象セマンティック領域をLETHAL化する。
-        # static_semantic_cost_grid: ローカル制御用。芝生・点字ブロック等を非LETHAL高コストにする。
+        # Nav2の StaticLayer は OccupancyGrid の中間値（1〜98）を正しくコストとして扱わない。
+        # そのため、default_cost > 0 のセマンティッククラスはすべて LETHAL(100) に変換し、
+        # InflationLayer のグラデーションで経路計画への影響を制御する方式を採用する。
         h, w = grid.shape
         cost_grid = np.zeros((h, w), dtype=np.int8)
-        soft_cost_grid = np.zeros((h, w), dtype=np.int8)
         
         labels = meta.get('labels', {})
         
         lethal_classes = []
-        soft_classes = []
         # 登録されたラベルで default_cost >= lethal_cost_threshold のもの → LETHAL(100) として出力
         for idx_str, info in labels.items():
             try:
                 idx = int(idx_str)
                 cost = info.get('default_cost', 0)
-                name = str(info.get('name', idx_str)).lower()
-                if name in self.semantic_cost_classes and cost >= self.lethal_cost_threshold:
+                if cost >= self.lethal_cost_threshold:
                     cost_grid[grid == idx] = 100  # LETHAL
                     if info.get('name') not in lethal_classes:
                         lethal_classes.append(info.get('name', idx_str))
-
-                if name in self.semantic_cost_classes and cost > 0:
-                    if cost >= 254 or name in ('wall', 'roadway'):
-                        soft_cost = 100
-                    else:
-                        soft_cost = int(np.clip(cost, self.soft_semantic_min_cost, self.soft_semantic_max_cost))
-                    soft_cost_grid[grid == idx] = soft_cost
-                    if soft_cost > 0 and info.get('name') not in soft_classes:
-                        soft_classes.append(info.get('name', idx_str))
             except Exception:
                 pass
         
         # インデックス1（壁）は常にLETHAL
         cost_grid[grid == 1] = 100
-        soft_cost_grid[grid == 1] = 100
-
-        soft_inflation_cells = int(round(self.soft_semantic_inflation_radius / res))
-        if soft_inflation_cells > 0 and self.soft_semantic_inflation_cost > 0:
-            soft_obstacle_mask = ((soft_cost_grid > 0) & (soft_cost_grid < 100)).astype(np.uint8)
-            if np.any(soft_obstacle_mask):
-                kernel_size = soft_inflation_cells * 2 + 1
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-                inflated_mask = cv2.dilate(soft_obstacle_mask, kernel, iterations=1).astype(bool)
-                inflated_cost = int(
-                    np.clip(
-                        self.soft_semantic_inflation_cost,
-                        self.soft_semantic_min_cost,
-                        self.soft_semantic_max_cost
-                    )
-                )
-                soft_cost_grid[inflated_mask] = np.maximum(soft_cost_grid[inflated_mask], inflated_cost)
         
         # ログ出力
         semantic_cells = int(np.sum(cost_grid == 100))
         self.get_logger().info(
             f'Semantic costmap: {semantic_cells} LETHAL cells '
             f'(threshold>={self.lethal_cost_threshold}, targets: {list(set(lethal_classes))})'
-        )
-        soft_cells = int(np.sum(soft_cost_grid > 0))
-        soft_lethal_cells = int(np.sum(soft_cost_grid == 100))
-        self.get_logger().info(
-            f'Soft semantic costmap: {soft_cells} costed cells, '
-            f'{soft_lethal_cells} LETHAL cells '
-            f'(soft range {self.soft_semantic_min_cost}-{self.soft_semantic_max_cost}, '
-            f'targets: {list(set(soft_classes))})'
         )
         
         self.grid_msg = OccupancyGrid()
@@ -235,18 +177,6 @@ class SAM3ColoredMapLoader(Node):
         self.grid_msg.info.origin.orientation.w = 1.0
         self.grid_msg.data = cost_grid.flatten().tolist()
 
-        self.soft_grid_msg = OccupancyGrid()
-        self.soft_grid_msg.header = Header(stamp=self.get_clock().now().to_msg(), frame_id=self.map_frame)
-        self.soft_grid_msg.info = MapMetaData(
-            resolution=res,
-            width=w,
-            height=h
-        )
-        self.soft_grid_msg.info.origin.position.x = origin[0]
-        self.soft_grid_msg.info.origin.position.y = origin[1]
-        self.soft_grid_msg.info.origin.orientation.w = 1.0
-        self.soft_grid_msg.data = soft_cost_grid.flatten().tolist()
-
 
     def timer_callback(self):
         stamp = self.get_clock().now().to_msg()
@@ -256,9 +186,6 @@ class SAM3ColoredMapLoader(Node):
         if self.grid_msg is not None:
             self.grid_msg.header.stamp = stamp
             self.pub_grid.publish(self.grid_msg)
-        if self.soft_grid_msg is not None:
-            self.soft_grid_msg.header.stamp = stamp
-            self.pub_soft_grid.publish(self.soft_grid_msg)
 
 def main(args=None):
     rclpy.init(args=args)

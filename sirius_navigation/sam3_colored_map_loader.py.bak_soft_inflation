@@ -25,8 +25,6 @@ class SAM3ColoredMapLoader(Node):
         self.declare_parameter('soft_semantic_max_cost', 70)
         self.declare_parameter('soft_semantic_min_cost', 5)
         self.declare_parameter('semantic_cost_classes', ['grass', 'tactile paving', 'roadway', 'wall'])
-        self.declare_parameter('soft_semantic_inflation_radius', 0.45)
-        self.declare_parameter('soft_semantic_inflation_cost', 45)
         
         self.map_path = self.get_parameter('map_path').get_parameter_value().string_value
         self.publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
@@ -39,12 +37,6 @@ class SAM3ColoredMapLoader(Node):
             str(name).lower()
             for name in self.get_parameter('semantic_cost_classes').get_parameter_value().string_array_value
         }
-        self.soft_semantic_inflation_radius = (
-            self.get_parameter('soft_semantic_inflation_radius').get_parameter_value().double_value
-        )
-        self.soft_semantic_inflation_cost = (
-            self.get_parameter('soft_semantic_inflation_cost').get_parameter_value().integer_value
-        )
         
         # Publishers
         self.pub_cloud = self.create_publisher(PointCloud2, '/sam3/static_colored_map_cloud', 10)
@@ -191,22 +183,6 @@ class SAM3ColoredMapLoader(Node):
         # インデックス1（壁）は常にLETHAL
         cost_grid[grid == 1] = 100
         soft_cost_grid[grid == 1] = 100
-
-        soft_inflation_cells = int(round(self.soft_semantic_inflation_radius / res))
-        if soft_inflation_cells > 0 and self.soft_semantic_inflation_cost > 0:
-            soft_obstacle_mask = ((soft_cost_grid > 0) & (soft_cost_grid < 100)).astype(np.uint8)
-            if np.any(soft_obstacle_mask):
-                kernel_size = soft_inflation_cells * 2 + 1
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-                inflated_mask = cv2.dilate(soft_obstacle_mask, kernel, iterations=1).astype(bool)
-                inflated_cost = int(
-                    np.clip(
-                        self.soft_semantic_inflation_cost,
-                        self.soft_semantic_min_cost,
-                        self.soft_semantic_max_cost
-                    )
-                )
-                soft_cost_grid[inflated_mask] = np.maximum(soft_cost_grid[inflated_mask], inflated_cost)
         
         # ログ出力
         semantic_cells = int(np.sum(cost_grid == 100))
