@@ -560,6 +560,7 @@ class SiriusBleGateway(Node):
             "ble_link": ble_link,
             "active": active,
             "emergency_stop": getattr(self, '_emergency_stop_active', False),
+            "battery": getattr(self, '_last_battery_data', None),
             "advertise_name": self.advertise_name,
             "service_uuid": self.service_uuid,
             "stamp": time.time(),
@@ -1020,6 +1021,7 @@ class SiriusBleGateway(Node):
         return f"{minutes}分"
 
     def _publish_battery_json(self, data: dict):
+        self._last_battery_data = data
         msg = String()
         msg.data = json.dumps(data, ensure_ascii=False)
         self.battery_json_pub.publish(msg)
