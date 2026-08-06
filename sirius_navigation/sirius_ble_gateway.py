@@ -952,30 +952,6 @@ class SiriusBleGateway(Node):
 
     async def _resolve_and_create_station(self, C300, BleakScanner, BLEDevice):
         self.get_logger().info(f"Resolving battery BLE device {self.battery_mac}")
-        try:
-            ble_device = await BleakScanner.find_device_by_address(
-                self.battery_mac,
-                timeout=5.0,
-            )
-            if ble_device:
-                self.get_logger().info(f"Found battery BLE device via scan: {ble_device.name} [{ble_device.address}]")
-                return C300(ble_device)
-        except Exception as exc:
-            self.get_logger().warning(
-                f"Battery scan failed: {exc}"
-            )
-
-        try:
-            self.get_logger().info("Discovering BLE devices to populate BlueZ DBus...")
-            devices = await BleakScanner.discover(timeout=5.0)
-            for d in devices:
-                if d.address.upper() == self.battery_mac.upper():
-                    self.get_logger().info(f"Found battery via discover: {d.address}")
-                    return C300(d)
-        except Exception as exc:
-            self.get_logger().warning(f"BLE discovery failed: {exc}")
-
-        self.get_logger().info("Using direct BlueZ path for known battery MAC as last resort")
         details = {
             "path": f"/org/bluez/hci0/dev_{self.battery_mac.replace(':', '_')}",
             "props": {
