@@ -85,6 +85,7 @@ class SiriusStatusMonitor(Node):
         self.current_vel_x = 0.0
         self.current_vel_theta = 0.0
         self.surrounding_people_count = 0
+        self.tracked_people = {}
         self.current_expression = "unknown"
         self.face_active = True
         self.last_nav_control = "idle"
@@ -141,11 +142,60 @@ class SiriusStatusMonitor(Node):
         self.current_vel_theta = msg.twist.twist.angular.z
 
     def marker_callback(self, msg):
-        tracked_ids = set()
         for marker in msg.markers:
-            if marker.ns == 'tracked_targets' and marker.action == Marker.ADD:
-                tracked_ids.add(marker.id)
-        self.surrounding_people_count = len(tracked_ids)
+            if marker.ns == 'tracked_targets':
+                if marker.action == Marker.ADD:
+                    r, g, b = marker.color.r, marker.color.g, marker.color.b
+                    is_primary = False
+                    is_static = False
+                    if abs(r - 1.0) < 0.1 and abs(g - 0.5) < 0.1 and abs(b - 0.0) < 0.1:
+                        is_primary = True
+                    elif abs(r - 0.5) < 0.1 and abs(g - 0.5) < 0.1 and abs(b - 0.5) < 0.1:
+                        is_static = True
+                    
+                    self.tracked_people[marker.id] = {
+                        "x": marker.pose.position.x,
+                        "y": marker.pose.position.y,
+                        "is_primary": is_primary,
+                        "is_static": is_static
+                    }
+                elif marker.action == Marker.DELETE:
+                    self.tracked_people.pop(marker.id, None)
+        
+        # Count non-static active tracked people
+        self.surrounding_people_count = len([p for p in self.tracked_people.values() if not p["is_static"]])
+
+    def get_tracked_people_relative(self):
+        rx, ry, ryaw_deg = self.get_pose()
+        ryaw_rad = math.radians(ryaw_deg)
+        
+        relative_people = []
+        for person_id, data in list(self.tracked_people.items()):
+            tx = data["x"]
+            ty = data["y"]
+            dx = tx - rx
+            dy = ty - ry
+            
+            # Coordinate transform to robot base footprint frame:
+            # robot_x points forward, robot_y points left
+            robot_x = dx * math.cos(ryaw_rad) + dy * math.sin(ryaw_rad)
+            robot_y = -dx * math.sin(ryaw_rad) + dy * math.cos(ryaw_rad)
+            
+            dist = math.hypot(robot_x, robot_y)
+            angle_rad = math.atan2(robot_y, robot_x)
+            angle_deg = math.degrees(angle_rad)
+            
+            relative_people.append({
+                "id": person_id,
+                "rel_x": robot_x,
+                "rel_y": robot_y,
+                "distance": dist,
+                "angle": angle_deg,
+                "is_primary": data["is_primary"],
+                "is_static": data["is_static"]
+            })
+        relative_people.sort(key=lambda p: p["distance"])
+        return relative_people
 
     def goal_callback(self, msg):
         q = msg.pose.orientation
@@ -480,6 +530,7 @@ class RadarWidget(QWidget):
         self.obstacle_distances = {"front": 999.0, "left": 999.0, "right": 999.0, "back": 999.0}
         self.obstacle_points = []
         self.footprint = []
+        self.tracked_people = []
         self.setMinimumSize(220, 220)
 
     def set_distances(self, distances):
@@ -492,6 +543,10 @@ class RadarWidget(QWidget):
 
     def set_footprint(self, footprint):
         self.footprint = footprint
+        self.update()
+
+    def set_tracked_people(self, people):
+        self.tracked_people = people
         self.update()
 
     def _footprint_radius_at(self, angle_rad):
@@ -613,6 +668,54 @@ class RadarWidget(QWidget):
         painter.setBrush(QBrush(QColor(0, 168, 255)))
         painter.setPen(QPen(QColor(255, 255, 255), 1.5))
         painter.drawEllipse(QPointF(center_x, center_y), 7, 7)
+
+        # Draw tracked people
+        for person in self.tracked_people:
+            px = center_x - person["rel_y"] * scale
+            py = center_y - person["rel_x"] * scale
+            dist = person["distance"]
+
+            if person["is_primary"]:
+                color = QColor(255, 127, 0) # Orange
+                brush = QBrush(QColor(255, 127, 0, 180))
+            elif person["is_static"]:
+                color = QColor(120, 120, 120) # Grey
+                brush = QBrush(QColor(120, 120, 120, 120))
+            else:
+                color = QColor(0, 210, 255) # Cyan
+                brush = QBrush(QColor(0, 210, 255, 180))
+
+            if dist <= max_range:
+                # Draw outer glow circle
+                painter.setPen(QPen(color, 2, Qt.SolidLine))
+                painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 40)))
+                painter.drawEllipse(QPointF(px, py), 12, 12)
+                
+                # Draw inner solid circle
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(brush)
+                painter.drawEllipse(QPointF(px, py), 6, 6)
+                
+                # Draw text ID above the circle
+                painter.setPen(QPen(QColor(255, 255, 255), 1))
+                painter.setFont(QFont("Arial", 8, QFont.Bold))
+                painter.drawText(int(px - 15), int(py - 14), f"ID:{person['id']}")
+            else:
+                # Draw at the boundary of the radar max_range
+                bx = center_x - (person["rel_y"] / dist) * max_range * scale
+                by = center_y - (person["rel_x"] / dist) * max_range * scale
+                
+                # Draw a small circle at the edge
+                painter.setPen(QPen(color, 1.5, Qt.SolidLine))
+                painter.setBrush(brush)
+                painter.drawEllipse(QPointF(bx, by), 4, 4)
+                
+                # Draw ID text near the boundary with indicator
+                tx = bx - (person["rel_y"] / dist) * 12
+                ty = by - (person["rel_x"] / dist) * 12
+                painter.setPen(QPen(QColor(200, 200, 200), 1))
+                painter.setFont(QFont("Arial", 7))
+                painter.drawText(int(tx - 12), int(ty + 4), f"ID:{person['id']}➔")
 
 
 class StatusMonitorWidget(QWidget):
@@ -787,6 +890,32 @@ class StatusMonitorWidget(QWidget):
         right_layout.addWidget(self.radar_widget)
         right_layout.addSpacing(10)
 
+        # トラッキング対象者の情報表示セクション
+        target_title = QLabel("👥 Tracked Targets (People)")
+        target_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #00a8ff;")
+        right_layout.addWidget(target_title)
+
+        self.target_info_scroll = QScrollArea()
+        self.target_info_scroll.setFixedHeight(120)
+        self.target_info_scroll.setWidgetResizable(True)
+        self.target_info_scroll.setStyleSheet("""
+            QScrollArea {
+                background-color: #1a1a1c;
+                border: 1px solid #3e3d32;
+                border-radius: 4px;
+            }
+        """)
+
+        self.target_info_widget = QWidget()
+        self.target_info_layout = QVBoxLayout(self.target_info_widget)
+        self.target_info_layout.setContentsMargins(6, 6, 6, 6)
+        self.target_info_layout.setSpacing(6)
+        self.target_info_layout.addStretch()
+
+        self.target_info_scroll.setWidget(self.target_info_widget)
+        right_layout.addWidget(self.target_info_scroll)
+        right_layout.addSpacing(10)
+
         # ナレッジスクロールエリア
         know_title = QLabel("💡 Monitor Target Knowledge")
         know_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #fbc531;")
@@ -833,7 +962,7 @@ class StatusMonitorWidget(QWidget):
 
         self.gui_timer = QTimer(self)
         self.gui_timer.timeout.connect(self.refresh_gui)
-        self.gui_timer.start(1000)  # 1Hz
+        self.gui_timer.start(100)  # 10Hz (100ms)
 
         self.refresh_gui()
 
@@ -866,8 +995,71 @@ class StatusMonitorWidget(QWidget):
             """)
 
         # レーダー表示の更新
+        relative_people = self.node.get_tracked_people_relative()
         self.radar_widget.set_distances(self.node.obstacle_distances)
         self.radar_widget.set_points(self.node.obstacle_points)
+        self.radar_widget.set_tracked_people(relative_people)
+
+        # トラッキング対象者リストの表示更新
+        while self.target_info_layout.count() > 1:
+            child = self.target_info_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        if not relative_people:
+            no_target_lbl = QLabel("No targets tracked (周囲に追従対象なし)")
+            no_target_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; font-style: italic; padding: 4px;")
+            self.target_info_layout.insertWidget(self.target_info_layout.count() - 1, no_target_lbl)
+        else:
+            for p in relative_people:
+                angle = p["angle"]
+                if -15.0 <= angle <= 15.0:
+                    dir_lbl = "正面"
+                elif 15.0 < angle <= 60.0:
+                    dir_lbl = "左前方"
+                elif -60.0 <= angle < -15.0:
+                    dir_lbl = "右前方"
+                elif 60.0 < angle <= 120.0:
+                    dir_lbl = "左側"
+                elif -120.0 <= angle < -60.0:
+                    dir_lbl = "右側"
+                else:
+                    dir_lbl = "後方"
+
+                if p["is_primary"]:
+                    status_text = "FOLLOW"
+                    status_style = "color: #ff7f00; font-weight: bold;"
+                    border_style = "border: 1px solid #ff7f00; background-color: #2b1f13;"
+                elif p["is_static"]:
+                    status_text = "STATIC"
+                    status_style = "color: #7f8c8d; font-weight: bold;"
+                    border_style = "border: 1px solid #4a4a4a; background-color: #1c1c1e;"
+                else:
+                    status_text = "TRACK"
+                    status_style = "color: #00d2ff; font-weight: bold;"
+                    border_style = "border: 1px solid #00d2ff; background-color: #132730;"
+
+                card = QFrame()
+                card.setStyleSheet(f"""
+                    QFrame {{
+                        {border_style}
+                        border-radius: 4px;
+                        padding: 4px;
+                    }}
+                """)
+                card_layout = QHBoxLayout(card)
+                card_layout.setContentsMargins(6, 4, 6, 4)
+
+                id_lbl = QLabel(f"ID:{p['id']} [{status_text}]")
+                id_lbl.setStyleSheet(f"font-size: 11px; {status_style}")
+                card_layout.addWidget(id_lbl)
+
+                info_lbl = QLabel(f"Dist:{p['distance']:.2f}m | {dir_lbl} ({angle:+.1f}°)")
+                info_lbl.setStyleSheet("color: #e3e3e6; font-size: 11px;")
+                info_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                card_layout.addWidget(info_lbl)
+
+                self.target_info_layout.insertWidget(self.target_info_layout.count() - 1, card)
 
         # コマンドキュー/履歴の表示更新
         active = self.node.active_command
