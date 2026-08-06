@@ -55,7 +55,7 @@ class TwistMuxMonitor(Node):
 
         # 優先順位が高い順にチェック
         # 1. STOP (255)
-        if self.is_stopped and (now - self.last_stop_time < 1.0):
+        if self.is_stopped:
             winner = "STOP (LOCKED)"
             priority = 255
         # 2. TELEOP (100)

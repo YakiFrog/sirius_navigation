@@ -30,6 +30,7 @@ class TeleopHandler:
         p_type = payload.get("type")
         if p_type in ["emergency_stop", "estop"]:
             state = bool(payload.get("state", True))
+            self.node.emergency_stop_active = state
             stop_msg = Bool()
             stop_msg.data = state
             self.node.stop_pub.publish(stop_msg)
@@ -45,6 +46,10 @@ class TeleopHandler:
             else:
                 self.node.send_sirius_speak("[happy]電子緊急停止を解除したのだ。")
                 self.node.get_logger().info("🟢 [Electronic Emergency Stop] Released via Remote Controller")
+            return True
+
+        if getattr(self.node, 'emergency_stop_active', False):
+            self.node.get_logger().warning("🚨 Manual teleop command ignored because Emergency Stop is ACTIVE.")
             return True
 
         if p_type != "manual_teleop":

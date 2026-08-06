@@ -220,6 +220,7 @@ class LlmDynamicGoal(Node):
         self.assisted_drive_blocked_reported = False
         self.assisted_drive_last_route_log_time = 0.0
         self.assisted_drive_last_commanded_x = 0.0
+        self.emergency_stop_active = False
 
         # モジュール類のインスタンス化
         self.llm_client = LlmClient(self)
@@ -240,6 +241,7 @@ class LlmDynamicGoal(Node):
         self.dynamic_goal_timer = self.create_timer(0.1, self.timer_goal_publisher)
         self.landmark_reload_timer = self.create_timer(2.0, self.landmark_reload_timer_callback)
         self.landmark_marker_timer = self.create_timer(2.0, self.landmark_marker_timer_callback)
+        self.estop_heartbeat_timer = self.create_timer(1.0, self.estop_heartbeat_timer_callback)
 
         # 対話型コマンドライン入力を別スレッドで開始
         self.running = True
@@ -429,6 +431,12 @@ class LlmDynamicGoal(Node):
 
     def landmark_marker_timer_callback(self):
         self.landmark_mgr.publish_landmark_markers()
+
+    def estop_heartbeat_timer_callback(self):
+        if getattr(self, 'emergency_stop_active', False):
+            stop_msg = Bool()
+            stop_msg.data = True
+            self.stop_pub.publish(stop_msg)
 
     # --- ROS Subscriber and Service Callbacks ---
     def odom_callback(self, msg):
@@ -647,18 +655,20 @@ class LlmDynamicGoal(Node):
         
         # 0. 電子緊急停止・緊急停止解除の直通判定（最優先）
         normalized_inst = instruction.lower().strip()
-        estop_off_keywords = ["緊急停止解除", "電子緊急停止解除", "緊急停止オフ", "estop off", "estop_release"]
+        estop_off_keywords = ["緊急停止解除", "電子緊急停止解除", "緊急停止オフ", "estop off", "estop_release", "emergency_stop_release"]
         if any(kw in normalized_inst for kw in estop_off_keywords):
             self.get_logger().info("Emergency Stop RELEASE keyword detected.")
+            self.emergency_stop_active = False
             stop_msg = Bool()
             stop_msg.data = False
             self.stop_pub.publish(stop_msg)
             self.send_sirius_speak("[happy]電子緊急停止を解除したのだ。")
             return
 
-        estop_on_keywords = ["緊急停止", "電子緊急停止", "エマージェンシーストップ", "estop"]
+        estop_on_keywords = ["緊急停止", "電子緊急停止", "エマージェンシーストップ", "estop", "emergency_stop"]
         if any(kw in normalized_inst for kw in estop_on_keywords):
             self.get_logger().warning("Emergency Stop ACTIVATED keyword detected.")
+            self.emergency_stop_active = True
             stop_msg = Bool()
             stop_msg.data = True
             self.stop_pub.publish(stop_msg)
@@ -667,6 +677,11 @@ class LlmDynamicGoal(Node):
             self.cmd_vel_teleop_pub.publish(zero_twist)
             self.cmd_vel_direct_pub.publish(zero_twist)
             self.send_sirius_speak("[angry]電子緊急停止が実行されたのだ！")
+            return
+
+        if self.emergency_stop_active:
+            self.get_logger().warning("Instruction ignored because Electronic Emergency Stop is active.")
+            self.send_sirius_speak("[sad]電子緊急停止中だから動けないのだ！解除してからもう一度言ってほしいのだ。")
             return
         cancel_keywords = ["キャンセル", "cancel", "中止", "取り消", "とりけし"]
         if any(kw in instruction.lower() for kw in cancel_keywords):

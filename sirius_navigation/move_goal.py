@@ -215,10 +215,6 @@ class Nav2GoalClient(Node):
         self._paused_by_user = should_stop
         if not should_stop:
             self._cancelled_by_user = False
-        if should_stop == True:
-            time.sleep(5)
-            stop_msg.data = False
-            self.stop_publisher.publish(stop_msg)
         wp = None
         if goal_index is not None and goal_index < len(self.waypoints):
             wp = self.waypoints[goal_index]

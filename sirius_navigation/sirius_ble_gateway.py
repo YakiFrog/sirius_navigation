@@ -81,6 +81,8 @@ class SiriusBleGateway(Node):
         self.battery_json_pub = self.create_publisher(String, "/sirius/battery_status", 10)
         self.battery_state_pub = self.create_publisher(BatteryState, "/battery_state", 10)
         self.ear_led_status_pub = self.create_publisher(String, "/sirius/ear_led_status", 10)
+        self.stop_pub = self.create_publisher(Bool, "/stop", 10)
+        self.instruction_pub = self.create_publisher(String, "/llm_instruction", 10)
 
         self._blinker_sub = self.create_subscription(
             String,
@@ -118,6 +120,8 @@ class SiriusBleGateway(Node):
         self._ear_led_left_client = None
         self._ear_led_right_client = None
         self._ear_led_stop = False
+        self._emergency_stop_active = False
+        self._estop_heartbeat_timer = self.create_timer(1.0, self._estop_heartbeat_timer_callback)
         self._ear_led_blinking = False
         self._ear_led_blink_on = True
         self._ear_led_left_command = "M:1"
@@ -359,13 +363,61 @@ class SiriusBleGateway(Node):
         if text.startswith("[nav]"):
             instruction = text[len("[nav]"):].strip()
             if instruction:
-                threading.Thread(
-                    target=self._send_to_nav_http,
-                    args=(instruction,),
-                    daemon=True,
-                ).start()
+                self._process_nav_command(instruction)
             return
         threading.Thread(target=self._send_to_face_speak, args=(text,), daemon=True).start()
+
+    def _estop_heartbeat_timer_callback(self):
+        if getattr(self, '_emergency_stop_active', False):
+            stop_msg = Bool()
+            stop_msg.data = True
+            self.stop_pub.publish(stop_msg)
+
+    def _process_nav_command(self, instruction: str):
+        if not instruction:
+            return
+
+        # 1. /llm_instruction ROS 2 トピックに直接配信（HTTP障害時のセーフティ）
+        instr_msg = String()
+        instr_msg.data = instruction
+        self.instruction_pub.publish(instr_msg)
+
+        # 2. 電子緊急停止コマンドであれば直接 /stop にパブリッシュ（即時停止保障）
+        try:
+            if instruction.startswith("{") and instruction.endswith("}"):
+                payload = json.loads(instruction)
+                p_type = payload.get("type")
+                if p_type in ["emergency_stop", "estop"]:
+                    state = bool(payload.get("state", True))
+                    self._emergency_stop_active = state
+                    self._ear_led_stop = state
+                    stop_msg = Bool()
+                    stop_msg.data = state
+                    self.stop_pub.publish(stop_msg)
+                    self.get_logger().warning(f"🚨 [BLE Gateway Direct] Emergency Stop published directly to /stop: state={state}")
+            elif any(kw in instruction.lower() for kw in ["緊急停止解除", "電子緊急停止解除", "estop off", "estop_release"]):
+                self._emergency_stop_active = False
+                self._ear_led_stop = False
+                stop_msg = Bool()
+                stop_msg.data = False
+                self.stop_pub.publish(stop_msg)
+                self.get_logger().info("🟢 [BLE Gateway Direct] Emergency Stop RELEASED directly to /stop: state=False")
+            elif any(kw in instruction.lower() for kw in ["緊急停止", "電子緊急停止", "estop"]):
+                self._emergency_stop_active = True
+                self._ear_led_stop = True
+                stop_msg = Bool()
+                stop_msg.data = True
+                self.stop_pub.publish(stop_msg)
+                self.get_logger().warning("🚨 [BLE Gateway Direct] Emergency Stop keyword published directly to /stop: state=True")
+        except Exception as e:
+            self.get_logger().error(f"Error processing nav command in BLE Gateway: {e}")
+
+        # 3. HTTP サーバーへ転送
+        threading.Thread(
+            target=self._send_to_nav_http,
+            args=(instruction,),
+            daemon=True,
+        ).start()
 
     async def _stop_remote_server(self):
         try:
@@ -457,19 +509,6 @@ class SiriusBleGateway(Node):
         msg = String()
         msg.data = text
         self.remote_command_pub.publish(msg)
-
-        if text.startswith("[nav]"):
-            instruction = text[len("[nav]"):].strip()
-            self.get_logger().info(f"Remote BLE nav command: {instruction}")
-            threading.Thread(
-                target=self._send_to_nav_http,
-                args=(instruction,),
-                daemon=True,
-            ).start()
-            return
-
-        self.get_logger().info(f"Remote BLE speak/chat command: {text}")
-        threading.Thread(target=self._send_to_face_speak, args=(text,), daemon=True).start()
 
     def _send_to_nav_http(self, instruction: str):
         if not instruction:
@@ -908,21 +947,30 @@ class SiriusBleGateway(Node):
 
     async def _resolve_and_create_station(self, C300, BleakScanner, BLEDevice):
         self.get_logger().info(f"Resolving battery BLE device {self.battery_mac}")
-        if self.battery_scan_before_connect:
-            try:
-                ble_device = await BleakScanner.find_device_by_address(
-                    self.battery_mac,
-                    timeout=10.0,
-                )
-                if ble_device:
-                    return C300(ble_device)
-            except Exception as exc:
-                self.get_logger().warning(
-                    "Battery scan failed; falling back to direct BlueZ path: "
-                    f"{exc}"
-                )
+        try:
+            ble_device = await BleakScanner.find_device_by_address(
+                self.battery_mac,
+                timeout=5.0,
+            )
+            if ble_device:
+                self.get_logger().info(f"Found battery BLE device via scan: {ble_device.name} [{ble_device.address}]")
+                return C300(ble_device)
+        except Exception as exc:
+            self.get_logger().warning(
+                f"Battery scan failed: {exc}"
+            )
 
-        self.get_logger().info("Using direct BlueZ path for known battery MAC")
+        try:
+            self.get_logger().info("Discovering BLE devices to populate BlueZ DBus...")
+            devices = await BleakScanner.discover(timeout=5.0)
+            for d in devices:
+                if d.address.upper() == self.battery_mac.upper():
+                    self.get_logger().info(f"Found battery via discover: {d.address}")
+                    return C300(d)
+        except Exception as exc:
+            self.get_logger().warning(f"BLE discovery failed: {exc}")
+
+        self.get_logger().info("Using direct BlueZ path for known battery MAC as last resort")
         details = {
             "path": f"/org/bluez/hci0/dev_{self.battery_mac.replace(':', '_')}",
             "props": {

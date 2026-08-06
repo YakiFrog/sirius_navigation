@@ -201,11 +201,12 @@ class NavController:
         stop_msg.data = True
         self.node.stop_pub.publish(stop_msg)
         
-        if auto_reset_stop:
+        if auto_reset_stop and not getattr(self.node, 'emergency_stop_active', False):
             def reset_stop():
-                msg = Bool()
-                msg.data = False
-                self.node.stop_pub.publish(msg)
+                if not getattr(self.node, 'emergency_stop_active', False):
+                    msg = Bool()
+                    msg.data = False
+                    self.node.stop_pub.publish(msg)
             threading.Timer(1.0, reset_stop).start()
 
     def resume_navigation(self):
