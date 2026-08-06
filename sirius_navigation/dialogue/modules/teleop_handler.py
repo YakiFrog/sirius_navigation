@@ -12,6 +12,42 @@ try:
 except ImportError:
     from local_parser import DIALOGUE_TEMPLATES
 
+STANDARD_MOTION_MACROS = {
+    "sway": {
+        "name": "左右にフリフリ",
+        "duration": 3.2,
+        "loop": False,
+        "events": [
+            (0.0, 0.0, 0.5),
+            (0.6, 0.0, -0.5),
+            (1.4, 0.0, 0.5),
+            (2.2, 0.0, -0.5),
+            (3.0, 0.0, 0.0),
+        ],
+    },
+    "dance": {
+        "name": "前後ゆらゆらダンス",
+        "duration": 2.8,
+        "loop": False,
+        "events": [
+            (0.0, 0.18, 0.0),
+            (0.7, -0.15, 0.0),
+            (1.4, 0.18, 0.0),
+            (2.1, -0.15, 0.0),
+            (2.7, 0.0, 0.0),
+        ],
+    },
+    "spin": {
+        "name": "360度その場スピン",
+        "duration": 3.6,
+        "loop": False,
+        "events": [
+            (0.0, 0.0, 0.65),
+            (3.4, 0.0, 0.0),
+        ],
+    },
+}
+
 class TeleopHandler:
     def __init__(self, node):
         self.node = node
@@ -93,6 +129,121 @@ class TeleopHandler:
                 f"route={route} teleop_subscribers={teleop_subscribers}"
             )
         return True
+
+    def _publish_motion_twist(self, linear: float, angular: float):
+        twist = Twist()
+        twist.linear.x = max(-0.35, min(0.35, float(linear)))
+        twist.angular.z = max(-1.2, min(1.2, float(angular)))
+
+        teleop_subscribers = self.node.cmd_vel_teleop_pub.get_subscription_count()
+        if teleop_subscribers > 0:
+            self.node.cmd_vel_teleop_pub.publish(twist)
+            route = "cmd_vel_teleop"
+        else:
+            self.node.cmd_vel_direct_pub.publish(twist)
+            route = "cmd_vel_direct"
+
+        now = self.node.get_clock().now().nanoseconds / 1e9
+        with self.node.lock:
+            should_log = now - getattr(self.node, "motion_macro_last_route_log_time", 0.0) > 1.0
+            if should_log:
+                self.node.motion_macro_last_route_log_time = now
+
+        if should_log:
+            self.node.get_logger().info(
+                f"[MotionMacro] publishing to {route} "
+                f"(teleop_subscribers={teleop_subscribers}, linear.x={twist.linear.x:.2f}, angular.z={twist.angular.z:.2f})"
+            )
+
+    def start_motion_macro(self, motion_id: str, speed_scale: float = 1.0, loop: bool = None, should_speak: bool = True) -> bool:
+        macro = STANDARD_MOTION_MACROS.get(str(motion_id or "").lower())
+        if not macro:
+            self.node.get_logger().warning(f"[MotionMacro] unknown motion id: {motion_id}")
+            return False
+
+        self.stop_motion_macro()
+        self.node.nav_ctrl.ensure_assisted_teleop_goal()
+        self.node.publish_nav_control("pause_silent")
+
+        scale = max(0.25, min(2.5, float(speed_scale or 1.0)))
+        should_loop = bool(macro.get("loop", False) if loop is None else loop)
+        now = self.node.get_clock().now().nanoseconds / 1e9
+
+        with self.node.lock:
+            self.node.motion_macro_active = True
+            self.node.motion_macro_id = str(motion_id or "").lower()
+            self.node.motion_macro_name = macro["name"]
+            self.node.motion_macro_events = list(macro["events"])
+            self.node.motion_macro_duration = float(macro["duration"])
+            self.node.motion_macro_loop = should_loop
+            self.node.motion_macro_speed_scale = scale
+            self.node.motion_macro_start_time = now
+            self.node.motion_macro_next_index = 0
+            self.node.motion_macro_last_route_log_time = 0.0
+
+        if should_speak:
+            self.node.send_sirius_speak(f"[happy]{macro['name']}を再生するのだ！")
+        self.node.get_logger().info(
+            f"[MotionMacro] start id={motion_id} name={macro['name']} scale={scale:.2f} loop={should_loop}"
+        )
+        return True
+
+    def stop_motion_macro(self):
+        with self.node.lock:
+            was_active = getattr(self.node, "motion_macro_active", False)
+            self.node.motion_macro_active = False
+            self.node.motion_macro_id = None
+            self.node.motion_macro_name = ""
+            self.node.motion_macro_events = []
+            self.node.motion_macro_duration = 0.0
+            self.node.motion_macro_loop = False
+            self.node.motion_macro_next_index = 0
+            self.node.motion_macro_start_time = 0.0
+
+        if was_active:
+            self.node.get_logger().info("[MotionMacro] stopped")
+        self._publish_motion_twist(0.0, 0.0)
+
+    def timer_motion_macro_player(self):
+        with self.node.lock:
+            active = getattr(self.node, "motion_macro_active", False)
+            events = list(getattr(self.node, "motion_macro_events", []))
+            start_time = getattr(self.node, "motion_macro_start_time", 0.0)
+            index = getattr(self.node, "motion_macro_next_index", 0)
+            duration = getattr(self.node, "motion_macro_duration", 0.0)
+            loop = getattr(self.node, "motion_macro_loop", False)
+            scale = getattr(self.node, "motion_macro_speed_scale", 1.0) or 1.0
+
+        if not active or not events:
+            return
+
+        now = self.node.get_clock().now().nanoseconds / 1e9
+        elapsed = (now - start_time) * scale
+
+        while index < len(events) and elapsed >= events[index][0]:
+            _, linear, angular = events[index]
+            self._publish_motion_twist(linear * scale, angular * scale)
+            index += 1
+
+        finished = elapsed >= duration and index >= len(events)
+        if finished and loop:
+            with self.node.lock:
+                self.node.motion_macro_start_time = now
+                self.node.motion_macro_next_index = 0
+            return
+
+        if finished:
+            with self.node.lock:
+                self.node.motion_macro_active = False
+                self.node.motion_macro_next_index = 0
+                self.node.last_action_status = "success"
+            self._publish_motion_twist(0.0, 0.0)
+            self.node.get_logger().info("[MotionMacro] completed")
+            self.node.cmd_executor.execute_next_command()
+            return
+
+        with self.node.lock:
+            self.node.motion_macro_next_index = index
 
     def publish_assisted_drive_twist(self, twist: Twist):
         """前後移動の速度指令を publish する。"""

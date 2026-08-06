@@ -221,6 +221,16 @@ class LlmDynamicGoal(Node):
         self.assisted_drive_last_route_log_time = 0.0
         self.assisted_drive_last_commanded_x = 0.0
         self.emergency_stop_active = False
+        self.motion_macro_active = False
+        self.motion_macro_id = None
+        self.motion_macro_name = ""
+        self.motion_macro_events = []
+        self.motion_macro_duration = 0.0
+        self.motion_macro_loop = False
+        self.motion_macro_speed_scale = 1.0
+        self.motion_macro_start_time = 0.0
+        self.motion_macro_next_index = 0
+        self.motion_macro_last_route_log_time = 0.0
 
         # モジュール類のインスタンス化
         self.llm_client = LlmClient(self)
@@ -237,6 +247,7 @@ class LlmDynamicGoal(Node):
 
         # タイマー登録
         self.assisted_drive_timer = self.create_timer(0.1, self.timer_assisted_drive_publisher)
+        self.motion_macro_timer = self.create_timer(0.05, self.timer_motion_macro_player)
         self.goal_monitor_timer = self.create_timer(1.0, self.monitor_goal_distance)
         self.dynamic_goal_timer = self.create_timer(0.1, self.timer_goal_publisher)
         self.landmark_reload_timer = self.create_timer(2.0, self.landmark_reload_timer_callback)
@@ -425,6 +436,9 @@ class LlmDynamicGoal(Node):
     # --- Timer Callbacks delegating to modules ---
     def timer_assisted_drive_publisher(self):
         self.teleop_ctrl.timer_assisted_drive_publisher()
+
+    def timer_motion_macro_player(self):
+        self.teleop_ctrl.timer_motion_macro_player()
 
     def landmark_reload_timer_callback(self):
         self.landmark_mgr.load_landmarks_for_current_map()
@@ -818,7 +832,7 @@ class LlmDynamicGoal(Node):
 
         sorted_commands = [c for c in commands if c.get("type") == "speed"] + [c for c in commands if c.get("type") != "speed"]
         
-        if any(c.get("type") in ["forward", "backward", "turn", "spin", "face", "goto"] for c in sorted_commands):
+        if any(c.get("type") in ["forward", "backward", "turn", "spin", "face", "goto", "motion"] for c in sorted_commands):
             self.set_target_following(False, speak_on_failure=False)
             self.nav_ctrl.publish_nav_control("pause_silent")
         self.nav_ctrl.cancel_navigation(clear_queue=False)

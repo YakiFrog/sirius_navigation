@@ -11,7 +11,7 @@ class CommandExecutor:
         self.node = node
 
     def _normalize_expression_value(self, value):
-        valid = ["normal", "happy", "angry", "sad", "surprised", "cat", "wink", "pien", "sleeping"]
+        valid = ["normal", "happy", "angry", "sad", "surprised", "cat", "wink", "pien", "sleeping", "battery"]
         if isinstance(value, str):
             lowered = value.strip().lower()
             if lowered in valid:
@@ -95,6 +95,8 @@ class CommandExecutor:
             cmd_name = f"{'右' if value < 0 else '左'}に{abs(deg)}度旋回"
         elif cmd_type == "spin":
             cmd_name = f"その場旋回 ({value}度)"
+        elif cmd_type == "motion":
+            cmd_name = f"モーション再生 '{value}'"
         elif cmd_type == "face":
             cmd_name = f"方位 {value}度を向く"
         elif cmd_type == "register_landmark":
@@ -207,6 +209,25 @@ class CommandExecutor:
                 else:
                     self.node.send_sirius_speak(f"[cat]ユーモアレベルを{level:.1f}にしたのだ！ちょっと生意気にいくのだ。")
             self.execute_next_command()
+            return
+
+        if cmd_type == "motion":
+            motion_id = value
+            speed_scale = 1.0
+            loop = None
+            if isinstance(value, dict):
+                motion_id = value.get("id") or value.get("name") or value.get("motion")
+                speed_scale = value.get("speed_scale", value.get("scale", 1.0))
+                loop = value.get("loop")
+            ok = self.node.teleop_ctrl.start_motion_macro(
+                str(motion_id or "sway"),
+                speed_scale=speed_scale,
+                loop=loop,
+                should_speak=should_speak,
+            )
+            if not ok:
+                self.node.send_sirius_speak("[sad]そのモーションはまだ登録されていないのだ。フリフリ、ダンス、スピンのどれかで指定してほしいのだ。")
+                self.execute_next_command()
             return
 
         if cmd_type == "reset":

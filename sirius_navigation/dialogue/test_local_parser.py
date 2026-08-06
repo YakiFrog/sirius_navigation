@@ -155,6 +155,22 @@ class TestLocalParser(unittest.TestCase):
         self.assertTrue(res.get("fast_path"))
         self.assertEqual(res.get("speak"), "バッテリーテストメッセージ")
 
+    def test_battery_screen_command(self):
+        res = parse_local_rules("電池画面を出して", self.state_info)
+        self.assertIsNotNone(res)
+        commands = res.get("commands", [])
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["type"], "expression")
+        self.assertEqual(commands[0]["value"], "battery")
+
+    def test_motion_macro_command(self):
+        res = parse_local_rules("フリフリして", self.state_info)
+        self.assertIsNotNone(res)
+        commands = res.get("commands", [])
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["type"], "motion")
+        self.assertEqual(commands[0]["value"]["id"], "sway")
+
     def test_origin_return(self):
         res = parse_local_rules("原点に戻って", self.state_info)
         self.assertIsNotNone(res)

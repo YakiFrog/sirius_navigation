@@ -54,6 +54,12 @@ EFFECT_KEYWORDS = [
     ("shake", "shake"),
 ]
 
+MOTION_MACRO_KEYWORDS = [
+    ("sway", ["フリフリ", "ふりふり", "左右に揺", "左右揺", "横に揺", "ゆらゆら左右", "左右モーション", "sway"]),
+    ("dance", ["ダンス", "だんす", "前後ゆらゆら", "前後にゆら", "前後モーション", "dance"]),
+    ("spin", ["スピンモーション", "回転モーション", "一回転モーション", "くるっと回", "くるりと回", "spinmotion"]),
+]
+
 LOOK_KEYWORDS = [
     ("右を見", "right"),
     ("右見", "right"),
@@ -369,6 +375,14 @@ def build_clarification_response(norm_inst):
             "speak": vague_motion_exact[norm_inst]
         }
 
+    if norm_inst in ["モーション", "モーションして", "モーション再生", "モーション再生して"]:
+        return {
+            "commands": [],
+            "cancel": False,
+            "fast_path": True,
+            "speak": "[normal]どのモーションにしますか？フリフリ、ダンス、スピンモーションのどれかで指定してほしいのだ。"
+        }
+
     vague_approach_words = ["手前に来", "こっち来", "こっちに来", "近くに来", "近づいて"]
     if any(word in norm_inst for word in vague_approach_words):
         return {
@@ -386,6 +400,23 @@ def build_clarification_response(norm_inst):
             "fast_path": True,
             "speak": "[normal]何をどう制御しますか？移動、速度、表情などを具体的に指定してほしいのだ。"
         }
+
+    return None
+
+def parse_motion_macro_command(norm_inst):
+    if not any(word in norm_inst for word in ["モーション", "motion", "フリフリ", "ふりふり", "ダンス", "だんす", "ゆらゆら", "くるっと", "くるり"]):
+        return None
+
+    for motion_id, keywords in MOTION_MACRO_KEYWORDS:
+        if any(keyword in norm_inst for keyword in keywords):
+            value = {"id": motion_id}
+            if any(word in norm_inst for word in ["ループ", "繰り返", "くりかえ", "ずっと"]):
+                value["loop"] = True
+            if any(word in norm_inst for word in ["ゆっくり", "遅く", "おそく", "スロー"]):
+                value["speed_scale"] = 0.5
+            elif any(word in norm_inst for word in ["早く", "速く", "はやく", "倍速"]):
+                value["speed_scale"] = 1.5
+            return {"type": "motion", "value": value}
 
     return None
 
@@ -628,6 +659,15 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     if any(pat in norm_inst for pat in cancel_patterns):
         return {"commands": [], "cancel": True}
 
+    motion_cmd = parse_motion_macro_command(norm_inst)
+    if motion_cmd:
+        return {
+            "commands": [motion_cmd],
+            "cancel": False,
+            "fast_path": True,
+            "speak": "[happy]モーションを再生するのだ！止まれと言われたらすぐ止まるのだ。"
+        }
+
     # 1.5 直前の目標・一時停止からの再開
     resume_goal_queries = ["前回の目的地", "さっきの目的地", "前の目的地", "続き", "続行", "再開", "もう一回同じ", "同じ目的地"]
     if any(q in norm_inst for q in resume_goal_queries):
@@ -635,6 +675,13 @@ def parse_local_rules(instruction, state_info, battery_callback=None):
     
     # 2. バッテリー情報の判定
     if any(x in norm_inst for x in ["バッテリー", "ばってりー", "電池", "でんち"]):
+        if any(x in norm_inst for x in ["画面", "表示", "出して", "見せ", "みせ"]):
+            return {
+                "commands": [{"type": "expression", "value": "battery"}],
+                "cancel": False,
+                "fast_path": True,
+                "speak": "[happy]電池画面を表示するのだ！"
+            }
         if battery_callback:
             battery_msg = battery_callback()
             return {"commands": [], "cancel": False, "fast_path": True, "speak": battery_msg}

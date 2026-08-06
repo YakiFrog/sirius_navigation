@@ -98,6 +98,7 @@ class NavController:
         
         # 前進・後退のアシスト走行（タイマーパブリッシャー）を停止する
         self.node.teleop_ctrl.stop_assisted_drive()
+        self.node.teleop_ctrl.stop_motion_macro()
         
         stuck_msg_bool = Bool()
         stuck_msg_bool.data = False
