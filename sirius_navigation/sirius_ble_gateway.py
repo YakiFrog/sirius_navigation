@@ -501,6 +501,13 @@ class SiriusBleGateway(Node):
         if text == "[ping]":
             self.get_logger().debug("Remote BLE ping received")
             self._remote_last_activity = time.time()
+            status_payload = {
+                "type": "status",
+                "status": "connected",
+                "emergency_stop": getattr(self, '_emergency_stop_active', False),
+                "battery": getattr(self, '_last_battery_data', None),
+            }
+            characteristic.value = json.dumps(status_payload, ensure_ascii=False).encode("utf-8")
             self._publish_remote_status("connected", ble_link=True, active=True, last_payload="[ping]")
             return
 
