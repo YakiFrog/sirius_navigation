@@ -27,7 +27,27 @@ class TeleopHandler:
         except json.JSONDecodeError:
             return False
 
-        if payload.get("type") != "manual_teleop":
+        p_type = payload.get("type")
+        if p_type in ["emergency_stop", "estop"]:
+            state = bool(payload.get("state", True))
+            stop_msg = Bool()
+            stop_msg.data = state
+            self.node.stop_pub.publish(stop_msg)
+
+            zero_twist = Twist()
+            self.node.cmd_vel_teleop_pub.publish(zero_twist)
+            self.node.cmd_vel_direct_pub.publish(zero_twist)
+
+            if state:
+                self.node.cancel_navigation(clear_queue=True, preserve_current_goal=False, auto_reset_stop=False)
+                self.node.send_sirius_speak("[angry]電子緊急停止が実行されたのだ！")
+                self.node.get_logger().warning("🚨 [Electronic Emergency Stop] Activated via Remote Controller")
+            else:
+                self.node.send_sirius_speak("[happy]電子緊急停止を解除したのだ。")
+                self.node.get_logger().info("🟢 [Electronic Emergency Stop] Released via Remote Controller")
+            return True
+
+        if p_type != "manual_teleop":
             return False
 
         assisted_value = payload.get("assisted", True)

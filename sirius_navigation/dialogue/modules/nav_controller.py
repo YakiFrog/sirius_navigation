@@ -92,7 +92,7 @@ class NavController:
         marker.action = Marker.DELETE
         self.node.marker_pub.publish(marker)
 
-    def cancel_navigation(self, clear_queue=True, preserve_current_goal=False):
+    def cancel_navigation(self, clear_queue=True, preserve_current_goal=False, auto_reset_stop=True):
         """実行中のナビゲーションをキャンセル"""
         self.delete_marker()
         
@@ -201,11 +201,12 @@ class NavController:
         stop_msg.data = True
         self.node.stop_pub.publish(stop_msg)
         
-        def reset_stop():
-            msg = Bool()
-            msg.data = False
-            self.node.stop_pub.publish(msg)
-        threading.Timer(1.0, reset_stop).start()
+        if auto_reset_stop:
+            def reset_stop():
+                msg = Bool()
+                msg.data = False
+                self.node.stop_pub.publish(msg)
+            threading.Timer(1.0, reset_stop).start()
 
     def resume_navigation(self):
         """停止前の目標を再開する"""

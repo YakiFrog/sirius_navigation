@@ -645,7 +645,29 @@ class LlmDynamicGoal(Node):
         if self.landmark_mgr.handle_landmark_deletion_instruction(instruction):
             return
         
-        # 1. 停止・キャンセル指示の簡易キーワード判定（高速応答のため）
+        # 0. 電子緊急停止・緊急停止解除の直通判定（最優先）
+        normalized_inst = instruction.lower().strip()
+        estop_off_keywords = ["緊急停止解除", "電子緊急停止解除", "緊急停止オフ", "estop off", "estop_release"]
+        if any(kw in normalized_inst for kw in estop_off_keywords):
+            self.get_logger().info("Emergency Stop RELEASE keyword detected.")
+            stop_msg = Bool()
+            stop_msg.data = False
+            self.stop_pub.publish(stop_msg)
+            self.send_sirius_speak("[happy]電子緊急停止を解除したのだ。")
+            return
+
+        estop_on_keywords = ["緊急停止", "電子緊急停止", "エマージェンシーストップ", "estop"]
+        if any(kw in normalized_inst for kw in estop_on_keywords):
+            self.get_logger().warning("Emergency Stop ACTIVATED keyword detected.")
+            stop_msg = Bool()
+            stop_msg.data = True
+            self.stop_pub.publish(stop_msg)
+            self.cancel_navigation(clear_queue=True, preserve_current_goal=False, auto_reset_stop=False)
+            zero_twist = Twist()
+            self.cmd_vel_teleop_pub.publish(zero_twist)
+            self.cmd_vel_direct_pub.publish(zero_twist)
+            self.send_sirius_speak("[angry]電子緊急停止が実行されたのだ！")
+            return
         cancel_keywords = ["キャンセル", "cancel", "中止", "取り消", "とりけし"]
         if any(kw in instruction.lower() for kw in cancel_keywords):
             self.get_logger().warning("Cancel keyword detected. Clearing active goal.")
