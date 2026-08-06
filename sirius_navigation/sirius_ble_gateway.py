@@ -490,7 +490,8 @@ class SiriusBleGateway(Node):
     def _handle_remote_ble_write(self, characteristic, value: bytes, **kwargs):
         characteristic.value = value
         try:
-            text = bytes(value).decode("utf-8").strip()
+            raw_bytes = bytes(value)
+            text = raw_bytes.decode("utf-8").strip()
         except Exception as exc:
             self.get_logger().warning(f"Failed to decode BLE remote payload: {exc}")
             return
@@ -502,6 +503,9 @@ class SiriusBleGateway(Node):
             self._remote_last_activity = time.time()
             self._publish_remote_status("connected", ble_link=True, active=True, last_payload="[ping]")
             return
+
+        # 診断用: 受信した生データをINFOレベルでログ出力
+        self.get_logger().info(f"🔵 [BLE RAW] len={len(raw_bytes)} hex={raw_bytes.hex()} text={repr(text)}")
 
         self._remote_last_activity = time.time()
         self._publish_remote_status("connected", ble_link=True, active=True, last_payload=text)
@@ -555,6 +559,7 @@ class SiriusBleGateway(Node):
             "status": status,
             "ble_link": ble_link,
             "active": active,
+            "emergency_stop": getattr(self, '_emergency_stop_active', False),
             "advertise_name": self.advertise_name,
             "service_uuid": self.service_uuid,
             "stamp": time.time(),
