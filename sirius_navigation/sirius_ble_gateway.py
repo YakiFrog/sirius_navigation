@@ -377,12 +377,7 @@ class SiriusBleGateway(Node):
         if not instruction:
             return
 
-        # 1. /llm_instruction ROS 2 トピックに直接配信（HTTP障害時のセーフティ）
-        instr_msg = String()
-        instr_msg.data = instruction
-        self.instruction_pub.publish(instr_msg)
-
-        # 2. 電子緊急停止コマンドであれば直接 /stop にパブリッシュ（即時停止保障）
+        # 1. 電子緊急停止コマンドであれば直接 /stop にパブリッシュ（即時停止保障）
         try:
             if instruction.startswith("{") and instruction.endswith("}"):
                 payload = json.loads(instruction)
@@ -412,12 +407,30 @@ class SiriusBleGateway(Node):
         except Exception as e:
             self.get_logger().error(f"Error processing nav command in BLE Gateway: {e}")
 
-        # 3. HTTP サーバーへ転送
+        # 2. ナビゲーション処理へは必ず一つの経路だけで配送する。
+        # 通常は低遅延なROS 2トピックを使い、購読者がいない場合だけHTTPへ
+        # フォールバックする。両方へ同時配送すると同じ指令が二重実行される。
+        self._forward_nav_instruction(instruction)
+
+    def _forward_nav_instruction(self, instruction: str) -> str:
+        """Select one downstream route for a navigation instruction."""
+        subscriber_count = self.instruction_pub.get_subscription_count()
+        if subscriber_count > 0:
+            instr_msg = String()
+            instr_msg.data = instruction
+            self.instruction_pub.publish(instr_msg)
+            return 'ros_topic'
+
+        self.get_logger().warning(
+            'No /llm_instruction subscribers; falling back '
+            'to navigation HTTP endpoint'
+        )
         threading.Thread(
             target=self._send_to_nav_http,
             args=(instruction,),
             daemon=True,
         ).start()
+        return 'http'
 
     async def _stop_remote_server(self):
         try:
