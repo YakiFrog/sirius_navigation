@@ -488,26 +488,26 @@ class SiriusBleGateway(Node):
             self._publish_remote_status("stopped", ble_link=False, active=False)
 
     def _handle_remote_ble_write(self, characteristic, value: bytes, **kwargs):
-        characteristic.value = value
         try:
             raw_bytes = bytes(value)
             text = raw_bytes.decode("utf-8").strip()
         except Exception as exc:
             self.get_logger().warning(f"Failed to decode BLE remote payload: {exc}")
-            return
+            text = ""
+
+        status_payload = {
+            "type": "status",
+            "status": "connected",
+            "emergency_stop": getattr(self, '_emergency_stop_active', False),
+            "battery": getattr(self, '_last_battery_data', None),
+        }
+        characteristic.value = json.dumps(status_payload, ensure_ascii=False).encode("utf-8")
 
         if not text:
             return
         if text == "[ping]":
             self.get_logger().debug("Remote BLE ping received")
             self._remote_last_activity = time.time()
-            status_payload = {
-                "type": "status",
-                "status": "connected",
-                "emergency_stop": getattr(self, '_emergency_stop_active', False),
-                "battery": getattr(self, '_last_battery_data', None),
-            }
-            characteristic.value = json.dumps(status_payload, ensure_ascii=False).encode("utf-8")
             self._publish_remote_status("connected", ble_link=True, active=True, last_payload="[ping]")
             return
 
@@ -649,12 +649,20 @@ class SiriusBleGateway(Node):
             if not self._ear_led_left_client or not self._ear_led_left_client.is_connected:
                 self.get_logger().info(f"Connecting left ear LED BLE: {self.ear_led_left_mac}")
                 self._ear_led_left_client = BleakClient(self.ear_led_left_mac)
-                await self._ear_led_left_client.connect()
+                try:
+                    await asyncio.wait_for(self._ear_led_left_client.connect(), timeout=4.0)
+                except Exception as exc:
+                    self.get_logger().warning(f"Left Ear LED connection timed out / failed: {exc}")
+                    self._ear_led_left_client = None
 
             if not self._ear_led_right_client or not self._ear_led_right_client.is_connected:
                 self.get_logger().info(f"Connecting right ear LED BLE: {self.ear_led_right_mac}")
                 self._ear_led_right_client = BleakClient(self.ear_led_right_mac)
-                await self._ear_led_right_client.connect()
+                try:
+                    await asyncio.wait_for(self._ear_led_right_client.connect(), timeout=4.0)
+                except Exception as exc:
+                    self.get_logger().warning(f"Right Ear LED connection timed out / failed: {exc}")
+                    self._ear_led_right_client = None
 
     def _ear_leds_connected(self) -> bool:
         return bool(
@@ -773,9 +781,14 @@ class SiriusBleGateway(Node):
                             BLEDevice,
                         )
                         self.get_logger().info(f"Connecting to battery BLE: {self.battery_mac}")
-                        if not await self._battery_device.connect():
+                        try:
+                            connected = await asyncio.wait_for(self._battery_device.connect(), timeout=8.0)
+                        except Exception as exc:
+                            self.get_logger().warning(f"Battery BLE connect timed out/failed: {exc}")
+                            connected = False
+                        if not connected:
                             self.get_logger().warning("Battery BLE connection failed; retrying")
-                            await asyncio.sleep(5.0)
+                            await asyncio.sleep(3.0)
                             continue
 
                 try:
@@ -1032,6 +1045,20 @@ class SiriusBleGateway(Node):
         msg = String()
         msg.data = json.dumps(data, ensure_ascii=False)
         self.battery_json_pub.publish(msg)
+
+        if hasattr(self, "_remote_server") and self._remote_server:
+            try:
+                char = self._remote_server.get_characteristic(self.characteristic_uuid)
+                if char:
+                    status_payload = {
+                        "type": "status",
+                        "status": "connected",
+                        "emergency_stop": getattr(self, '_emergency_stop_active', False),
+                        "battery": data,
+                    }
+                    char.value = json.dumps(status_payload, ensure_ascii=False).encode("utf-8")
+            except Exception:
+                pass
 
     def _publish_battery_state(self, data: dict):
         msg = BatteryState()
