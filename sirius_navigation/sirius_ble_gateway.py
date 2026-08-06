@@ -52,6 +52,7 @@ class SiriusBleGateway(Node):
             os.path.expanduser("~/sirius_face_anim2/scripts/stubs"),
         )
         self.declare_parameter("publish_face_battery_params", True)
+        self.declare_parameter("enable_battery_speech", True)
 
         self.enable_remote_server = self._bool_param("enable_remote_server")
         self.enable_battery_client = self._bool_param("enable_battery_client")
@@ -71,6 +72,7 @@ class SiriusBleGateway(Node):
         self.face_status_grpc_target = self._str_param("face_status_grpc_target")
         self.face_stubs_dir = self._str_param("face_stubs_dir")
         self.publish_face_battery_params = self._bool_param("publish_face_battery_params")
+        self.enable_battery_speech = self._bool_param("enable_battery_speech")
 
         _append_face_stubs_dir(self.face_stubs_dir)
 
@@ -93,6 +95,12 @@ class SiriusBleGateway(Node):
             10,
         )
         self._stop_sub = self.create_subscription(Bool, "/stop", self._on_stop_command, 1)
+        self._battery_speech_sub = self.create_subscription(
+            Bool,
+            "/sirius/battery_speech_enable",
+            self._on_battery_speech_enable,
+            10,
+        )
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -119,6 +127,16 @@ class SiriusBleGateway(Node):
         self._ear_led_last_right_command = "M:1"
         self._ear_led_last_mode = "normal"
         self._last_ear_led_status = None
+
+        # Battery speech trigger state machine variables
+        self._has_spoken_40 = False
+        self._has_spoken_10 = False
+        self._has_spoken_full = False
+        self._has_spoken_charging_start = False
+        self._was_charging = False
+        self._battery_first_run = True
+        self._last_critical_time = 0.0
+        self._charging_start_time = 0.0
 
         self._thread.start()
         self._schedule_gateway_tasks()
@@ -224,6 +242,114 @@ class SiriusBleGateway(Node):
             mode=self._ear_led_mode_text(),
             force=True,
         )
+
+    def _on_battery_speech_enable(self, msg: Bool):
+        self.enable_battery_speech = bool(msg.data)
+        self.get_logger().info(f"Battery speech output enabled set to: {self.enable_battery_speech}")
+
+    def speak_on_sirius(self, text: str):
+        if not self.enable_battery_speech:
+            self.get_logger().info(f"Battery speech suppressed (disabled): {text}")
+            return
+        threading.Thread(target=self._send_to_face_speak, args=(text,), daemon=True).start()
+
+    def _check_battery_speech_triggers(self, data: dict):
+        if data.get("status") != "connected":
+            return
+
+        percentage = data.get("battery_level", -1.0)
+        if percentage < 0:
+            return
+
+        is_charging = bool(data.get("is_charging", False))
+
+        SPEECH_CHARGING_START = "[happy]バッテリーの充電を開始しました。"
+        SPEECH_BATTERY_LOW_40 = "[sad]バッテリー残量が40パーセント以下になりました。そろそろ充電してください。"
+        SPEECH_BATTERY_CRITICAL_10 = "[angry]バッテリー残量が10パーセント以下になりました！大至急、充電してください！"
+        SPEECH_BATTERY_FULL = "[happy]バッテリーの充電が１００パーセントになりました！"
+
+        if self._battery_first_run:
+            if percentage <= 10:
+                self._has_spoken_10 = True
+                self._has_spoken_40 = True
+                self._last_critical_time = time.time()
+            elif percentage <= 40:
+                self._has_spoken_40 = True
+            elif percentage >= 100:
+                self._has_spoken_full = True
+
+            if is_charging:
+                self._has_spoken_charging_start = True
+            self._was_charging = is_charging
+            self._battery_first_run = False
+        else:
+            # 1. 充電状態の遷移判定
+            if is_charging and not self._was_charging:
+                self._has_spoken_charging_start = False
+                self._charging_start_time = time.time()
+            elif not is_charging and self._was_charging:
+                self._has_spoken_charging_start = False
+                if percentage <= 10:
+                    self._last_critical_time = 0.0
+                    self._has_spoken_10 = False
+            self._was_charging = is_charging
+
+            # 充電開始の報告ロジック
+            if is_charging and not self._has_spoken_charging_start:
+                time_rem = float(data.get("time_remaining", 0.0))
+                if (0.0 < time_rem < 200.0) or (time.time() - self._charging_start_time > 6.0):
+                    time_str = self._format_remaining_time(time_rem)
+                    if time_str:
+                        self.speak_on_sirius(f"{SPEECH_CHARGING_START}満充電までの推定時間は{time_str}です。")
+                    else:
+                        self.speak_on_sirius(SPEECH_CHARGING_START)
+                    self._has_spoken_charging_start = True
+
+            # 2. 満充電の判定
+            if percentage >= 100:
+                if not self._has_spoken_full:
+                    self.speak_on_sirius(SPEECH_BATTERY_FULL)
+                    self._has_spoken_full = True
+            else:
+                if percentage <= 98:
+                    self._has_spoken_full = False
+
+            def get_status_report(base_text: str) -> str:
+                power_out = float(data.get("total_output", 0.0))
+                time_rem = float(data.get("time_remaining", 0.0))
+                if power_out > 0 and 0.0 < time_rem < 200.0:
+                    time_str = self._format_remaining_time(time_rem)
+                    if time_str:
+                        insert_text = f"推定残り駆動時間は{time_str}です。"
+                        if "以下になりました。" in base_text:
+                            return base_text.replace("以下になりました。", f"以下になりました。{insert_text}")
+                        elif "以下になりました！" in base_text:
+                            return base_text.replace("以下になりました！", f"以下になりました！{insert_text}")
+                        return f"{base_text} {insert_text}"
+                return base_text
+
+            # 3. バッテリー残量低下の判定
+            if percentage <= 10:
+                current_time = time.time()
+                if not is_charging and (not self._has_spoken_10 or (current_time - self._last_critical_time) >= 120.0):
+                    report_text = get_status_report(SPEECH_BATTERY_CRITICAL_10)
+                    self.speak_on_sirius(report_text)
+                    self._has_spoken_10 = True
+                    self._has_spoken_40 = True
+                    self._last_critical_time = current_time
+            elif percentage <= 40:
+                if not self._has_spoken_40 and not is_charging:
+                    report_text = get_status_report(SPEECH_BATTERY_LOW_40)
+                    self.speak_on_sirius(report_text)
+                    self._has_spoken_40 = True
+                if percentage >= 13:
+                    self._has_spoken_10 = False
+                    self._last_critical_time = 0.0
+            else:
+                if percentage >= 45:
+                    self._has_spoken_40 = False
+                    self._has_spoken_10 = False
+                    self._last_critical_time = 0.0
 
     def _on_remote_command(self, msg: String):
         text = (msg.data or "").strip()
@@ -613,6 +739,7 @@ class SiriusBleGateway(Node):
                 self._publish_battery_json(data)
                 self._publish_battery_state(data)
                 self._update_face_battery_params(data)
+                self._check_battery_speech_triggers(data)
             except asyncio.CancelledError:
                 break
             except Exception as exc:

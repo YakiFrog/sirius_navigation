@@ -21,6 +21,7 @@ def generate_launch_description():
         DeclareLaunchArgument("face_speak_grpc_target", default_value="localhost:50052"),
         DeclareLaunchArgument("face_status_grpc_target", default_value="localhost:50051"),
         DeclareLaunchArgument("publish_face_battery_params", default_value="true"),
+        DeclareLaunchArgument("enable_battery_speech", default_value="true"),
         Node(
             package="sirius_navigation",
             executable="sirius_ble_gateway",
@@ -42,6 +43,7 @@ def generate_launch_description():
                 "face_speak_grpc_target": LaunchConfiguration("face_speak_grpc_target"),
                 "face_status_grpc_target": LaunchConfiguration("face_status_grpc_target"),
                 "publish_face_battery_params": LaunchConfiguration("publish_face_battery_params"),
+                "enable_battery_speech": LaunchConfiguration("enable_battery_speech"),
             }],
         ),
     ])
