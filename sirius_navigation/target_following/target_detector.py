@@ -6,6 +6,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Int32
 from tf2_ros import Buffer, TransformListener
 import math
 import numpy as np
@@ -108,6 +109,10 @@ class TargetDetector(Node):
         from visualization_msgs.msg import Marker, MarkerArray
         self.marker_pub = self.create_publisher(Marker, '/target_detector/range_marker', 10)
         self.target_marker_pub = self.create_publisher(MarkerArray, '/target_detector/target_markers', 10)
+        self.people_count_pub = self.create_publisher(
+            Int32, '/target_detector/people_count', 10)
+        self.tracked_people_count_pub = self.create_publisher(
+            Int32, '/target_detector/tracked_people_count', 10)
         
         # 二つのスキャントピックを非同期的に購読
         self.leg_scan_sub = self.create_subscription(LaserScan, self.leg_scan_topic, self.leg_scan_callback, 10)
@@ -647,6 +652,8 @@ class TargetDetector(Node):
         # Update peopleCount and trackedPeopleCount to FaceService via gRPC if changed
         detected_count = sum(1 for det in detected_targets if det.get('has_matching_leg', False)) if detected_targets is not None else 0
         tracked_count = len(self.tracks)
+        self.people_count_pub.publish(Int32(data=detected_count))
+        self.tracked_people_count_pub.publish(Int32(data=tracked_count))
         if detected_count != self.last_sent_people_count or tracked_count != self.last_sent_tracked_count:
             self.send_people_counts_grpc(detected_count, tracked_count)
 

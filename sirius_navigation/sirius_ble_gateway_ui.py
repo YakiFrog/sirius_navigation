@@ -53,13 +53,20 @@ BATTERY_OPTIONS = [
 
 
 class BatteryStatusNode(Node):
-    def __init__(self, battery_callback, remote_callback, ear_led_callback):
+    def __init__(self, battery_callback, remote_callback, network_callback, ear_led_callback):
         super().__init__("sirius_ble_gateway_ui_status")
         self.create_subscription(String, "/sirius/battery_status", self._on_status, 10)
         self.create_subscription(String, "/sirius/remote_status", self._on_remote_status, 10)
+        self.create_subscription(
+            String,
+            "/sirius/network_remote_status",
+            self._on_network_status,
+            10,
+        )
         self.create_subscription(String, "/sirius/ear_led_status", self._on_ear_led_status, 10)
         self._battery_callback = battery_callback
         self._remote_callback = remote_callback
+        self._network_callback = network_callback
         self._ear_led_callback = ear_led_callback
 
     def _on_status(self, msg):
@@ -76,6 +83,13 @@ class BatteryStatusNode(Node):
             data = {"status": "invalid", "raw": msg.data}
         self._remote_callback(data)
 
+    def _on_network_status(self, msg):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            data = {"status": "invalid", "raw": msg.data}
+        self._network_callback(data)
+
     def _on_ear_led_status(self, msg):
         try:
             data = json.loads(msg.data)
@@ -87,6 +101,7 @@ class BatteryStatusNode(Node):
 class RosStatusThread(QThread):
     battery_status_received = Signal(dict)
     remote_status_received = Signal(dict)
+    network_status_received = Signal(dict)
     ear_led_status_received = Signal(dict)
     ros_error = Signal(str)
 
@@ -102,6 +117,7 @@ class RosStatusThread(QThread):
             self._node = BatteryStatusNode(
                 self.battery_status_received.emit,
                 self.remote_status_received.emit,
+                self.network_status_received.emit,
                 self.ear_led_status_received.emit,
             )
             self._executor = SingleThreadedExecutor()
@@ -133,17 +149,23 @@ class SiriusBleGatewayWindow(QMainWindow):
         self.process.started.connect(self._on_process_started)
         self.process.finished.connect(self._on_process_finished)
         self.process.errorOccurred.connect(self._on_process_error)
+        self.network_process = QProcess(self)
+        self.network_process.setProcessChannelMode(QProcess.MergedChannels)
+        self.network_process.readyReadStandardOutput.connect(self._read_network_process_output)
 
         self.last_status_time = None
         self.last_status_data = {}
         self.last_remote_status_time = None
         self.last_remote_status_data = {}
+        self.last_network_status_time = None
+        self.last_network_status_data = {}
         self.last_ear_led_status_time = None
         self.last_ear_led_status_data = {}
 
         self.ros_thread = RosStatusThread()
         self.ros_thread.battery_status_received.connect(self._update_battery_status)
         self.ros_thread.remote_status_received.connect(self._update_remote_status)
+        self.ros_thread.network_status_received.connect(self._update_network_status)
         self.ros_thread.ear_led_status_received.connect(self._update_ear_led_status)
         self.ros_thread.ros_error.connect(lambda text: self._append_log(f"[ROS UI] {text}", "warn"))
         self.ros_thread.start()
@@ -202,6 +224,10 @@ class SiriusBleGatewayWindow(QMainWindow):
             ("advertise_name", "広告名"),
             ("service_uuid", "Service UUID"),
             ("last_payload", "最終受信"),
+            ("network_status", "ネット接続"),
+            ("network_controller", "ネット操作者"),
+            ("pairing_code", "ペアリングコード"),
+            ("pairing_expires", "コード期限"),
             ("last_update", "最終更新"),
         ]
         for row, (key, label) in enumerate(remote_rows):
@@ -314,6 +340,14 @@ class SiriusBleGatewayWindow(QMainWindow):
 
         self._append_log("起動コマンド: ros2 " + " ".join(args), "info")
         self.process.start("ros2", args)
+        self.network_process.start(
+            "ros2",
+            ["launch", "sirius_navigation", "sirius_network_gateway.launch.py"],
+        )
+        self._append_log(
+            "Network Gatewayを起動します (WebSocket port 8766)。",
+            "info",
+        )
 
     @Slot()
     def stop_gateway(self):
@@ -321,12 +355,16 @@ class SiriusBleGatewayWindow(QMainWindow):
             return
         self._append_log("BLE Gatewayを停止します。", "warn")
         self.process.terminate()
+        if self.network_process.state() != QProcess.NotRunning:
+            self.network_process.terminate()
         QTimer.singleShot(3000, self._kill_if_running)
 
     def _kill_if_running(self):
         if self.process.state() != QProcess.NotRunning:
             self._append_log("通常停止できなかったため強制終了します。", "warn")
             self.process.kill()
+        if self.network_process.state() != QProcess.NotRunning:
+            self.network_process.kill()
 
     @Slot()
     def _on_process_started(self):
@@ -338,6 +376,8 @@ class SiriusBleGatewayWindow(QMainWindow):
 
     @Slot(int, QProcess.ExitStatus)
     def _on_process_finished(self, code, status):
+        if self.network_process.state() != QProcess.NotRunning:
+            self.network_process.terminate()
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.battery_combo.setEnabled(True)
@@ -360,6 +400,17 @@ class SiriusBleGatewayWindow(QMainWindow):
             elif "[WARN]" in line or "warning" in line.lower():
                 kind = "warn"
             self._append_log(line, kind)
+
+    @Slot()
+    def _read_network_process_output(self):
+        text = bytes(self.network_process.readAllStandardOutput()).decode(errors="replace")
+        for line in text.splitlines():
+            kind = "info"
+            if "[ERROR]" in line or "Traceback" in line or "RuntimeError" in line:
+                kind = "error"
+            elif "[WARN]" in line or "warning" in line.lower():
+                kind = "warn"
+            self._append_log("[NETWORK] " + line, kind)
 
     @Slot(dict)
     def _update_battery_status(self, data):
@@ -405,6 +456,28 @@ class SiriusBleGatewayWindow(QMainWindow):
             self.remote_labels["ble_link"].setStyleSheet("font-weight: bold; color: #a33;")
 
     @Slot(dict)
+    def _update_network_status(self, data):
+        self.last_network_status_time = time.time()
+        self.last_network_status_data = data
+        connected = bool(data.get("active"))
+        paired = bool(data.get("paired"))
+        code = str(data.get("pairing_code") or "-")
+        expires = int(data.get("pairing_expires_in") or 0)
+        self.remote_labels["network_status"].setText("接続" if connected else "待機")
+        self.remote_labels["network_controller"].setText(str(data.get("controller") or "-"))
+        self.remote_labels["pairing_code"].setText(code)
+        self.remote_labels["pairing_expires"].setText(
+            f"{expires}秒" if code != "-" else ("ペアリング済み" if paired else "-")
+        )
+        color = "#286b2d" if connected else ("#b36b00" if code != "-" else "#777")
+        self.remote_labels["network_status"].setStyleSheet(
+            f"font-weight: bold; color: {color};"
+        )
+        self.remote_labels["pairing_code"].setStyleSheet(
+            "font-weight: bold; font-size: 20px; letter-spacing: 4px; color: #286b9d;"
+        )
+
+    @Slot(dict)
     def _update_ear_led_status(self, data):
         self.last_ear_led_status_time = time.time()
         self.last_ear_led_status_data = data
@@ -446,6 +519,9 @@ class SiriusBleGatewayWindow(QMainWindow):
             age = time.time() - self.last_remote_status_time
             if age > 6.0:
                 self.remote_labels["last_update"].setText(f"{int(age)}秒前")
+
+        if self.last_network_status_time is None:
+            self.remote_labels["network_status"].setText("未受信")
 
         if self.last_ear_led_status_time is None:
             self.ear_led_labels["last_update"].setText("未受信")
@@ -543,6 +619,9 @@ class SiriusBleGatewayWindow(QMainWindow):
         if self.process.state() != QProcess.NotRunning:
             self.stop_gateway()
             self.process.waitForFinished(1500)
+        if self.network_process.state() != QProcess.NotRunning:
+            self.network_process.terminate()
+            self.network_process.waitForFinished(1500)
         self.ros_thread.stop()
         try:
             if rclpy.ok():

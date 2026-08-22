@@ -12,7 +12,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Int32, String
 
 
 SIRIUS_SERVICE_UUID = "A07498CA-AD5B-474E-940D-16F1F1E0A123"
@@ -103,6 +103,18 @@ class SiriusBleGateway(Node):
             self._on_battery_speech_enable,
             10,
         )
+        self._people_count_sub = self.create_subscription(
+            Int32,
+            "/target_detector/people_count",
+            self._on_people_count,
+            10,
+        )
+        self._tracked_people_count_sub = self.create_subscription(
+            Int32,
+            "/target_detector/tracked_people_count",
+            self._on_tracked_people_count,
+            10,
+        )
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -121,6 +133,9 @@ class SiriusBleGateway(Node):
         self._ear_led_right_client = None
         self._ear_led_stop = False
         self._emergency_stop_active = False
+        self._people_count = None
+        self._tracked_people_count = None
+        self._people_count_at = 0.0
         self._estop_heartbeat_timer = self.create_timer(1.0, self._estop_heartbeat_timer_callback)
         self._ear_led_blinking = False
         self._ear_led_blink_on = True
@@ -513,6 +528,7 @@ class SiriusBleGateway(Node):
             "status": "connected",
             "emergency_stop": getattr(self, '_emergency_stop_active', False),
             "battery": getattr(self, '_last_battery_data', None),
+            **self._people_status_fields(),
         }
         characteristic.value = json.dumps(status_payload, ensure_ascii=False).encode("utf-8")
 
@@ -581,6 +597,7 @@ class SiriusBleGateway(Node):
             "active": active,
             "emergency_stop": getattr(self, '_emergency_stop_active', False),
             "battery": getattr(self, '_last_battery_data', None),
+            **self._people_status_fields(),
             "advertise_name": self.advertise_name,
             "service_uuid": self.service_uuid,
             "stamp": time.time(),
@@ -592,6 +609,9 @@ class SiriusBleGateway(Node):
             data["status"],
             data["ble_link"],
             data["active"],
+            data.get("people_detection_active", False),
+            data.get("people_count"),
+            data.get("tracked_people_count"),
             data.get("last_payload", ""),
         )
         if cache_key == self._last_remote_status and not last_payload:
@@ -601,6 +621,27 @@ class SiriusBleGateway(Node):
         msg = String()
         msg.data = json.dumps(data, ensure_ascii=False)
         self.remote_status_pub.publish(msg)
+
+    def _on_people_count(self, msg: Int32):
+        self._people_count = max(0, int(msg.data))
+        self._people_count_at = time.monotonic()
+
+    def _on_tracked_people_count(self, msg: Int32):
+        self._tracked_people_count = max(0, int(msg.data))
+        self._people_count_at = time.monotonic()
+
+    def _people_status_fields(self):
+        active = (
+            self._people_count_at > 0.0
+            and time.monotonic() - self._people_count_at <= 3.0
+        )
+        return {
+            "people_detection_active": active,
+            "people_count": self._people_count if active else None,
+            "tracked_people_count": (
+                self._tracked_people_count if active else None
+            ),
+        }
 
     async def _run_ear_led_client(self):
         try:
@@ -1068,6 +1109,7 @@ class SiriusBleGateway(Node):
                         "status": "connected",
                         "emergency_stop": getattr(self, '_emergency_stop_active', False),
                         "battery": data,
+                        **self._people_status_fields(),
                     }
                     char.value = json.dumps(status_payload, ensure_ascii=False).encode("utf-8")
             except Exception:

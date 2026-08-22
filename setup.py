@@ -35,6 +35,9 @@ setup(
             'target_detector = sirius_navigation.target_following.target_detector:main',
             'get_position_distance = sirius_navigation.get_position_distance:main',
             'get_position_enter = sirius_navigation.get_position_enter:main',
+            'unity_stereo_bridge = sirius_navigation.unity_stereo_bridge:main',
+            'sam3_offline_node = sirius_navigation.sam3_offline_node:main',
+            'sam3_rosbag_player = sirius_navigation.sam3_rosbag_player:main',
             'sam3_ros_bridge = sirius_navigation.sam3_ros_bridge:main',
             'sam3_indexed_map_node = sirius_navigation.sam3_indexed_map_node:main',
             'sam3_colored_map_loader = sirius_navigation.sam3_colored_map_loader:main',
@@ -44,6 +47,7 @@ setup(
             'odom_path_publisher = sirius_navigation.odom_path_publisher:main',
             'sirius_ble_gateway = sirius_navigation.sirius_ble_gateway:main',
             'sirius_ble_gateway_ui = sirius_navigation.sirius_ble_gateway_ui:main',
+            'sirius_network_gateway = sirius_navigation.sirius_network_gateway:main',
         ],
     },
 )

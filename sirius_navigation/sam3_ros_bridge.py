@@ -118,15 +118,20 @@ class SAM3ROSBridge(Node):
             header.frame_id = self.frame_id
             
             # Use sim_time if available and use_sim_time is True
-            if self.use_sim_time and self.latest_sim_time is not None:
+            now_clock = self.get_clock().now()
+            now_sec = now_clock.nanoseconds / 1e9
+            
+            if self.use_sim_time and self.latest_sim_time is not None and abs(self.latest_sim_time - now_sec) < 10.0:
                 if self.latest_sim_time <= self.last_published_sim_time:
-                    # self.get_logger().warn(f"Skipping duplicate/old timestamp: {self.latest_sim_time}")
                     return
                 header.stamp = self._float_to_time(self.latest_sim_time)
                 self.last_published_sim_time = self.latest_sim_time
                 self.get_logger().info(f"Bridge Sync: Published cloud at sim_time {self.latest_sim_time:.3f}", once=False)
             else:
-                header.stamp = self.get_clock().now().to_msg()
+                header.stamp = now_clock.to_msg()
+                if self.use_sim_time and self.latest_sim_time is not None and self.latest_sim_time > self.last_published_sim_time:
+                    self.last_published_sim_time = self.latest_sim_time
+                    self.get_logger().info(f"Bridge Sync: Published cloud at clock_time {now_sec:.3f} (source: {self.latest_sim_time:.3f})", once=False)
             
             # RTAB-Map/RViz compatibility: keep the public mapping clouds as plain XYZRGB.
             fields_xyzrgb = [
