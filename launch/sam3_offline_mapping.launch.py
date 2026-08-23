@@ -32,8 +32,11 @@ def generate_launch_description():
 
     declare_run_slam = DeclareLaunchArgument(
         'run_slam_toolbox',
-        default_value='true',
-        description='Run Slam Toolbox node during offline mapping'
+        default_value='false',
+        description=(
+            'Run Slam Toolbox during offline replay. Keep false when the bag '
+            'contains corrected TF recorded from the online Slam Toolbox.'
+        )
     )
 
     declare_prompt = DeclareLaunchArgument(
@@ -79,15 +82,23 @@ def generate_launch_description():
     )
 
     # 1B. SAM3 ROS Bridge (Receives 3D pointcloud from Docker backend via WebSocket)
+    sam3_bridge_params = os.path.join(pkg_sirius_nav, 'config', 'sam3_bridge.yaml')
     sam3_bridge_node = Node(
         package='sirius_navigation',
         executable='sam3_ros_bridge',
         name='sam3_ros_bridge',
         output='screen',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'publish_full_cloud': PythonExpression(["'", include_background, "' == 'true'"]),
-        }],
+        # Load the same threshold and point-cloud downsampling used online,
+        # then override only time and background publication for bag replay.
+        parameters=[
+            sam3_bridge_params,
+            {
+                'use_sim_time': use_sim_time,
+                'publish_full_cloud': PythonExpression(
+                    ["'", include_background, "' == 'true'"]
+                ),
+            },
+        ],
         condition=launch.conditions.IfCondition(use_docker_backend)
     )
 
@@ -108,7 +119,8 @@ def generate_launch_description():
         condition=launch.conditions.UnlessCondition(use_docker_backend)
     )
 
-    # 2. SLAM Toolbox (Online Async SLAM with Lifecycle auto-start)
+    # 2. Optional SLAM Toolbox. Normally disabled: replay the corrected TF that
+    # was produced by Slam Toolbox during recording and stored in the bag.
     slam_toolbox_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_slam_toolbox, 'launch', 'online_async_launch.py')
@@ -135,10 +147,11 @@ def generate_launch_description():
             'subscribe_rgb': False,
             'approx_sync': True,
             'use_sim_time': use_sim_time,
-            'wait_for_transform': 0.5,
+            # Match the proven online mapping setup: use Slam Toolbox's
+            # loop-closure-corrected map -> base transform as RTAB-Map odometry.
+            'wait_for_transform': 0.2,
             'publish_tf': False,
-            'odom_frame_id': 'sirius3/odom',
-            'map_frame_id': 'map',
+            'odom_frame_id': 'map',
             'Rtabmap/PublishTf': 'false',
             'Mem/IncrementalMemory': 'true',
             'Mem/InitWMWithAllNodes': 'false',
@@ -147,13 +160,13 @@ def generate_launch_description():
             'RGBD/LinearUpdate': '0.05',
             'RGBD/OptimizeFromGraphEnd': 'false',
             'Grid/FromDepth': 'true',
-            'Reg/Strategy': '1',
+            'Reg/Strategy': '0',
             'Reg/Force3DoF': 'true',
-            'Mem/MaxSize': '3000',
+            'Mem/MaxSize': '2000',
             'Grid/VoxelSize': '0.05',
             'Optimizer/Strategy': '1',
-            'Grid/RangeMax': '8.0',
-            'Grid/RangeMin': '0.5',
+            'Grid/RangeMax': '5.0',
+            'Grid/RangeMin': '0.8',
             'Grid/NoiseFilteringRadius': '0.1',
             'Grid/NoiseFilteringMinNeighbors': '5',
             'Grid/CellSize': '0.05',
