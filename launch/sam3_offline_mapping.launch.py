@@ -48,6 +48,13 @@ def generate_launch_description():
         description='Use GPU Docker container (sam3_zed_server on port 8080) for SAM3 inference'
     )
 
+    declare_use_rviz = DeclareLaunchArgument(
+        'rviz',
+        default_value='false',
+        description='Launch RViz2 for offline mapping monitoring if true'
+    )
+    use_rviz = LaunchConfiguration('rviz')
+
     # SlamToolbox Parameter Selection
     params_dir = os.path.join(os.path.expanduser('~'), 'sirius_jazzy_ws', 'params')
     sim_params = os.path.join(params_dir, 'mapper_params_online_async_sim.yaml')
@@ -130,7 +137,8 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'wait_for_transform': 0.5,
             'publish_tf': False,
-            'odom_frame_id': 'map',
+            'odom_frame_id': 'sirius3/odom',
+            'map_frame_id': 'map',
             'Rtabmap/PublishTf': 'false',
             'Mem/IncrementalMemory': 'true',
             'Mem/InitWMWithAllNodes': 'false',
@@ -139,7 +147,7 @@ def generate_launch_description():
             'RGBD/LinearUpdate': '0.05',
             'RGBD/OptimizeFromGraphEnd': 'false',
             'Grid/FromDepth': 'true',
-            'Reg/Strategy': '0',
+            'Reg/Strategy': '1',
             'Reg/Force3DoF': 'true',
             'Mem/MaxSize': '3000',
             'Grid/VoxelSize': '0.05',
@@ -182,12 +190,25 @@ def generate_launch_description():
         }]
     )
 
+    # 6. RViz2 Monitoring Node
+    rviz_config_path = os.path.join(pkg_sirius_nav, 'rviz', 'sam3_offline_view.rviz')
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2_offline_mapping',
+        arguments=['-d', rviz_config_path],
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=launch.conditions.IfCondition(use_rviz),
+        output='screen'
+    )
+
     return LaunchDescription([
         declare_use_sim_time,
         declare_include_bg,
         declare_run_slam,
         declare_prompt,
         declare_use_docker,
+        declare_use_rviz,
         declare_params_file,
         sam3_player_node,
         sam3_bridge_node,
@@ -195,5 +216,6 @@ def generate_launch_description():
         slam_toolbox_launch,
         rtabmap_node,
         sam3_indexed_map_node,
-        sam3_grid_visualizer_node
+        sam3_grid_visualizer_node,
+        rviz_node
     ])
