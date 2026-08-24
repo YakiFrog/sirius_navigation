@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""
-SAM3 Rosbag Image Feeder (Offline Player Bridge)
+"""Feed rosbag stereo images to the SAM3 server.
+
 Subscribes to recorded stereo images (/camera/stereo_sbs/compressed) from rosbag playback,
 and feeds them via HTTP POST to the GPU-accelerated sam3_zed_server (Docker on port 8080).
 Works completely without requiring PyTorch/CUDA in the host ROS2 environment!
 """
 
-import sys
 import json
-import urllib.request
 import urllib.error
+import urllib.request
+
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
@@ -23,26 +24,33 @@ class SAM3RosbagPlayer(Node):
         self.declare_parameter('server_url', 'http://localhost:8080/upload_frame')
         self.declare_parameter('image_topic', '/camera/stereo_sbs/compressed')
         self.declare_parameter('params_topic', '/camera/stereo_params')
-        self.declare_parameter('min_interval_sec', 0.05) # Max 20 FPS feed rate
+        self.declare_parameter('min_interval_sec', 0.05)  # Max 20 FPS feed rate
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', True)
 
         self.server_url = self.get_parameter('server_url').get_parameter_value().string_value
         self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         self.params_topic = self.get_parameter('params_topic').get_parameter_value().string_value
-        self.min_interval = self.get_parameter('min_interval_sec').get_parameter_value().double_value
+        self.min_interval = (
+            self.get_parameter('min_interval_sec').get_parameter_value().double_value
+        )
 
         self.last_feed_time = 0.0
         self.camera_params = {
             'fx': 448.14, 'fy': 448.14, 'cx': 640.0, 'cy': 360.0, 'baseline': 0.12
         }
+        self.camera_params_received = False
+        self.first_frame_sent = False
 
         # Subscribers
+        # rosbag2 replays sensor-data topics as BEST_EFFORT. A RELIABLE
+        # subscription is incompatible and silently receives no images, so use
+        # the standard sensor-data QoS profile explicitly.
         self.sub_image = self.create_subscription(
             CompressedImage,
             self.image_topic,
             self._image_callback,
-            10
+            qos_profile_sensor_data
         )
         self.sub_params = self.create_subscription(
             String,
@@ -51,7 +59,9 @@ class SAM3RosbagPlayer(Node):
             10
         )
 
-        self.get_logger().info(f"SAM3 Rosbag Player started. Feeding {self.image_topic} to {self.server_url}")
+        self.get_logger().info(
+            f'SAM3 Rosbag Player started. Feeding {self.image_topic} to {self.server_url}'
+        )
 
     def _params_callback(self, msg: String):
         try:
@@ -59,10 +69,30 @@ class SAM3RosbagPlayer(Node):
             for k in ['fx', 'fy', 'cx', 'cy', 'baseline']:
                 if k in p:
                     self.camera_params[k] = float(p[k])
+            self.camera_params_received = all(
+                key in p for key in ['fx', 'fy', 'cx', 'cy', 'baseline']
+            )
+            if self.camera_params_received:
+                source = p.get('source', 'unknown')
+                serial = p.get('serial_number', 'unknown')
+                fx = self.camera_params['fx']
+                baseline = self.camera_params['baseline']
+                self.get_logger().info(
+                    f'Camera calibration ready: source={source}, serial={serial}, '
+                    f'fx={fx:.2f}, baseline={baseline:.4f}m',
+                    once=True,
+                )
         except Exception as e:
-            self.get_logger().warn(f"Failed to parse camera params: {e}")
+            self.get_logger().warning(f'Failed to parse camera params: {e}')
 
     def _image_callback(self, msg: CompressedImage):
+        if not self.camera_params_received:
+            self.get_logger().warning(
+                'Camera image received before /camera/stereo_params; frame is not sent to SAM3.',
+                throttle_duration_sec=5.0,
+            )
+            return
+
         now_sec = self.get_clock().now().nanoseconds / 1e9
         if now_sec - self.last_feed_time < self.min_interval:
             return
@@ -90,13 +120,28 @@ class SAM3RosbagPlayer(Node):
             )
 
             with urllib.request.urlopen(req, timeout=1.0) as response:
-                pass
+                if response.status != 200:
+                    raise RuntimeError(f'SAM3 server returned HTTP {response.status}')
+
+            if not self.first_frame_sent:
+                self.first_frame_sent = True
+                fx = self.camera_params['fx']
+                self.get_logger().info(
+                    f'First rosbag camera frame delivered to SAM3: '
+                    f'stamp={stamp_sec:.6f}, frame_id={msg.header.frame_id}, '
+                    f'fx={fx:.2f}'
+                )
 
         except urllib.error.URLError as e:
-            # Server might still be starting up
-            pass
+            self.get_logger().warning(
+                f'Failed to deliver camera frame to SAM3: {e}',
+                throttle_duration_sec=5.0,
+            )
         except Exception as e:
-            self.get_logger().error(f"Error posting frame to SAM3 server: {e}")
+            self.get_logger().error(
+                f'Error posting frame to SAM3 server: {e}',
+                throttle_duration_sec=5.0,
+            )
 
 
 def main(args=None):
