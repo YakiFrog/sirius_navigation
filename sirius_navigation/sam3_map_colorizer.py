@@ -116,6 +116,9 @@ def main():
     pgm_file = base + ".pgm"
     yaml_file = base + ".yaml"
     ply_file = base + ".ply"
+    indexed_pgm_file = base + ".colored.pgm"
+    indexed_json_file = base + ".colored.json"
+    texture_file = base + ".texture.png"
 
     if not (os.path.exists(pgm_file) and os.path.exists(yaml_file) and os.path.exists(ply_file)):
         print(f"Error: Missing one of .pgm, .yaml, or .ply for {base}")
@@ -181,6 +184,19 @@ def main():
     if grid is None:
         print(f"Error: Failed to read structural map: {pgm_file}")
         sys.exit(1)
+    preserve_semantic_index = False
+    if os.path.exists(indexed_pgm_file) and os.path.exists(indexed_json_file):
+        try:
+            with open(indexed_json_file, "r", encoding="utf-8") as f:
+                indexed_meta = json.load(f)
+            indexed_grid = cv2.imread(indexed_pgm_file, cv2.IMREAD_UNCHANGED)
+            preserve_semantic_index = (
+                indexed_meta.get("semantic_encoding") == "class_id"
+                and indexed_grid is not None
+                and indexed_grid.shape == grid.shape
+            )
+        except Exception as e:
+            print(f"Warning: Could not validate existing semantic index map: {e}")
     dark_threshold = max(
         -1,
         int(os.environ.get(
@@ -296,6 +312,29 @@ def main():
             visual_color_grid[py, px] = [color[2], color[1], color[0]]
             projected_mask[py, px] = True
 
+        # Prefer the multi-view texture accumulated from per-frame real RGB.
+        # Alpha=0 cells have no robust observation and retain the PLY fallback.
+        if os.path.exists(texture_file):
+            texture = cv2.imread(texture_file, cv2.IMREAD_UNCHANGED)
+            if (
+                texture is not None
+                and texture.shape[:2] == grid.shape
+                and texture.ndim == 3
+                and texture.shape[2] == 4
+            ):
+                texture_valid = (
+                    (texture[:, :, 3] > 0)
+                    & (grid >= FREE_SPACE_MIN_VALUE)
+                )
+                visual_color_grid[texture_valid] = texture[:, :, :3][texture_valid]
+                projected_mask[texture_valid] = True
+                print(
+                    f"Applied robust multi-view RGB texture to "
+                    f"{int(np.sum(texture_valid))} free-space pixels."
+                )
+            else:
+                print(f"Warning: Ignoring incompatible texture map: {texture_file}")
+
         if dark_threshold >= 0:
             (
                 visual_color_grid,
@@ -315,7 +354,13 @@ def main():
         
         # We save PGM flipped as we read it? 
         # map_saver wrote it, cv2.imread read it. We just write it back.
-        cv2.imwrite(out_pgm, colored_grid)
+        if preserve_semantic_index:
+            print(
+                "Preserving semantic_id indexed map generated during replay: "
+                f"{out_pgm}"
+            )
+        else:
+            cv2.imwrite(out_pgm, colored_grid)
         cv2.imwrite(out_visual, visual_color_grid)
         
         print(f"SUCCESS: Saved semantic map to {out_pgm}")
@@ -350,8 +395,9 @@ def main():
             "palette": palette.tolist(),
             "labels": labels_out
         }
-        with open(out_json, 'w') as f:
-            json.dump(meta_out, f, indent=4)
+        if not preserve_semantic_index:
+            with open(out_json, 'w') as f:
+                json.dump(meta_out, f, indent=4)
         
         print(f"SUCCESS: Saved colored map to {out_pgm}")
 

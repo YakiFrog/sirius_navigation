@@ -4,6 +4,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from tf2_ros import Buffer, TransformListener, LookupException
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped, Quaternion, PoseWithCovarianceStamped
@@ -31,6 +32,7 @@ class Waypoint:
     wait_time: float = 0.0  # 待機時間（秒）
     change_map: str = ""  # 地図変更用のフィールド（地図名を指定）
     threshold: float = -1.0  # 個別の到達判定距離。マイナスの場合はデフォルト値を使用
+    person_area: bool = False  # 人物探索エリア。到着後は明示的な再開指示まで停止
     
 class Nav2GoalClient(Node):
     def __init__(self, count = 1, loop = False, default_threshold = 2.0):
@@ -39,6 +41,17 @@ class Nav2GoalClient(Node):
         self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         
         self.stop_publisher = self.create_publisher(Bool, '/stop', 10)
+        self.stop_state_sub = self.create_subscription(
+            Bool, '/stop', self.stop_state_callback, 10
+        )
+        person_area_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.person_area_arrived_publisher = self.create_publisher(
+            Bool, '/person_area_arrived', person_area_qos
+        )
         self.nav_control_sub = self.create_subscription(String, '/nav_control', self.nav_control_callback, 10)
         self.odom_publisher = self.create_publisher(Odometry, 'target_odom', 10)
         self.initial_pose_publisher = self.create_publisher(
@@ -67,6 +80,10 @@ class Nav2GoalClient(Node):
         self._waiting_until = None  # 待機終了時刻
         self._paused_by_user = False
         self._cancelled_by_user = False
+        self._person_area_arrived = False
+        self._person_area_stop_active = False
+        self._person_area_hold_goal_index = None
+        self.publish_person_area_arrived(False, force=True)
         self.timer = self.create_timer(0.1, self.get_position)  # 10Hz (0.1秒周期) に変更して応答性を向上
         
     def load_waypoints(self, file_path: str) -> List[Waypoint]:
@@ -96,6 +113,7 @@ class Nav2GoalClient(Node):
             angle_radians = wp['angle_radians'],
             rotate = wp.get('rotate', 0.0),  # キーが存在しない場合は0.0を返す
             stop = wp.get('stop', False),  # キーが存在しない場合はFalseを返す
+            person_area = wp.get('person_area', False),  # 人物探索エリアかどうか
             wait_time = float(wp.get('wait_time', 0.0)),  # 待機時間（秒）
             change_map = wp.get('change_map', ""),  # キーが存在しない場合は空文字を返す
             threshold = float(wp.get('threshold', -1.0))  # キーが存在しない場合は-1.0を返す
@@ -208,21 +226,91 @@ class Nav2GoalClient(Node):
         else:
             self.get_logger().warning(name + "Goal REJECTED by action server.")
         
-    def publish_stop_command(self, should_stop: bool, goal_index: int = None):
+    def publish_stop_command(
+        self,
+        should_stop: bool,
+        goal_index: int = None,
+        pause_navigation: bool = True,
+    ):
         stop_msg = Bool()
         stop_msg.data = should_stop
         self.stop_publisher.publish(stop_msg)
-        self._paused_by_user = should_stop
-        if not should_stop:
-            self._cancelled_by_user = False
+        if pause_navigation:
+            self._paused_by_user = should_stop
+            if not should_stop:
+                self._cancelled_by_user = False
         wp = None
         if goal_index is not None and goal_index < len(self.waypoints):
             wp = self.waypoints[goal_index]
         prefix = f"[WP:{wp.number}] " if wp else "[WP:?] "
         if should_stop:
-            self.get_logger().info(prefix + "PAUSE sent")
+            mode = "PAUSE sent" if pause_navigation else "STOP sent; Nav2 remains active"
+            self.get_logger().info(prefix + mode)
         else:
             self.get_logger().info(prefix + "RESUME sent")
+
+    def stop_state_callback(self, msg: Bool):
+        """Clear person-area state when another node releases /stop."""
+        if msg.data or not self._person_area_stop_active:
+            return
+
+        arrived_goal_index = self._person_area_hold_goal_index
+        self._person_area_stop_active = False
+        self.publish_person_area_arrived(False, arrived_goal_index)
+        self._person_area_hold_goal_index = None
+        self.get_logger().info(
+            "/stop=false received: person search finished; Nav2 motion released."
+        )
+
+    def publish_person_area_arrived(
+        self, arrived: bool, goal_index: int = None, force: bool = False
+    ):
+        """Publish the arrival state for a person search area."""
+        if not force and self._person_area_arrived == arrived:
+            return
+
+        arrived_msg = Bool()
+        arrived_msg.data = arrived
+        self.person_area_arrived_publisher.publish(arrived_msg)
+        self._person_area_arrived = arrived
+
+        wp = None
+        if goal_index is not None and goal_index < len(self.waypoints):
+            wp = self.waypoints[goal_index]
+        prefix = f"[WP:{wp.number}] " if wp else "[WP:?] "
+        self.get_logger().info(
+            prefix + f"/person_area_arrived={str(arrived).lower()}"
+        )
+
+    def get_arrival_threshold(self, waypoint: Waypoint) -> float:
+        """Return the arrival threshold for a waypoint's meaning."""
+        if (waypoint.stop or waypoint.person_area or waypoint.wait_time > 0 or
+                waypoint.change_map):
+            return 0.5
+        if waypoint.threshold > 0.0:
+            return waypoint.threshold
+        return self.default_threshold
+
+    def hold_at_person_area(self, goal_index: int):
+        """Stop the robot while keeping the next Nav2 goal active."""
+        self._person_area_stop_active = True
+        self._person_area_hold_goal_index = goal_index
+        self.publish_stop_command(
+            True, goal_index, pause_navigation=False
+        )
+        self.publish_person_area_arrived(True, goal_index)
+        self.count += 1
+        self.loop_count = 0
+        if self.count < len(self.waypoints):
+            self.send_goal()
+            self.get_logger().info(
+                "Person search area reached. The next Nav2 goal remains active; "
+                "publish /stop=false after person detection to release motion."
+            )
+        else:
+            self.get_logger().info(
+                "Final person search area reached; no following Nav2 goal exists."
+            )
 
     def nav_control_callback(self, msg: String):
         """LLM側やUI側からの明示制御を受ける"""
@@ -277,6 +365,10 @@ class Nav2GoalClient(Node):
         if self._cancelled_by_user:
             self.get_logger().warning("Resume ignored because current goal was cancelled.")
             return
+        arrived_goal_index = self._person_area_hold_goal_index
+        self._person_area_stop_active = False
+        self.publish_person_area_arrived(False, arrived_goal_index)
+        self._person_area_hold_goal_index = None
         self._paused_by_user = False
         self.publish_stop_command(False, self.count)
         self.send_goal()
@@ -440,22 +532,29 @@ class Nav2GoalClient(Node):
                     self.get_logger().info(f"{current_wp_info} navigation paused; holding position.", throttle_duration_sec=2.0)
                     return
 
+                if self._person_area_stop_active:
+                    self.get_logger().info(
+                        f"{current_wp_info} Nav2 goal active; waiting for /stop=false.",
+                        throttle_duration_sec=2.0
+                    )
+                    if self.loop_count % 100 == 0:
+                        self.send_goal()
+                    self.loop_count += 1
+                    return
+
                 self.get_logger().info(f"{current_wp_info} dist={self.distance:.2f}m", throttle_duration_sec=1.0)
                 
-                # stop/wait/change_mapまたは個別のしきい値設定によって判定距離を変更
-                if (hasattr(current_wp, 'stop') and current_wp.stop) or \
-                   (hasattr(current_wp, 'wait_time') and current_wp.wait_time > 0) or \
-                   (hasattr(current_wp, 'change_map') and current_wp.change_map):
-                    threshold_distance = 0.5  # 精密判定が必要な場合
-                elif hasattr(current_wp, 'threshold') and current_wp.threshold > 0.0:
-                    threshold_distance = current_wp.threshold  # 個別設定がある場合
-                else:
-                    threshold_distance = self.default_threshold  # デフォルト（速度低下を防ぐため）
+                threshold_distance = self.get_arrival_threshold(current_wp)
 
                 if self.distance < threshold_distance:
                     self.get_logger().info(
                         f"{current_wp_info} reached (thr={threshold_distance:.2f}m) dist={self.distance:.2f}m"
                     )
+
+                    # 人物探索エリアでは到着通知と停止を行い、明示的な再開指示を待つ
+                    if current_wp.person_area:
+                        self.hold_at_person_area(self.count)
+                        return
                     
                     # wait_time属性の処理（優先）
                     if hasattr(current_wp, 'wait_time') and current_wp.wait_time > 0:

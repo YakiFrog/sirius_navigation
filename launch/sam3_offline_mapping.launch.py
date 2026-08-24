@@ -189,6 +189,11 @@ def generate_launch_description():
             'grid_resolution': 0.05,
             'map_frame': 'map',
             'semantic_cloud_topic': '/sam3/full_cloud_semantic',
+            # Keep the 5 cm map, but fuse real floor RGB across viewpoints so
+            # individual camera-frustum footprints do not dominate texture.
+            'accumulate_real_texture': True,
+            'texture_min_height_m': -0.15,
+            'texture_max_height_m': 0.25,
         }]
     )
 

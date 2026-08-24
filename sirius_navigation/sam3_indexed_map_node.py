@@ -13,7 +13,6 @@ import struct
 import json
 import os
 import cv2
-import cv2
 
 SEMANTIC_CLASSES = {
     0: {"name": "unknown", "color": [127, 127, 127], "default_cost": 0},
@@ -25,6 +24,35 @@ SEMANTIC_CLASSES = {
     6: {"name": "sidewalk", "color": [128, 128, 128], "default_cost": 10},
 }
 
+
+def robust_texture_from_statistics(color_sum, color_min, color_max, count):
+    """Return a per-cell trimmed mean, rejecting one bright and dark view."""
+    result = np.zeros(color_sum.shape, dtype=np.uint8)
+    observed = count > 0
+    trimmed = count > 2
+    regular = observed & ~trimmed
+
+    if np.any(regular):
+        result[regular] = np.clip(
+            np.round(color_sum[regular] / count[regular, None]),
+            0,
+            255,
+        ).astype(np.uint8)
+    if np.any(trimmed):
+        result[trimmed] = np.clip(
+            np.round(
+                (
+                    color_sum[trimmed]
+                    - color_min[trimmed]
+                    - color_max[trimmed]
+                )
+                / (count[trimmed, None] - 2)
+            ),
+            0,
+            255,
+        ).astype(np.uint8)
+    return result
+
 class SAM3IndexedMapNode(Node):
     def __init__(self):
         super().__init__('sam3_indexed_map_node')
@@ -34,12 +62,24 @@ class SAM3IndexedMapNode(Node):
         self.declare_parameter('grid_resolution', 0.05)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('semantic_cloud_topic', '/sam3/full_cloud_semantic')
+        self.declare_parameter('accumulate_real_texture', True)
+        self.declare_parameter('texture_min_height_m', -0.15)
+        self.declare_parameter('texture_max_height_m', 0.25)
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', True)
         
         self.res = self.get_parameter('grid_resolution').get_parameter_value().double_value
         self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
         self.semantic_cloud_topic = self.get_parameter('semantic_cloud_topic').get_parameter_value().string_value
+        self.accumulate_real_texture = (
+            self.get_parameter('accumulate_real_texture').get_parameter_value().bool_value
+        )
+        self.texture_min_height = (
+            self.get_parameter('texture_min_height_m').get_parameter_value().double_value
+        )
+        self.texture_max_height = (
+            self.get_parameter('texture_max_height_m').get_parameter_value().double_value
+        )
         
         # Internal State
         self.grid = None       # uint8 array (indexed map)
@@ -47,12 +87,19 @@ class SAM3IndexedMapNode(Node):
         self.origin = [0.0, 0.0]
         self.width = 0
         self.height = 0
+        self.texture_sum = None
+        self.texture_min = None
+        self.texture_max = None
+        self.texture_count = None
+        self.texture_reference_luma = None
         self.dirty = False
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # Performance tuning: Rate limit for cloud processing
-        self.last_cloud_time = 0.0
+        self.last_semantic_cloud_time = 0.0
+        self.last_legacy_cloud_time = 0.0
+        self.semantic_cloud_received = False
         self.min_cloud_interval = 2.0  # seconds
 
         # QoS for persistent map topics
@@ -94,12 +141,33 @@ class SAM3IndexedMapNode(Node):
             self.width != new_width or self.height != new_height or 
             not np.allclose(self.origin, new_origin, atol=1e-3)):
             
-            old_grid, old_width, old_height, old_origin = self.grid, self.width, self.height, self.origin
+            old_grid, old_width, old_height, old_origin = (
+                self.grid,
+                self.width,
+                self.height,
+                self.origin,
+            )
+            old_texture = (
+                self.texture_sum,
+                self.texture_min,
+                self.texture_max,
+                self.texture_count,
+            )
             
             self.width, self.height = new_width, new_height
             self.origin = new_origin
             self.res = msg.info.resolution
             self.grid = np.zeros((self.height, self.width), dtype=np.uint8)
+            self.texture_sum = np.zeros((self.height, self.width, 3), dtype=np.float64)
+            self.texture_min = np.full(
+                (self.height, self.width, 3), 255, dtype=np.uint8
+            )
+            self.texture_max = np.zeros(
+                (self.height, self.width, 3), dtype=np.uint8
+            )
+            self.texture_count = np.zeros(
+                (self.height, self.width), dtype=np.uint16
+            )
             
             # Blit old data (Persistence logic)
             if old_grid is not None:
@@ -110,7 +178,14 @@ class SAM3IndexedMapNode(Node):
                 dst_x0, dst_y0 = max(0, dx), max(0, dy)
                 dst_x1, dst_y1 = min(self.width, old_width + dx), min(self.height, old_height + dy)
                 if src_x1 > src_x0 and src_y1 > src_y0:
-                    self.grid[dst_y0:dst_y1, dst_x0:dst_x1] = old_grid[src_y0:src_y1, src_x0:src_x1]
+                    src = np.s_[src_y0:src_y1, src_x0:src_x1]
+                    dst = np.s_[dst_y0:dst_y1, dst_x0:dst_x1]
+                    self.grid[dst] = old_grid[src]
+                    if old_texture[0] is not None:
+                        self.texture_sum[dst] = old_texture[0][src]
+                        self.texture_min[dst] = old_texture[1][src]
+                        self.texture_max[dst] = old_texture[2][src]
+                        self.texture_count[dst] = old_texture[3][src]
             
             self.get_logger().info(f'Grid resized: {self.width}x{self.height}')
 
@@ -129,9 +204,25 @@ class SAM3IndexedMapNode(Node):
     def _cloud_callback(self, msg):
         """Handle optimized global cloud with robust, high-speed NumPy vectorization."""
         if self.grid is None: return
+        has_semantic_field = any(field.name == 'semantic_id' for field in msg.fields)
         now = self.get_clock().now().nanoseconds / 1e9
-        if now - self.last_cloud_time < self.min_cloud_interval: return 
-        self.last_cloud_time = now
+        if has_semantic_field:
+            if now - self.last_semantic_cloud_time < self.min_cloud_interval:
+                return
+            self.last_semantic_cloud_time = now
+            if not self.semantic_cloud_received:
+                self.semantic_cloud_received = True
+                if self.struct_grid is not None:
+                    self.grid[self.struct_grid == 0] = 2
+                    self.grid[self.struct_grid == 100] = 1
+        else:
+            # The optimized /cloud_map is retained as an old-format fallback,
+            # but must never block or overwrite semantic_id observations.
+            if self.semantic_cloud_received:
+                return
+            if now - self.last_legacy_cloud_time < self.min_cloud_interval:
+                return
+            self.last_legacy_cloud_time = now
 
         try:
             if not hasattr(self, 'color_lut'): 
@@ -144,7 +235,10 @@ class SAM3IndexedMapNode(Node):
             
             x_off = field_offsets.get('x')
             y_off = field_offsets.get('y')
-            color_off = field_offsets.get('rgb') or field_offsets.get('rgba')
+            z_off = field_offsets.get('z')
+            color_off = field_offsets.get('rgb')
+            if color_off is None:
+                color_off = field_offsets.get('rgba')
             semantic_id_off = field_offsets.get('semantic_id')
             
             if x_off is None or y_off is None:
@@ -154,20 +248,25 @@ class SAM3IndexedMapNode(Node):
             # Efficiently reshape data buffer
             data = np.frombuffer(msg.data, dtype=np.uint8).reshape(-1, msg.point_step)
             
-            # 2. Extract X, Y as float32
+            # 2. Extract XYZ as float32
             # Use data slicing to avoid non-contiguous view issues
             x = data[:, x_off:x_off+4].copy().view(np.float32).flatten()
             y = data[:, y_off:y_off+4].copy().view(np.float32).flatten()
+            z = (
+                data[:, z_off:z_off+4].copy().view(np.float32).flatten()
+                if z_off is not None
+                else np.zeros_like(x)
+            )
             
             # Filter NaNs and handle grid projection
-            mask = np.isfinite(x) & np.isfinite(y)
-            x, y, data = x[mask], y[mask], data[mask]
+            mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            x, y, z, data = x[mask], y[mask], z[mask], data[mask]
             
             if len(x) == 0:
                 self.get_logger().debug("No finite points in cloud.")
                 return
             
-            x_map, y_map = self._transform_xy_to_map(x, y, msg.header)
+            x_map, y_map, z_map = self._transform_xyz_to_map(x, y, z, msg.header)
             if x_map is None:
                 return
 
@@ -176,7 +275,12 @@ class SAM3IndexedMapNode(Node):
             
             # Bounds checking
             in_bounds = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
-            gx, gy, data = gx[in_bounds], gy[in_bounds], data[in_bounds]
+            gx, gy, z_map, data = (
+                gx[in_bounds],
+                gy[in_bounds],
+                z_map[in_bounds],
+                data[in_bounds],
+            )
             
             if len(gx) == 0:
                 self.get_logger().debug(f"Points outside grid bounds. Origin: {self.origin}, Res: {self.res}")
@@ -217,10 +321,82 @@ class SAM3IndexedMapNode(Node):
                 
                 if len(indices[not_wall]) > 0:
                     self.get_logger().info(f'Painted {len(indices[not_wall])} colored points onto grid.')
+
+            if (
+                self.accumulate_real_texture
+                and semantic_id_off is not None
+                and color_off is not None
+            ):
+                self._accumulate_texture(data, gx, gy, z_map, color_off)
             
             self.dirty = True
         except Exception as e:
             self.get_logger().error(f"Vectorized cloud projection error: {e}")
+
+    def _accumulate_texture(self, data, gx, gy, z_map, color_off):
+        """Accumulate one color observation per free cell for robust fusion."""
+        if self.struct_grid is None or self.texture_sum is None:
+            return
+
+        floor = self.struct_grid[gy, gx] == 0
+        height_ok = (
+            (z_map >= self.texture_min_height)
+            & (z_map <= self.texture_max_height)
+        )
+        selected = floor & height_ok
+        if not np.any(selected):
+            return
+
+        selected_data = data[selected]
+        selected_gx = gx[selected]
+        selected_gy = gy[selected]
+        # Packed 00RRGGBB is little-endian in PointCloud2: B, G, R, padding.
+        rgb = np.column_stack([
+            selected_data[:, color_off + 2],
+            selected_data[:, color_off + 1],
+            selected_data[:, color_off + 0],
+        ]).astype(np.float32)
+
+        # Correct frame-wide exposure differences before temporal fusion. The
+        # gain is deliberately limited so real tile contrast is retained.
+        luma = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
+        frame_luma = float(np.median(luma))
+        if frame_luma > 1.0:
+            if self.texture_reference_luma is None:
+                self.texture_reference_luma = frame_luma
+            gain = np.clip(self.texture_reference_luma / frame_luma, 0.85, 1.18)
+            rgb = np.clip(rgb * gain, 0, 255)
+            self.texture_reference_luma = (
+                0.98 * self.texture_reference_luma + 0.02 * frame_luma
+            )
+
+        flat = selected_gy.astype(np.int64) * self.width + selected_gx
+        unique, inverse = np.unique(flat, return_inverse=True)
+        samples_per_cell = np.bincount(inverse)
+        cell_rgb = np.column_stack([
+            np.bincount(inverse, weights=rgb[:, channel]) / samples_per_cell
+            for channel in range(3)
+        ])
+        cell_rgb_u8 = np.clip(np.round(cell_rgb), 0, 255).astype(np.uint8)
+        cell_y = unique // self.width
+        cell_x = unique % self.width
+
+        can_update = self.texture_count[cell_y, cell_x] < np.iinfo(np.uint16).max
+        cell_y = cell_y[can_update]
+        cell_x = cell_x[can_update]
+        cell_rgb = cell_rgb[can_update]
+        cell_rgb_u8 = cell_rgb_u8[can_update]
+        if len(cell_y) == 0:
+            return
+
+        self.texture_sum[cell_y, cell_x] += cell_rgb
+        self.texture_min[cell_y, cell_x] = np.minimum(
+            self.texture_min[cell_y, cell_x], cell_rgb_u8
+        )
+        self.texture_max[cell_y, cell_x] = np.maximum(
+            self.texture_max[cell_y, cell_x], cell_rgb_u8
+        )
+        self.texture_count[cell_y, cell_x] += 1
 
     def _extract_semantic_ids(self, data, offset, datatype):
         if datatype == 2:  # UINT8
@@ -241,10 +417,10 @@ class SAM3IndexedMapNode(Node):
             ).astype(np.uint8)
         return np.zeros(data.shape[0], dtype=np.uint8)
 
-    def _transform_xy_to_map(self, x, y, header):
+    def _transform_xyz_to_map(self, x, y, z, header):
         source_frame = header.frame_id
         if not source_frame or source_frame == self.map_frame:
-            return x, y
+            return x, y, z
 
         try:
             tf = self.tf_buffer.lookup_transform(
@@ -258,19 +434,32 @@ class SAM3IndexedMapNode(Node):
                 f'No transform from {source_frame} to {self.map_frame}; semantic cloud skipped: {e}',
                 throttle_duration_sec=5.0,
             )
-            return None, None
+            return None, None, None
 
         q = tf.transform.rotation
         t = tf.transform.translation
-        yaw = np.arctan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-        )
-        cos_yaw = np.cos(yaw)
-        sin_yaw = np.sin(yaw)
-        x_map = cos_yaw * x - sin_yaw * y + t.x
-        y_map = sin_yaw * x + cos_yaw * y + t.y
-        return x_map, y_map
+        rotation = np.array([
+            [
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+                2.0 * (q.x * q.y - q.z * q.w),
+                2.0 * (q.x * q.z + q.y * q.w),
+            ],
+            [
+                2.0 * (q.x * q.y + q.z * q.w),
+                1.0 - 2.0 * (q.x * q.x + q.z * q.z),
+                2.0 * (q.y * q.z - q.x * q.w),
+            ],
+            [
+                2.0 * (q.x * q.z - q.y * q.w),
+                2.0 * (q.y * q.z + q.x * q.w),
+                1.0 - 2.0 * (q.x * q.x + q.y * q.y),
+            ],
+        ])
+        transformed = np.column_stack([x, y, z]) @ rotation.T
+        transformed[:, 0] += t.x
+        transformed[:, 1] += t.y
+        transformed[:, 2] += t.z
+        return transformed[:, 0], transformed[:, 1], transformed[:, 2]
 
     def _generate_default_palette(self):
         # Index 0: Unknown, 1: Wall, 2: Floor, 3+: semantic class ids.
@@ -332,6 +521,29 @@ class SAM3IndexedMapNode(Node):
             "semantic_encoding": "class_id",
         }
         with open(path + ".json", 'w') as f: json.dump(meta, f, indent=4)
+
+        if self.accumulate_real_texture and self.texture_count is not None:
+            texture_rgb = robust_texture_from_statistics(
+                self.texture_sum,
+                self.texture_min,
+                self.texture_max,
+                self.texture_count,
+            )
+            texture_bgra = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+            valid = self.texture_count > 0
+            if self.struct_grid is not None:
+                valid &= self.struct_grid == 0
+            texture_bgra[:, :, :3] = texture_rgb[:, :, ::-1]
+            texture_bgra[:, :, 3][valid] = 255
+            texture_base = path[:-len('.colored')] if path.endswith('.colored') else path
+            texture_path = texture_base + ".texture.png"
+            cv2.imwrite(texture_path, texture_bgra[::-1, :])
+            robust_cells = int(np.sum(self.texture_count > 2))
+            self.get_logger().info(
+                f'Saved robust RGB texture to {texture_path}: '
+                f'{int(np.sum(valid))} observed cells, '
+                f'{robust_cells} cells fused from 3+ views.'
+            )
         self.get_logger().info(f'SUCCESS: Saved to {path}.pgm')
 
 def main(args=None):
