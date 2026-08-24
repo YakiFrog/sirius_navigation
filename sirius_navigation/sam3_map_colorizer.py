@@ -17,6 +17,70 @@ PREDEFINED_CATEGORIES = {
     "sidewalk": {"color": [128, 128, 128], "default_cost": 10}
 }
 
+DEFAULT_DARK_THRESHOLD = 12
+FREE_SPACE_MIN_VALUE = 250
+
+
+def interpolate_dark_free_space(
+    image,
+    structural_grid,
+    projected_mask,
+    dark_threshold=DEFAULT_DARK_THRESHOLD,
+):
+    """Fill missing or dark RGB only where RTAB-Map says the cell is free."""
+    result = image.copy()
+    free_mask = structural_grid >= FREE_SPACE_MIN_VALUE
+    dark_projected = (
+        free_mask
+        & projected_mask
+        & (np.max(result, axis=2) <= dark_threshold)
+    )
+    missing_projection = free_mask & ~projected_mask
+    pending = dark_projected | missing_projection
+    original_pending_count = int(np.sum(pending))
+    valid = free_mask & projected_mask & ~dark_projected
+    kernel = np.ones((3, 3), dtype=np.float32)
+
+    # Propagate only neighboring free-space colors. Wall and unknown cells never
+    # contribute, so real wall boundaries remain exactly as represented by PGM.
+    for _ in range(max(result.shape[:2])):
+        if not np.any(pending):
+            break
+        neighbor_count = cv2.filter2D(
+            valid.astype(np.float32), -1, kernel, borderType=cv2.BORDER_CONSTANT
+        )
+        fill_mask = pending & (neighbor_count > 0)
+        if not np.any(fill_mask):
+            break
+        for channel in range(3):
+            neighbor_sum = cv2.filter2D(
+                result[:, :, channel].astype(np.float32) * valid,
+                -1,
+                kernel,
+                borderType=cv2.BORDER_CONSTANT,
+            )
+            result[:, :, channel][fill_mask] = np.clip(
+                np.round(neighbor_sum[fill_mask] / neighbor_count[fill_mask]),
+                0,
+                255,
+            ).astype(np.uint8)
+        valid[fill_mask] = True
+        pending[fill_mask] = False
+
+    # A disconnected missing/dark island may have no usable immediate neighbor.
+    # It is still known to be free from the structural map, so use the median
+    # projected free-space color as a safe final fallback.
+    if np.any(pending):
+        fallback = (
+            np.median(result[valid], axis=0).astype(np.uint8)
+            if np.any(valid)
+            else np.array([255, 255, 255], dtype=np.uint8)
+        )
+        result[pending] = fallback
+        pending[:] = False
+
+    return result, original_pending_count - int(np.sum(pending))
+
 
 # Helper class to dynamically load dynamic class colors over ROS 2 topic
 class ClassColorsListener:
@@ -114,6 +178,16 @@ def main():
     print(f"Loading structural map: {pgm_file}")
 
     grid = cv2.imread(pgm_file, cv2.IMREAD_UNCHANGED)
+    if grid is None:
+        print(f"Error: Failed to read structural map: {pgm_file}")
+        sys.exit(1)
+    dark_threshold = max(
+        -1,
+        int(os.environ.get(
+            "SAM3_FREE_SPACE_DARK_THRESHOLD",
+            DEFAULT_DARK_THRESHOLD,
+        )),
+    )
     with open(yaml_file, 'r') as f:
         meta = yaml.safe_load(f)
 
@@ -124,10 +198,11 @@ def main():
     # Initialize colored grid
     # index 0: unknown, 1: wall, 2: floor
     colored_grid = np.zeros_like(grid, dtype=np.uint8)
-    # RTAB-Map PGM convention: 0 (Occupied/Wall), 255 (Free/Floor), 205 (Unknown)
+    # RTAB-Map PGM convention: 0 (Occupied/Wall), 254/255 (Free/Floor),
+    # 205 (Unknown). map_saver commonly writes free space as 254.
     # Our indexed convention: 0 (Unknown), 1 (Wall), 2 (Floor)
-    colored_grid[grid == 0] = 1   # Wall
-    colored_grid[grid == 255] = 2 # Floor
+    colored_grid[grid == 0] = 1                    # Wall
+    colored_grid[grid >= FREE_SPACE_MIN_VALUE] = 2 # Floor
     
     # We'll store (R, G, B) sums and counts per pixel to average colors
     # For memory efficiency, we use a dictionary for pixels that get colors
@@ -206,7 +281,8 @@ def main():
         # Fill visual map with defaults
         visual_color_grid[grid == 205] = [127, 127, 127] # Unknown (Gray)
         visual_color_grid[grid == 0] = [0, 0, 0]         # Wall (Black)
-        visual_color_grid[grid == 255] = [255, 255, 255] # Floor (White)
+        visual_color_grid[grid >= FREE_SPACE_MIN_VALUE] = [255, 255, 255]
+        projected_mask = np.zeros((h, w), dtype=bool)
 
         for (px, py), color in pixel_colors.items():
             if colored_grid[py, px] == 1: continue # Walls (priority)
@@ -218,6 +294,19 @@ def main():
             
             # Set color in visual map (BGR for OpenCV)
             visual_color_grid[py, px] = [color[2], color[1], color[0]]
+            projected_mask[py, px] = True
+
+        if dark_threshold >= 0:
+            (
+                visual_color_grid,
+                repaired_free_space_pixels,
+            ) = interpolate_dark_free_space(
+                visual_color_grid, grid, projected_mask, dark_threshold
+            )
+            print(
+                f"Interpolated {repaired_free_space_pixels} missing/dark RGB pixels on "
+                f"structural free space (threshold <= {dark_threshold})."
+            )
 
         # Save result
         out_pgm = base + ".colored.pgm"
