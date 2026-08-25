@@ -551,6 +551,8 @@ def main(args=None):
     node = SAM3IndexedMapNode()
     try: rclpy.spin(node)
     except KeyboardInterrupt: pass
-    finally: rclpy.shutdown()
+    finally:
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__': main()

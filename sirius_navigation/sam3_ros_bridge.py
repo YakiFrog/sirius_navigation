@@ -264,7 +264,10 @@ def main(args=None):
             node.running = False
             if hasattr(node, 'ws') and node.ws:
                 node.ws.close()
-            node.destroy_node()
+            try:
+                node.destroy_node()
+            except KeyboardInterrupt:
+                pass
         if rclpy.ok():
             rclpy.shutdown()
 
