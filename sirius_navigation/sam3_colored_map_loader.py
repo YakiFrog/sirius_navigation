@@ -8,7 +8,6 @@ import cv2
 from std_msgs.msg import Header
 import json
 import os
-import struct
 
 class SAM3ColoredMapLoader(Node):
     def __init__(self):
@@ -17,8 +16,14 @@ class SAM3ColoredMapLoader(Node):
         # Parameters
         self.declare_parameter('map_path', '')
         self.declare_parameter('publish_rate', 1.0)
+        self.declare_parameter('publish_once', True)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('z_offset', -0.2)
+        # semantic: .colored.pgm のクラス色
+        # texture:  .texture.png の実写路面テクスチャ（有効な画素だけ）
+        self.declare_parameter('visualization_mode', 'semantic')
+        self.declare_parameter('cloud_topic', '')
+        self.declare_parameter('semantic_include_structure', False)
         # コスト閾値: default_cost >= この値のクラスのみ LETHAL(100) として出力する
         # 例: 50 に設定すれば grass(120) と tactile paving(50) のみが対象、sidewalk(10) は除外
         self.declare_parameter('lethal_cost_threshold', 50)
@@ -31,8 +36,37 @@ class SAM3ColoredMapLoader(Node):
         
         self.map_path = self.get_parameter('map_path').get_parameter_value().string_value
         self.publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
+        self.publish_once = (
+            self.get_parameter('publish_once').get_parameter_value().bool_value
+        )
         self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
         self.z_offset = self.get_parameter('z_offset').get_parameter_value().double_value
+        self.visualization_mode = (
+            self.get_parameter('visualization_mode')
+            .get_parameter_value().string_value.lower()
+        )
+        requested_cloud_topic = (
+            self.get_parameter('cloud_topic').get_parameter_value().string_value
+        )
+        default_cloud_topics = {
+            'texture': '/sam3/static_texture_map_cloud',
+            'semantic': '/sam3/static_colored_map_cloud',
+        }
+        if self.visualization_mode == 'both':
+            self.cloud_topics = default_cloud_topics
+        elif self.visualization_mode in default_cloud_topics:
+            self.cloud_topics = {
+                self.visualization_mode: (
+                    requested_cloud_topic
+                    or default_cloud_topics[self.visualization_mode]
+                )
+            }
+        else:
+            self.cloud_topics = {}
+        self.semantic_include_structure = (
+            self.get_parameter('semantic_include_structure')
+            .get_parameter_value().bool_value
+        )
         self.lethal_cost_threshold = self.get_parameter('lethal_cost_threshold').get_parameter_value().integer_value
         self.soft_semantic_max_cost = self.get_parameter('soft_semantic_max_cost').get_parameter_value().integer_value
         self.soft_semantic_min_cost = self.get_parameter('soft_semantic_min_cost').get_parameter_value().integer_value
@@ -51,14 +85,21 @@ class SAM3ColoredMapLoader(Node):
             self.get_parameter('soft_semantic_inflation_cost').get_parameter_value().integer_value
         )
         
-        # Publishers
-        self.pub_cloud = self.create_publisher(PointCloud2, '/sam3/static_colored_map_cloud', 10)
-        
         from rclpy.qos import QoSProfile, DurabilityPolicy
         qos_latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+        # Publishers. The colored cloud is static, so retain the last sample for
+        # RViz instances which connect after this node starts.
+        self.pub_clouds = {
+            mode: self.create_publisher(PointCloud2, topic, qos_latched)
+            for mode, topic in self.cloud_topics.items()
+        }
+        # Keep these aliases for code which used the original single-cloud node.
+        self.pub_cloud = next(iter(self.pub_clouds.values()), None)
         self.pub_grid = self.create_publisher(OccupancyGrid, '/sam3/static_colored_map_grid', qos_latched)
         self.pub_soft_grid = self.create_publisher(OccupancyGrid, '/sam3/static_semantic_cost_grid', qos_latched)
         
+        self.cloud_msgs = {}
         self.cloud_msg = None
         self.grid_msg = None
         self.soft_grid_msg = None
@@ -70,6 +111,11 @@ class SAM3ColoredMapLoader(Node):
 
         # Timer
         self.timer = self.create_timer(1.0 / self.publish_rate, self.timer_callback)
+        if self.publish_once:
+            self.get_logger().info(
+                'Static maps will be published once. Start rosbag recording '
+                'before this loader when the maps must be included in the bag.'
+            )
 
     def load_map(self, path):
         # Handle extension-less path
@@ -125,38 +171,78 @@ class SAM3ColoredMapLoader(Node):
 
         self.get_logger().info(f'Map Loaded: {grid.shape[1]}x{grid.shape[0]} at {res}m/pix')
 
-        # Convert to PointCloud2
-        rows, cols = np.where(grid > 0) # Skip unknown (0)
-        if len(rows) == 0:
-            self.get_logger().warn('No known cells (indices > 0) found in map.')
+        if self.visualization_mode not in ('semantic', 'texture', 'both'):
+            self.get_logger().error(
+                f'Unknown visualization_mode={self.visualization_mode!r}; '
+                "use 'semantic', 'texture', or 'both'."
+            )
             return
 
-        indices = grid[rows, cols]
-        
-        # Map indices to RGB
-        rgb_list = palette[indices]
-        
-        # Map indices to coordinates
-        x_coords = cols * res + origin[0]
-        y_coords = rows * res + origin[1]
-        
-        points = []
-        for i in range(len(rows)):
-            r, g, b = rgb_list[i]
-            # Pack RGB into a single float (standard ROS pattern)
-            rgb_packed = struct.unpack('f', struct.pack('I', (r << 16) | (g << 8) | b))[0]
-            points.append([float(x_coords[i]), float(y_coords[i]), self.z_offset, rgb_packed])
+        # Select RViz visualizations independently from the semantic grids used
+        # by Nav2. In both mode, each representation gets its own cloud topic.
+        if self.visualization_mode in ('texture', 'both'):
+            texture_file = base_path + '.texture.png'
+            texture = cv2.imread(texture_file, cv2.IMREAD_UNCHANGED)
+            if texture is None:
+                self.get_logger().error(
+                    f'Texture file not found or unreadable: {texture_file}'
+                )
+            elif texture.ndim != 3 or texture.shape[2] != 4 or texture.shape[:2] != grid.shape:
+                self.get_logger().error(
+                    f'Incompatible texture image: {texture_file} '
+                    f'(texture={texture.shape}, map={grid.shape})'
+                )
+            else:
+                # Texture is saved in image/PGM orientation, while ROS map rows
+                # grow in +Y. Flip it into ROS orientation.
+                texture = texture[::-1, :]
+                rows, cols = np.where(texture[:, :, 3] > 0)
+                if len(rows) == 0:
+                    self.get_logger().warn(
+                        'Texture image has no valid (alpha > 0) cells.'
+                    )
+                else:
+                    # OpenCV loads BGRA; PointCloud2 expects packed RGB.
+                    rgb_list = texture[rows, cols, :3][:, ::-1]
+                    self.cloud_msgs['texture'] = self._create_cloud(
+                        rows, cols, rgb_list, res, origin, self.z_offset
+                    )
+                    self.get_logger().info(
+                        f'RViz visualization: real road texture '
+                        f'({len(rows)} colored cells from {texture_file}); '
+                        f'topic={self.cloud_topics["texture"]}'
+                    )
 
-        self.cloud_msg = pc2.create_cloud(
-            header=Header(stamp=self.get_clock().now().to_msg(), frame_id=self.map_frame),
-            fields=[
-                pc2.PointField(name='x', offset=0, datatype=pc2.PointField.FLOAT32, count=1),
-                pc2.PointField(name='y', offset=4, datatype=pc2.PointField.FLOAT32, count=1),
-                pc2.PointField(name='z', offset=8, datatype=pc2.PointField.FLOAT32, count=1),
-                pc2.PointField(name='rgb', offset=12, datatype=pc2.PointField.FLOAT32, count=1),
-            ],
-            points=points
-        )
+        if self.visualization_mode in ('semantic', 'both'):
+            if self.semantic_include_structure:
+                semantic_mask = grid > 0
+            else:
+                semantic_ids = [
+                    int(idx_str)
+                    for idx_str, info in meta.get('labels', {}).items()
+                    if str(info.get('name', '')).lower()
+                    not in ('unknown', 'wall', 'floor')
+                ]
+                semantic_mask = np.isin(grid, semantic_ids)
+            rows, cols = np.where(semantic_mask)
+            if len(rows) == 0:
+                self.get_logger().warn('No semantic class cells found in map.')
+            else:
+                indices = grid[rows, cols]
+                rgb_list = palette[indices]
+                semantic_z = self.z_offset + (0.01 if self.visualization_mode == 'both' else 0.0)
+                self.cloud_msgs['semantic'] = self._create_cloud(
+                    rows, cols, rgb_list, res, origin, semantic_z
+                )
+                self.get_logger().info(
+                    f'RViz visualization: semantic class colors '
+                    f'({len(rows)} cells, '
+                    f'include_structure={self.semantic_include_structure}); '
+                    f'topic={self.cloud_topics["semantic"]}'
+                )
+
+        self.cloud_msg = next(iter(self.cloud_msgs.values()), None)
+
         # --- Generate OccupancyGrid for Costmap (Method A: Binary LETHAL mapping) ---
         # Nav2のStaticLayerはtrinary_costmap=falseの場合、OccupancyGridの中間値を
         # costmap costへ線形変換できる。グローバル用は従来どおり二値LETHAL、
@@ -192,7 +278,7 @@ class SAM3ColoredMapLoader(Node):
                         soft_classes.append(info.get('name', idx_str))
             except Exception:
                 pass
-        
+
         # 壁は通常のLiDAR/SLAM由来の /map に任せ、semantic gridでは扱わない。
         # RTAB-Mapの床ノイズが通常PGMで黒になった場合でも、semantic側で壁コスト化しない。
 
@@ -211,7 +297,7 @@ class SAM3ColoredMapLoader(Node):
                     )
                 )
                 soft_cost_grid[inflated_mask] = np.maximum(soft_cost_grid[inflated_mask], inflated_cost)
-        
+
         # ログ出力
         semantic_cells = int(np.sum(cost_grid == 100))
         self.get_logger().info(
@@ -251,18 +337,54 @@ class SAM3ColoredMapLoader(Node):
         self.soft_grid_msg.info.origin.orientation.w = 1.0
         self.soft_grid_msg.data = soft_cost_grid.flatten().tolist()
 
+    def _create_cloud(self, rows, cols, rgb_list, res, origin, z_offset):
+        # Map indices to coordinates
+        x_coords = cols * res + origin[0]
+        y_coords = rows * res + origin[1]
+        
+        rgb_u32 = (
+            (rgb_list[:, 0].astype(np.uint32) << 16)
+            | (rgb_list[:, 1].astype(np.uint32) << 8)
+            | rgb_list[:, 2].astype(np.uint32)
+        )
+        cloud_dtype = [
+            ('x', np.float32),
+            ('y', np.float32),
+            ('z', np.float32),
+            ('rgb', np.float32),
+        ]
+        points = np.empty(len(rows), dtype=cloud_dtype)
+        points['x'] = x_coords.astype(np.float32)
+        points['y'] = y_coords.astype(np.float32)
+        points['z'] = np.float32(z_offset)
+        points['rgb'] = rgb_u32.view(np.float32)
+
+        return pc2.create_cloud(
+            header=Header(stamp=self.get_clock().now().to_msg(), frame_id=self.map_frame),
+            fields=[
+                pc2.PointField(name='x', offset=0, datatype=pc2.PointField.FLOAT32, count=1),
+                pc2.PointField(name='y', offset=4, datatype=pc2.PointField.FLOAT32, count=1),
+                pc2.PointField(name='z', offset=8, datatype=pc2.PointField.FLOAT32, count=1),
+                pc2.PointField(name='rgb', offset=12, datatype=pc2.PointField.FLOAT32, count=1),
+            ],
+            points=points
+        )
+
 
     def timer_callback(self):
         stamp = self.get_clock().now().to_msg()
-        if self.cloud_msg is not None:
-            self.cloud_msg.header.stamp = stamp
-            self.pub_cloud.publish(self.cloud_msg)
+        for mode, cloud_msg in self.cloud_msgs.items():
+            cloud_msg.header.stamp = stamp
+            self.pub_clouds[mode].publish(cloud_msg)
         if self.grid_msg is not None:
             self.grid_msg.header.stamp = stamp
             self.pub_grid.publish(self.grid_msg)
         if self.soft_grid_msg is not None:
             self.soft_grid_msg.header.stamp = stamp
             self.pub_soft_grid.publish(self.soft_grid_msg)
+        if self.publish_once:
+            self.timer.cancel()
+            self.get_logger().info('Static map publication completed (one shot).')
 
 def main(args=None):
     rclpy.init(args=args)
