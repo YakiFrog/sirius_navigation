@@ -332,7 +332,7 @@ class SiriusBleGatewayWindow(QMainWindow):
             "enable_remote_server:=true",
             f"enable_battery_client:={enable_battery}",
             "enable_ear_led_client:=true",
-            "battery_scan_before_connect:=true",
+            "battery_scan_before_connect:=false",
             "publish_face_battery_params:=true",
         ]
         if battery_mac:

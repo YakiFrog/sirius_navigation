@@ -1,0 +1,4 @@
+# Sirius BLE Gateway: allow only its fixed advertising instance to be managed
+# without prompting from the desktop launcher.
+sirius-jazzy-nuc ALL=(root) NOPASSWD: /usr/bin/btmgmt -i hci0 rm-adv 1
+sirius-jazzy-nuc ALL=(root) NOPASSWD: /usr/bin/btmgmt -i hci0 add-adv -c -g -n -u A07498CA-AD5B-474E-940D-16F1F1E0A123 1

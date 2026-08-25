@@ -3,6 +3,8 @@ import asyncio
 import json
 import inspect
 import math
+import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -128,6 +130,7 @@ class SiriusBleGateway(Node):
         self._remote_ble_link = False
         self._remote_last_activity = 0.0
         self._remote_server = None
+        self._remote_kernel_advertising = False
         self._battery_device = None
         self._ear_led_left_client = None
         self._ear_led_right_client = None
@@ -205,17 +208,38 @@ class SiriusBleGateway(Node):
 
     def destroy_node(self):
         self._stopping.set()
-        for task in self._tasks:
-            task.cancel()
-        if self._remote_server:
-            asyncio.run_coroutine_threadsafe(self._stop_remote_server(), self._loop)
-        if self._battery_device:
-            asyncio.run_coroutine_threadsafe(self._disconnect_battery(), self._loop)
-        if self._ear_led_left_client or self._ear_led_right_client:
-            asyncio.run_coroutine_threadsafe(self._disconnect_ear_leds(), self._loop)
+        if self._remote_kernel_advertising:
+            try:
+                subprocess.run(
+                    self._btmgmt_pty_command("rm-adv", "1"),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5.0,
+                    check=False,
+                )
+            except Exception as exc:
+                self.get_logger().warning(
+                    f"Failed to remove kernel-managed BLE advertisement: {exc}"
+                )
+            self._remote_kernel_advertising = False
+        try:
+            shutdown = asyncio.run_coroutine_threadsafe(
+                self._shutdown_ble_tasks(), self._loop
+            )
+            shutdown.result(timeout=5.0)
+        except Exception as exc:
+            self.get_logger().debug(f"BLE task shutdown did not fully complete: {exc}")
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=3.0)
         super().destroy_node()
+
+    async def _shutdown_ble_tasks(self):
+        current = asyncio.current_task()
+        tasks = [task for task in asyncio.all_tasks() if task is not current]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _on_blinker_command(self, msg: String):
         data = (msg.data or "").strip()
@@ -493,6 +517,34 @@ class SiriusBleGateway(Node):
             permissions,
         )
 
+        # Ubuntu's BlueZ 5.72 D-Bus advertisement path is rejected by Linux
+        # 7.0 with HCI status 0x0d.  Keep Bless for the GATT application, but
+        # register the advertising payload through the kernel management API.
+        # The narrowly-scoped sudo permission is installed by
+        # config/sirius-ble-btmgmt.sudoers.
+        async def start_kernel_advertising(adapter):
+            await server.app.set_name(adapter, self.advertise_name)
+            await self._run_btmgmt("rm-adv", "1", allow_failure=True)
+            await self._run_btmgmt(
+                "add-adv",
+                "-c",
+                "-g",
+                "-n",
+                "-u",
+                self.service_uuid,
+                "1",
+            )
+            self._remote_kernel_advertising = True
+
+        async def stop_kernel_advertising(adapter):
+            if self._remote_kernel_advertising:
+                await self._run_btmgmt("rm-adv", "1", allow_failure=True)
+            self._remote_kernel_advertising = False
+            await server.app.set_name(adapter, "")
+
+        server.app.start_advertising = start_kernel_advertising
+        server.app.stop_advertising = stop_kernel_advertising
+
         self.get_logger().info(
             f"Remote BLE server advertising as '{self.advertise_name}' "
             f"service={self.service_uuid}"
@@ -514,6 +566,46 @@ class SiriusBleGateway(Node):
         finally:
             await server.stop()
             self._publish_remote_status("stopped", ble_link=False, active=False)
+
+    async def _run_btmgmt(self, *arguments, allow_failure=False):
+        command = self._btmgmt_pty_command(*arguments)
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output_bytes, _ = await process.communicate()
+        output = output_bytes.decode("utf-8", errors="replace").strip()
+        if process.returncode != 0 and not allow_failure:
+            raise RuntimeError(
+                "Kernel-managed BLE advertising failed: "
+                f"exit={process.returncode}, output={output or '(none)'}"
+            )
+        if output and (process.returncode == 0 or not allow_failure):
+            self.get_logger().debug(f"btmgmt: {output}")
+        return process.returncode == 0
+
+    @staticmethod
+    def _btmgmt_pty_command(*arguments):
+        btmgmt_command = (
+            "sudo",
+            "-n",
+            "/usr/bin/btmgmt",
+            "-i",
+            "hci0",
+            *arguments,
+        )
+        # btmgmt's non-interactive mode waits indefinitely when stdin is a
+        # pipe on this BlueZ/kernel combination. util-linux script(1) gives it
+        # a short-lived PTY while preserving its exit status.
+        return (
+            "/usr/bin/script",
+            "--quiet",
+            "--return",
+            "--command",
+            shlex.join(btmgmt_command),
+            "/dev/null",
+        )
 
     def _handle_remote_ble_write(self, characteristic, value: bytes, **kwargs):
         try:
