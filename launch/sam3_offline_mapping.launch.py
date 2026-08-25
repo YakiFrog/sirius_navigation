@@ -163,9 +163,12 @@ def generate_launch_description():
             'Reg/Strategy': '0',
             'Reg/Force3DoF': 'true',
             'Mem/MaxSize': '2000',
+            # Integrate twice per second so short side views and turns are not
+            # discarded from the structural floor extent.
+            'Rtabmap/DetectionRate': '2.0',
             'Grid/VoxelSize': '0.05',
             'Optimizer/Strategy': '1',
-            'Grid/RangeMax': '5.0',
+            'Grid/RangeMax': '7.0',
             'Grid/RangeMin': '0.8',
             'Grid/NoiseFilteringRadius': '0.1',
             'Grid/NoiseFilteringMinNeighbors': '5',
@@ -194,6 +197,15 @@ def generate_launch_description():
             'accumulate_real_texture': True,
             'texture_min_height_m': -0.15,
             'texture_max_height_m': 0.25,
+            'texture_min_range_m': 0.5,
+            'texture_max_range_m': 7.0,
+            # The recorded camera averages about 8 Hz. Process up to 8 Hz
+            # instead of the old 0.5 Hz texture sampling rate.
+            'min_cloud_interval_sec': 0.125,
+            'texture_exposure_compensation': True,
+            'texture_robust_delta': 35.0,
+            'texture_max_fusion_weight': 8.0,
+            'texture_fill_small_holes': True,
         }]
     )
 
