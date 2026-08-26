@@ -1,6 +1,10 @@
 """Tests for selecting exactly one BLE navigation delivery route."""
 
+import json
+
 from unittest.mock import Mock, patch
+
+from std_msgs.msg import String
 
 from sirius_navigation.sirius_ble_gateway import SiriusBleGateway
 
@@ -46,3 +50,24 @@ def test_falls_back_only_to_http_when_ros_topic_has_no_subscriber():
         daemon=True,
     )
     thread.return_value.start.assert_called_once_with()
+
+
+def test_confirmed_navigation_mode_is_in_remote_status():
+    """Relay the robot-confirmed mode instead of relying on the UI selection."""
+    gateway = SiriusBleGateway.__new__(SiriusBleGateway)
+    gateway._navigation_mode = "unknown"
+    gateway._last_remote_payload = ""
+    gateway._last_remote_status = None
+    gateway._emergency_stop_active = False
+    gateway._last_battery_data = None
+    gateway.advertise_name = "SiriusBleBridge"
+    gateway.service_uuid = "test-service"
+    gateway.remote_status_pub = Mock()
+    gateway._people_status_fields = Mock(return_value={})
+
+    gateway._on_navigation_mode(String(data="strict_normal"))
+    gateway._publish_remote_status("connected", ble_link=True, active=True)
+
+    message = gateway.remote_status_pub.publish.call_args.args[0]
+    payload = json.loads(message.data)
+    assert payload["navigation_mode"] == "strict_normal"

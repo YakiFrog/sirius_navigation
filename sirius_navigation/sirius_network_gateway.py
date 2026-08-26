@@ -14,6 +14,7 @@ from aiohttp import WSMsgType, web
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Int32, String
 
 
@@ -99,6 +100,15 @@ class SiriusNetworkGateway(Node):
         )
         self.create_subscription(String, "/sirius/remote_status", self._on_remote_status, 10)
         self.create_subscription(String, "/sirius/battery_status", self._on_battery, 10)
+        navigation_mode_qos = QoSProfile(depth=1)
+        navigation_mode_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        navigation_mode_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.create_subscription(
+            String,
+            "/sirius/navigation_mode",
+            self._on_navigation_mode,
+            navigation_mode_qos,
+        )
         self.create_subscription(Bool, "/stop", self._on_stop, 10)
         self.create_subscription(
             Int32,
@@ -123,6 +133,7 @@ class SiriusNetworkGateway(Node):
         self._active_controller = ""
         self._last_status = {}
         self._battery = None
+        self._navigation_mode = "unknown"
         self._emergency_stop = False
         self._stop_state_received = False
         self._people_count = None
@@ -324,6 +335,12 @@ class SiriusNetworkGateway(Node):
             return
         self._broadcast_status()
 
+    def _on_navigation_mode(self, msg: String):
+        mode = str(msg.data or "").strip()
+        if mode:
+            self._navigation_mode = mode
+            self._broadcast_status()
+
     def _on_stop(self, msg: Bool):
         self._emergency_stop = bool(msg.data)
         self._stop_state_received = True
@@ -360,6 +377,9 @@ class SiriusNetworkGateway(Node):
             self._people_count_at > 0.0
             and time.monotonic() - self._people_count_at <= 3.0
         )
+        navigation_mode = self._navigation_mode
+        if navigation_mode == "unknown":
+            navigation_mode = self._last_status.get("navigation_mode", "unknown")
         return {
             "type": "status",
             "status": "connected" if self._active_socket else "waiting",
@@ -371,6 +391,7 @@ class SiriusNetworkGateway(Node):
             "pairing_expires_in": pairing_expires_in if pairing_code else 0,
             "emergency_stop": emergency_stop,
             "battery": battery,
+            "navigation_mode": navigation_mode,
             "people_detection_active": people_detection_active,
             "people_count": (
                 self._people_count if people_detection_active else None

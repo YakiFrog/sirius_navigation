@@ -14,8 +14,10 @@ from visualization_msgs.msg import Marker
 
 try:
     from ..local_parser import DIALOGUE_TEMPLATES
+    from ...navigation_modes import NAVIGATION_MODE_CONFIGS, NAVIGATION_MODE_INFO
 except ImportError:
     from local_parser import DIALOGUE_TEMPLATES
+    from navigation_modes import NAVIGATION_MODE_CONFIGS, NAVIGATION_MODE_INFO
 from .landmark_manager import JAPANESE_TO_ROMAJI
 
 class NavController:
@@ -288,6 +290,37 @@ class NavController:
         except Exception as exc:
             self.node.get_logger().warning(f"[AssistedTeleop] action result error: {exc}")
 
+    def set_navigation_mode(self, mode):
+        """Apply and verify every parameter belonging to a named Nav2 mode."""
+        config = NAVIGATION_MODE_CONFIGS.get(mode)
+        if config is None:
+            self.node.get_logger().error(f"Unknown navigation mode: {mode!r}")
+            return False
+
+        self.node.get_logger().info(f"Applying complete navigation mode: {mode!r}")
+        success = True
+        for node_name, params in config.items():
+            if not self.set_node_parameters(
+                node_name,
+                params,
+                wait_for_result=True,
+                timeout_sec=5.0,
+            ):
+                success = False
+
+        if success:
+            with self.node.lock:
+                self.node.current_speed_setting = NAVIGATION_MODE_INFO[mode]["speed"]
+                self.node.current_navigation_mode = mode
+            self.node.get_logger().info(
+                f"Navigation mode fully applied and verified: {mode!r}"
+            )
+        else:
+            self.node.get_logger().error(
+                f"Navigation mode was not fully applied: {mode!r}"
+            )
+        return success
+
     def set_controller_speed(self, speed_setting):
         """Configure controller_server and velocity_smoother based on navigation mode configs"""
         nav_modes = {
@@ -397,14 +430,20 @@ class NavController:
         for node_name, params in cfg.items():
             self.set_node_parameters(node_name, params)
 
-    def set_node_parameters(self, node_name, params_dict):
-        """Helper to call SetParameters service asynchronously on target node"""
+    def set_node_parameters(
+        self,
+        node_name,
+        params_dict,
+        wait_for_result=False,
+        timeout_sec=1.0,
+    ):
+        """Call SetParameters, optionally waiting for every result to succeed."""
         srv_name = f'{node_name}/set_parameters'
         client = self.node.create_client(SetParameters, srv_name)
         
-        if not client.wait_for_service(timeout_sec=1.0):
+        if not client.wait_for_service(timeout_sec=timeout_sec):
             self.node.get_logger().warning(f"Service {srv_name} not available!")
-            return
+            return False
             
         req = SetParameters.Request()
         for name, val in params_dict.items():
@@ -428,7 +467,38 @@ class NavController:
             param.value = p_val
             req.parameters.append(param)
             
-        client.call_async(req)
+        future = client.call_async(req)
+        if not wait_for_result:
+            return True
+
+        completed = threading.Event()
+        future.add_done_callback(lambda _future: completed.set())
+        if not completed.wait(timeout_sec):
+            self.node.get_logger().error(
+                f"Timed out waiting for parameter results from {node_name}"
+            )
+            return False
+
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.node.get_logger().error(
+                f"Parameter request failed for {node_name}: {exc}"
+            )
+            return False
+
+        failures = []
+        parameter_names = list(params_dict)
+        for index, result in enumerate(response.results):
+            if not result.successful:
+                name = parameter_names[index] if index < len(parameter_names) else "unknown"
+                failures.append(f"{name}: {result.reason or 'rejected'}")
+        if failures:
+            self.node.get_logger().error(
+                f"Parameters rejected by {node_name}: {'; '.join(failures)}"
+            )
+            return False
+        return True
 
     def send_spin_goal(self, relative_yaw):
         if not self.node.spin_client.wait_for_server(timeout_sec=2.0):

@@ -52,9 +52,19 @@ def print_command_prompt():
 try:
     from .face_client import FaceClient
     from .local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text, style_sirius_speak, DEFAULT_HUMOR_LEVEL, clamp_humor_level
+    from ..navigation_modes import (
+        NAVIGATION_MODE_INFO,
+        navigation_mode_confirmation,
+        parse_navigation_mode_command,
+    )
 except ImportError:
     from face_client import FaceClient
     from local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text, style_sirius_speak, DEFAULT_HUMOR_LEVEL, clamp_humor_level
+    from navigation_modes import (
+        NAVIGATION_MODE_INFO,
+        navigation_mode_confirmation,
+        parse_navigation_mode_command,
+    )
 
 try:
     from .modules.llm_client import LlmClient
@@ -98,6 +108,11 @@ class LlmDynamicGoal(Node):
         self.landmark_marker_pub = self.create_publisher(MarkerArray, '/sirius/landmark_markers', marker_qos)
         self.landmark_status_pub = self.create_publisher(String, '/sirius/landmark_status', marker_qos)
         self.queue_pub = self.create_publisher(String, '/sirius/command_queue', marker_qos)
+        self.navigation_mode_pub = self.create_publisher(
+            String,
+            '/sirius/navigation_mode',
+            marker_qos,
+        )
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
         self.nav_control_pub = self.create_publisher(String, '/nav_control', 10)
         self.cmd_vel_teleop_pub = self.create_publisher(Twist, 'cmd_vel_teleop', 10)
@@ -178,6 +193,7 @@ class LlmDynamicGoal(Node):
         self.executing_command = False
         self.current_xy_tolerance = 0.50
         self.current_speed_setting = 0.90
+        self.current_navigation_mode = "unknown"
         self.suppress_step_speech = False
         
         # Turn (旋回) コマンドのアーリーキャンセル用ターゲットyaw
@@ -614,6 +630,33 @@ class LlmDynamicGoal(Node):
         self.get_logger().info(f'Received instruction via topic: "{msg.data}"')
         threading.Thread(target=self.process_instruction, args=(msg.data,), daemon=True).start()
 
+    def handle_navigation_mode_instruction(self, instruction):
+        """Handle a structured remote-controller Nav2 mode command directly."""
+        try:
+            mode = parse_navigation_mode_command(instruction)
+        except ValueError as exc:
+            self.get_logger().warning(f"Rejected navigation mode command: {exc}")
+            self.send_sirius_speak(
+                "[sad]指定されたNav2走行モードは使えないのだ。"
+            )
+            return True
+
+        if mode is None:
+            return False
+
+        if not self.nav_ctrl.set_navigation_mode(mode):
+            label = NAVIGATION_MODE_INFO[mode]["label"]
+            self.send_sirius_speak(
+                f"[sad]Nav2走行モードを{label}へ完全に変更できなかったのだ。"
+            )
+            return True
+
+        status = String()
+        status.data = mode
+        self.navigation_mode_pub.publish(status)
+        self.send_sirius_speak(navigation_mode_confirmation(mode))
+        return True
+
     def interactive_input_loop(self):
         """標準入力からインタラクティブに入力を受け付けるスレッド"""
         print(color_text("\n=== Sirius LLM Dynamic Goal Navigation ===", _MAGENTA))
@@ -645,6 +688,9 @@ class LlmDynamicGoal(Node):
     def process_instruction(self, instruction):
         """指示文を解析し、適切なROS 2アクションを実行する"""
         instruction = normalize_instruction_text(instruction)
+
+        if self.handle_navigation_mode_instruction(instruction):
+            return
 
         if self.handle_follow_me_instruction(instruction):
             return
