@@ -112,6 +112,37 @@ NAVIGATION_MODE_CONFIGS = {
         },
         "/global_costmap/global_costmap": {"obstacle_layer.enabled": True},
     },
+    "wait_normal": {
+        "/controller_server": {
+            "FollowPath.vx_max": 0.90,
+            "FollowPath.vx_min": -0.60,
+            "FollowPath.wz_max": 0.90,
+            "FollowPath.vx_std": 0.25,
+            "FollowPath.wz_std": 0.30,
+            "FollowPath.ax_max": 0.90,
+            "FollowPath.ax_min": -0.90,
+            "FollowPath.az_max": 1.50,
+            "FollowPath.CostCritic.cost_weight": 10.0,
+            "FollowPath.PathAlignCritic.cost_weight": 8.0,
+            "FollowPath.PathFollowCritic.cost_weight": 8.0,
+            "FollowPath.PathAngleCritic.cost_weight": 2.0,
+            "FollowPath.TwirlingCritic.cost_weight": 3.0,
+            "FollowPath.PreferForwardCritic.cost_weight": 15.0,
+            "FollowPath.GoalCritic.cost_weight": 3.0,
+            "FollowPath.GoalAngleCritic.cost_weight": 1.0,
+            "WaitPath.desired_linear_vel": 0.90,
+        },
+        "/velocity_smoother": {
+            "max_velocity": [0.90, 0.0, 0.90],
+            "min_velocity": [-0.90, 0.0, -0.90],
+            "max_accel": [0.90, 0.0, 1.50],
+            "max_decel": [-0.90, 0.0, -1.50],
+        },
+        # The local costmap remains enabled for collision detection. Only the
+        # global dynamic-obstacle layer is disabled so replanning keeps the
+        # original static-map route while the wait controller is selected.
+        "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
+    },
     "strict_normal": {
         "/controller_server": {
             "FollowPath.vx_max": 0.90,
@@ -201,10 +232,19 @@ NAVIGATION_MODE_INFO = {
     "normal_active": {"label": "通常・探索強化", "speed": 1.00, "strict": False},
     "safe": {"label": "安全", "speed": 0.40, "strict": False},
     "slow": {"label": "超低速", "speed": 0.20, "strict": False},
+    "wait_normal": {"label": "待機優先", "speed": 0.90, "strict": False},
     "strict_normal": {"label": "パス厳守・通常", "speed": 0.90, "strict": True},
     "strict_safe": {"label": "パス厳守・安全", "speed": 0.40, "strict": True},
     "strict_slow": {"label": "パス厳守・超低速", "speed": 0.20, "strict": True},
 }
+
+
+def navigation_mode_controller(mode):
+    """Return the controller plugin selected by a navigation mode."""
+    canonical = normalize_navigation_mode(mode)
+    if canonical is None:
+        raise ValueError(f"unknown navigation mode: {mode!r}")
+    return "WaitPath" if canonical == "wait_normal" else "FollowPath"
 
 
 def normalize_navigation_mode(mode):

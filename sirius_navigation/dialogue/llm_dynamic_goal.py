@@ -54,6 +54,7 @@ try:
     from .local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text, style_sirius_speak, DEFAULT_HUMOR_LEVEL, clamp_humor_level
     from ..navigation_modes import (
         NAVIGATION_MODE_INFO,
+        navigation_mode_controller,
         navigation_mode_confirmation,
         parse_navigation_mode_command,
     )
@@ -62,6 +63,7 @@ except ImportError:
     from local_parser import parse_local_rules, DIALOGUE_TEMPLATES, normalize_instruction_text, style_sirius_speak, DEFAULT_HUMOR_LEVEL, clamp_humor_level
     from navigation_modes import (
         NAVIGATION_MODE_INFO,
+        navigation_mode_controller,
         navigation_mode_confirmation,
         parse_navigation_mode_command,
     )
@@ -111,6 +113,11 @@ class LlmDynamicGoal(Node):
         self.navigation_mode_pub = self.create_publisher(
             String,
             '/sirius/navigation_mode',
+            marker_qos,
+        )
+        self.controller_selector_pub = self.create_publisher(
+            String,
+            '/controller_selector',
             marker_qos,
         )
         self.stop_pub = self.create_publisher(Bool, 'stop', 10)
@@ -650,6 +657,10 @@ class LlmDynamicGoal(Node):
                 f"[sad]Nav2走行モードを{label}へ完全に変更できなかったのだ。"
             )
             return True
+
+        selected_controller = String()
+        selected_controller.data = navigation_mode_controller(mode)
+        self.controller_selector_pub.publish(selected_controller)
 
         status = String()
         status.data = mode

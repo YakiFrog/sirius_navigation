@@ -9,6 +9,7 @@ from sirius_navigation.dialogue.llm_dynamic_goal import LlmDynamicGoal
 from sirius_navigation.dialogue.modules.nav_controller import NavController
 from sirius_navigation.navigation_modes import (
     NAVIGATION_MODE_CONFIGS,
+    navigation_mode_controller,
     navigation_mode_confirmation,
     parse_navigation_mode_command,
 )
@@ -31,6 +32,19 @@ def test_unknown_navigation_mode_is_rejected_before_llm_fallback():
         parse_navigation_mode_command('{"type":"nav_mode","mode":"warp"}')
 
 
+def test_wait_normal_uses_normal_speed_and_wait_controller():
+    command = '{"type":"nav_mode","mode":"wait_normal"}'
+
+    assert parse_navigation_mode_command(command) == "wait_normal"
+    assert navigation_mode_controller("wait_normal") == "WaitPath"
+    assert navigation_mode_controller("normal") == "FollowPath"
+
+    config = NAVIGATION_MODE_CONFIGS["wait_normal"]
+    assert config["/controller_server"]["WaitPath.desired_linear_vel"] == 0.90
+    assert config["/velocity_smoother"]["max_velocity"][0] == 0.90
+    assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is False
+
+
 def test_complete_mode_application_updates_state_only_after_all_services_succeed():
     node = Mock()
     node.lock = threading.Lock()
@@ -49,6 +63,7 @@ def test_remote_mode_handler_publishes_confirmed_mode_and_explicit_response():
     node = LlmDynamicGoal.__new__(LlmDynamicGoal)
     node.nav_ctrl = Mock()
     node.nav_ctrl.set_navigation_mode.return_value = True
+    node.controller_selector_pub = Mock()
     node.navigation_mode_pub = Mock()
     node.send_sirius_speak = Mock()
     node.get_logger = Mock(return_value=Mock())
@@ -59,8 +74,30 @@ def test_remote_mode_handler_publishes_confirmed_mode_and_explicit_response():
 
     assert handled is True
     node.nav_ctrl.set_navigation_mode.assert_called_once_with("strict_normal")
+    controller = node.controller_selector_pub.publish.call_args.args[0]
+    assert controller.data == "FollowPath"
     status = node.navigation_mode_pub.publish.call_args.args[0]
     assert status.data == "strict_normal"
     spoken = node.send_sirius_speak.call_args.args[0]
     assert "パス厳守・通常" in spoken
     assert "0.9" in spoken
+
+
+def test_remote_wait_mode_selects_wait_path_controller():
+    node = LlmDynamicGoal.__new__(LlmDynamicGoal)
+    node.nav_ctrl = Mock()
+    node.nav_ctrl.set_navigation_mode.return_value = True
+    node.controller_selector_pub = Mock()
+    node.navigation_mode_pub = Mock()
+    node.send_sirius_speak = Mock()
+    node.get_logger = Mock(return_value=Mock())
+
+    handled = node.handle_navigation_mode_instruction(
+        '{"type":"nav_mode","mode":"wait_normal"}'
+    )
+
+    assert handled is True
+    selector = node.controller_selector_pub.publish.call_args.args[0]
+    assert selector.data == "WaitPath"
+    status = node.navigation_mode_pub.publish.call_args.args[0]
+    assert status.data == "wait_normal"
