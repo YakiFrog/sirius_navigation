@@ -11,8 +11,12 @@ twist_mux:
     use_stamped: false
     # トピックの定義
     topics:
-      teleop:
+      direct:
         topic: "cmd_vel_direct"
+        timeout: 0.5
+        priority: 110
+      teleop:
+        topic: "cmd_vel_teleop"
         timeout: 0.5
         priority: 100
       navigation:

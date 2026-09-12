@@ -10,6 +10,7 @@ class TwistMuxMonitor(Node):
         
         # 最後にメッセージを受信した時刻を保持
         self.last_teleop_time = 0.0
+        self.last_direct_time = 0.0
         self.last_nav_time = 0.0
         self.is_stopped = False
         self.last_stop_time = 0.0
@@ -20,7 +21,9 @@ class TwistMuxMonitor(Node):
         
         # 購読設定
         self.create_subscription(Twist, 'cmd_vel_teleop', self.teleop_callback, 10)
+        self.create_subscription(Twist, 'cmd_vel_direct', self.direct_callback, 10)
         self.create_subscription(Twist, 'cmd_vel_nav', self.nav_callback, 10)
+        self.create_subscription(Twist, 'cmd_vel_smoothed', self.nav_callback, 10)
         self.create_subscription(Bool, '/stop', self.stop_callback, 10)
         
         # Idle出力用のパブリッシャー
@@ -33,6 +36,9 @@ class TwistMuxMonitor(Node):
 
     def teleop_callback(self, msg):
         self.last_teleop_time = self.get_clock().now().nanoseconds / 1e9
+
+    def direct_callback(self, msg):
+        self.last_direct_time = self.get_clock().now().nanoseconds / 1e9
 
     def nav_callback(self, msg):
         self.last_nav_time = self.get_clock().now().nanoseconds / 1e9
@@ -58,11 +64,15 @@ class TwistMuxMonitor(Node):
         if self.is_stopped:
             winner = "STOP (LOCKED)"
             priority = 255
-        # 2. TELEOP (100)
+        # 2. DIRECT (110)
+        elif (now - self.last_direct_time < timeout):
+            winner = "DIRECT (Manual)"
+            priority = 110
+        # 3. TELEOP (100)
         elif (now - self.last_teleop_time < timeout):
             winner = "TELEOP (Manual)"
             priority = 100
-        # 3. NAVIGATION (10)
+        # 4. NAVIGATION (10)
         elif (now - self.last_nav_time < timeout):
             winner = "NAVIGATION (Auto)"
             priority = 10
