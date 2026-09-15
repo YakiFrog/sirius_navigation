@@ -1,0 +1,17 @@
+# Ideal simulator calibration, NOT measured THETA S intrinsics.
+# ROS axes: X forward, Y left, Z up. Pixel UV origin: top left.
+image_size: [1920, 1080]
+camera_position: [0.0, 0.0, 1.35]
+rpy_degrees: [0.0, 0.0, 0.0] # roll, pitch (positive upward), yaw
+bev_size: 512
+bev_extent_m: 8.0
+front:
+  center: [480.0, 540.0]
+  focal: [289.493, 289.493] # circle radius 480 / radians(95)
+  distortion: [0.0, 0.0, 0.0, 0.0] # theta polynomial k1..k4
+  max_theta_degrees: 95.0
+back:
+  center: [1440.0, 540.0]
+  focal: [289.493, 289.493]
+  distortion: [0.0, 0.0, 0.0, 0.0]
+  max_theta_degrees: 95.0
