@@ -202,6 +202,10 @@ class ThetaIndexedMapNode(Node):
         gi = np.clip(np.round(g / 63.75).astype(np.int32), 0, 4)
         bi = np.clip(np.round(b / 63.75).astype(np.int32), 0, 4)
         indices = self.color_lut[ri, gi, bi]
+        # SAM3の semantic_id (UINT8) があれば予約IDを優先。無い画素は代表色(quantized)。
+        if 'semantic_id' in offsets:
+            sid = data[:, offsets['semantic_id']].astype(np.uint8)
+            indices = np.where(sid >= 3, sid, indices)
         not_wall = self.grid[gy, gx] != 1
         self.grid[gy[not_wall], gx[not_wall]] = indices[not_wall]
         # 実RGBの平均を蓄積（.texture.png 用）

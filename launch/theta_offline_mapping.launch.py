@@ -29,6 +29,9 @@ def generate_launch_description():
     declare_rviz = DeclareLaunchArgument(
         'rviz', default_value='false',
         description='Launch RViz2 to preview the map during replay')
+    declare_sam3 = DeclareLaunchArgument(
+        'sam3', default_value='false',
+        description='Run theta_sam3_bev_node (needs sam3 docker server) to publish /theta/bev_semantic')
 
     theta_bev = Node(
         package='sirius_navigation', executable='theta_bev_node', name='theta_bev',
@@ -43,6 +46,13 @@ def generate_launch_description():
     theta_indexed = Node(
         package='sirius_navigation', executable='theta_indexed_map_node', name='theta_indexed_map_node',
         parameters=[{'use_sim_time': use_sim_time}],
+        output='screen')
+
+    # SAM3セマンティック（任意）。既存DockerサーバでBEVをクラス分類し /theta/bev_semantic を出す。
+    theta_sam3 = Node(
+        package='sirius_navigation', executable='theta_sam3_bev_node', name='theta_sam3_bev_node',
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(LaunchConfiguration('sam3')),
         output='screen')
 
     # RTAB-Map（ZED版と同じ設定。scan_cloudだけTHETA地面点群へ差し替え）
@@ -91,9 +101,11 @@ def generate_launch_description():
     return LaunchDescription([
         declare_use_sim_time,
         declare_rviz,
+        declare_sam3,
         theta_bev,
         theta_cloud,
         theta_indexed,
+        theta_sam3,
         rtabmap_node,
         rviz_node,
     ])
