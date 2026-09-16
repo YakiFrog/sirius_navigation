@@ -10,7 +10,7 @@ rpy_degrees:
 - 0.0
 - 0.0
 bev_size: 512
-bev_extent_m: 8.0
+bev_extent_m: 10.0
 front:
   center:
   - 476.677889736212

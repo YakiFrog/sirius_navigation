@@ -30,14 +30,16 @@ class ThetaGroundCloudNode(Node):
         self.declare_parameter('input_topic', '/theta/bev/image_raw')
         self.declare_parameter('output_topic', '/theta/ground_cloud')
         self.declare_parameter('frame_id', 'sirius3/base_footprint')
-        self.declare_parameter('stride', 4)
+        self.declare_parameter('stride', 1)
         self.declare_parameter('min_value', 8)
         self.declare_parameter('min_radius', 1.2)
-        self.declare_parameter('max_radius', 3.5)
+        self.declare_parameter('max_radius', 4.8)
         self.declare_parameter('semantic_topic', '/theta/bev_semantic')
         # SAM3ラベルが同じstampで来るのを待つ上限[s]。過ぎたらsemantic無しで出力。
-        self.declare_parameter('semantic_wait_sec', 1.0)
-        self.declare_parameter('max_pending', 200)
+        # 遅延が大きいとTFキャッシュ(既定10s)を超えて取りこぼすため控えめにする
+        # （bag --rate 2.0 では実時間x2の遅延になる点に注意）。
+        self.declare_parameter('semantic_wait_sec', 2.5)
+        self.declare_parameter('max_pending', 600)
         # デバッグ用: クラス色にした点群のトピック（空文字で無効）
         self.declare_parameter('semantic_debug_topic', '')
 
@@ -137,39 +139,66 @@ class ThetaGroundCloudNode(Node):
         grid_cols, grid_rows = np.meshgrid(cols, rows)
         u = (grid_cols + 0.5) / width
         v = (grid_rows + 0.5) / height
-        x = (0.5 - v) * self.extent  # 前(+)
-        y = (0.5 - u) * self.extent  # 左(+)
+        x = ((0.5 - v) * self.extent).astype(np.float32)  # 前(+)
+        y = ((0.5 - u) * self.extent).astype(np.float32)  # 左(+)
         colors = image[grid_rows, grid_cols]
-        b, g, r = colors[..., 0].astype(np.uint32), colors[..., 1].astype(np.uint32), colors[..., 2].astype(np.uint32)
+        b = colors[..., 0].astype(np.uint32)
+        g = colors[..., 1].astype(np.uint32)
+        r = colors[..., 2].astype(np.uint32)
         valid = colors.max(axis=2) >= self.min_value
-        radius_sq = x * x + y * y
+        radius_sq = x.astype(np.float64) ** 2 + y.astype(np.float64) ** 2
         if self.min_radius > 0.0:
             valid &= radius_sq >= self.min_radius ** 2
         if self.max_radius > 0.0:
             valid &= radius_sq <= self.max_radius ** 2
-        rgb = ((r << 16) | (g << 8) | b)
-        rgb_float = rgb.view(np.float32)
+        rgb_float = (((r << 16) | (g << 8) | b).astype(np.uint32)).view(np.float32)
         label_ok = semantic is not None and semantic.shape == (height, width)
-        points = [
-            (float(x[row, col]), float(y[row, col]), 0.0, float(rgb_float[row, col]),
-             int(semantic[row, col]) if label_ok else 0)
-            for row, col in zip(*np.nonzero(valid))
-        ]
-        if not points:
+        if label_ok:
+            sid_full = semantic[grid_rows, grid_cols]
+        else:
+            sid_full = np.zeros_like(grid_rows, dtype=np.uint8)
+
+        xv, yv, rv, sv = x[valid], y[valid], rgb_float[valid], sid_full[valid].astype(np.uint8)
+        count = xv.size
+        if count == 0:
             return
+        dtype = np.dtype([('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('rgb', '<f4'), ('semantic_id', 'u1')])
+        cloud = np.empty(count, dtype=dtype)
+        cloud['x'], cloud['y'], cloud['z'] = xv, yv, 0.0
+        cloud['rgb'], cloud['semantic_id'] = rv, sv
         header = Header(stamp=stamp, frame_id=frame_id)
-        self.pub.publish(pc2.create_cloud(header, self.fields, points))
+        msg = PointCloud2()
+        msg.header = header
+        msg.height, msg.width = 1, count
+        msg.fields = self.fields
+        msg.is_bigendian = False
+        msg.point_step = dtype.itemsize
+        msg.row_step = dtype.itemsize * count
+        msg.is_dense = True
+        msg.data = cloud.tobytes()
+        self.pub.publish(msg)
+
         if self.debug_pub is not None:
-            class_rgb = {3: (0, 255, 0), 4: (255, 255, 0), 5: (0, 0, 255), 6: (128, 128, 128)}
-            debug_points = []
-            for px, py, pz, prgb, sid in points:
-                if sid in class_rgb:
-                    red, green, blue = class_rgb[sid]
+            debug_rgb = rv.copy()
+            for class_id, (red, green, blue) in ((3, (0, 255, 0)), (4, (255, 255, 0)),
+                                                 (5, (0, 0, 255)), (6, (128, 128, 128))):
+                mask = sv == class_id
+                if np.any(mask):
                     packed = np.array([(red << 16) | (green << 8) | blue], np.uint32).view(np.float32)[0]
-                    debug_points.append((px, py, pz, float(packed), sid))
-                else:
-                    debug_points.append((px, py, pz, prgb, sid))
-            self.debug_pub.publish(pc2.create_cloud(header, self.fields, debug_points))
+                    debug_rgb[mask] = packed
+            debug_cloud = np.empty(count, dtype=dtype)
+            debug_cloud['x'], debug_cloud['y'], debug_cloud['z'] = xv, yv, 0.0
+            debug_cloud['rgb'], debug_cloud['semantic_id'] = debug_rgb, sv
+            debug_msg = PointCloud2()
+            debug_msg.header = header
+            debug_msg.height, debug_msg.width = 1, count
+            debug_msg.fields = self.fields
+            debug_msg.is_bigendian = False
+            debug_msg.point_step = dtype.itemsize
+            debug_msg.row_step = dtype.itemsize * count
+            debug_msg.is_dense = True
+            debug_msg.data = debug_cloud.tobytes()
+            self.debug_pub.publish(debug_msg)
 
 
 def main():

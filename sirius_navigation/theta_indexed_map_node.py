@@ -22,6 +22,7 @@ import struct
 
 import cv2
 import numpy as np
+from scipy import ndimage
 import rclpy
 from nav_msgs.msg import OccupancyGrid
 from rclpy.duration import Duration
@@ -63,20 +64,26 @@ class ThetaIndexedMapNode(Node):
         self.declare_parameter('grid_topic', '/theta/colored_map_grid')
         self.declare_parameter('struct_map_topic', '/rtabmap/grid_map')
         self.declare_parameter('min_cloud_interval_sec', 0.0)
+        # 保存時、自機マスク等で残った小さな穴(floor/unknown)を周囲の路面クラスで埋める最大距離[m]。
+        # 0で無効。画像端に連結した本物の未知/床は対象外（囲まれた穴のみ）。
+        self.declare_parameter('fill_hole_m', 0.75)
+        # テクスチャに使う直近観測の枚数K（移動平均）。大きいほど滑らかだがブレが累積しやすい。
+        self.declare_parameter('texture_samples', 5)
 
         self.res = self.get_parameter('grid_resolution').value
         self.map_frame = self.get_parameter('map_frame').value
         self.min_cloud_interval = max(0.0, float(self.get_parameter('min_cloud_interval_sec').value))
+        self.fill_hole_m = max(0.0, float(self.get_parameter('fill_hole_m').value))
+        self.texture_k = max(1, int(self.get_parameter('texture_samples').value))
 
         self.grid = None
         self.struct_grid = None
         self.origin = [0.0, 0.0]
         self.width = 0
         self.height = 0
-        self.texture_sum = None
-        self.texture_count = None
-        self.texture_min = None
-        self.texture_max = None
+        self.texture_ring = None   # (H,W,K,3) uint8 直近K枚
+        self.texture_sum = None    # (H,W,3) 直近K枚の合計
+        self.texture_count = None  # (H,W) 総観測数
         self.semantic_votes = None
         self.dirty = False
         self.last_cloud_time = 0.0
@@ -126,32 +133,31 @@ class ThetaIndexedMapNode(Node):
         new_origin = [msg.info.origin.position.x, msg.info.origin.position.y]
         if (self.grid is None or self.width != new_width or self.height != new_height
                 or not np.allclose(self.origin, new_origin, atol=1e-3)):
-            old = (self.grid, self.texture_sum, self.texture_count, self.texture_min, self.texture_max,
-                   self.semantic_votes, self.width, self.height, self.origin)
+            old_grid, old_ring, old_sum, old_count, old_votes = (
+                self.grid, self.texture_ring, self.texture_sum, self.texture_count, self.semantic_votes)
+            old_width, old_height, old_origin = self.width, self.height, self.origin
             self.width, self.height = new_width, new_height
             self.origin = new_origin
             self.res = msg.info.resolution
             self.grid = np.zeros((self.height, self.width), dtype=np.uint8)
+            self.texture_ring = np.zeros((self.height, self.width, self.texture_k, 3), dtype=np.uint8)
             self.texture_sum = np.zeros((self.height, self.width, 3), dtype=np.float64)
-            self.texture_count = np.zeros((self.height, self.width), dtype=np.uint16)
-            self.texture_min = np.full((self.height, self.width, 3), 255, dtype=np.uint8)
-            self.texture_max = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            self.texture_count = np.zeros((self.height, self.width), dtype=np.int32)
             self.semantic_votes = np.zeros((self.height, self.width, MAX_CLASS_ID + 1), dtype=np.float32)
-            if old[0] is not None:
-                dx = int(round((old[8][0] - self.origin[0]) / self.res))
-                dy = int(round((old[8][1] - self.origin[1]) / self.res))
+            if old_grid is not None:
+                dx = int(round((old_origin[0] - self.origin[0]) / self.res))
+                dy = int(round((old_origin[1] - self.origin[1]) / self.res))
                 sx0, sy0 = max(0, -dx), max(0, -dy)
-                sx1, sy1 = min(old[6], self.width - dx), min(old[7], self.height - dy)
+                sx1, sy1 = min(old_width, self.width - dx), min(old_height, self.height - dy)
                 ddx0, ddy0 = max(0, dx), max(0, dy)
                 if sx1 > sx0 and sy1 > sy0:
                     src = np.s_[sy0:sy1, sx0:sx1]
                     dst = np.s_[ddy0:ddy0 + (sy1 - sy0), ddx0:ddx0 + (sx1 - sx0)]
-                    self.grid[dst] = old[0][src]
-                    self.texture_sum[dst] = old[1][src]
-                    self.texture_count[dst] = old[2][src]
-                    self.texture_min[dst] = old[3][src]
-                    self.texture_max[dst] = old[4][src]
-                    self.semantic_votes[dst] = old[5][src]
+                    self.grid[dst] = old_grid[src]
+                    self.texture_ring[dst] = old_ring[src]
+                    self.texture_sum[dst] = old_sum[src]
+                    self.texture_count[dst] = old_count[src]
+                    self.semantic_votes[dst] = old_votes[src]
             self.get_logger().info(f'Grid resized: {self.width}x{self.height}')
         self.struct_grid = np.array(msg.data, dtype=np.int8).reshape((self.height, self.width))
         self.grid[self.struct_grid == 100] = 1
@@ -217,11 +223,12 @@ class ThetaIndexedMapNode(Node):
         # 代表色パレットで路面を描く（wallは保護）。セマンティックは別途フレーム間投票で集約。
         not_wall = self.grid[gy, gx] != 1
         self.grid[gy[not_wall], gx[not_wall]] = indices[not_wall]
-        # ロバストテクスチャ統計（トリム平均用に sum/min/max/count を蓄積）
-        np.add.at(self.texture_sum, (gy, gx), rgb_u8.astype(np.float64))
+        # 直近K枚の移動平均テクスチャ（リングバッファ）。古い観測を捨ててブレ蓄積を防ぐ。
         np.add.at(self.texture_count, (gy, gx), 1)
-        np.minimum.at(self.texture_min, (gy, gx), rgb_u8)
-        np.maximum.at(self.texture_max, (gy, gx), rgb_u8)
+        slot = (self.texture_count[gy, gx] - 1) % self.texture_k
+        previous = self.texture_ring[gy, gx, slot].astype(np.float64)
+        self.texture_ring[gy, gx, slot] = rgb_u8
+        np.add.at(self.texture_sum, (gy, gx), rgb_u8.astype(np.float64) - previous)
         # セマンティックはフレーム間でクラスIDの投票（予約ID>=3）
         if 'semantic_id' in offsets:
             sid = data[:, offsets['semantic_id']].astype(np.int32)
@@ -245,6 +252,27 @@ class ThetaIndexedMapNode(Node):
             self.pub_indexed_grid.publish(msg)
             self.dirty = False
 
+    def _fill_small_holes(self, grid):
+        """自機マスク等で残った小さな穴(0/2)を、囲んでいる路面クラス(>=3)で埋める。"""
+        fill_px = int(round(self.fill_hole_m / self.res)) if self.fill_hole_m > 0 else 0
+        if fill_px <= 0:
+            return grid
+        fillable = (grid == 0) | (grid == 2)
+        if not np.any(fillable) or not np.any(~fillable):
+            return grid
+        dist, indices = ndimage.distance_transform_edt(fillable, return_distances=True, return_indices=True)
+        nearest = grid[tuple(indices)]
+        # 画像端に連結した背景（本物の未知/床）は除外し、囲まれた穴だけ対象にする
+        components, _ = ndimage.label(fillable)
+        border = np.concatenate([components[0, :], components[-1, :], components[:, 0], components[:, -1]])
+        enclosed = fillable & ~np.isin(components, np.unique(border))
+        hole = enclosed & (dist <= fill_px) & (nearest >= 3)
+        if not np.any(hole):
+            return grid
+        filled = grid.copy()
+        filled[hole] = nearest[hole]
+        return filled
+
     def _save_callback(self, msg):
         if self.grid is None:
             return
@@ -260,6 +288,7 @@ class ThetaIndexedMapNode(Node):
             total = np.sum(self.semantic_votes, axis=2)
             semantic_mask = (total >= 1.0) & (best >= 3)
             out_grid[semantic_mask] = best[semantic_mask]
+        out_grid = self._fill_small_holes(out_grid)
         cv2.imwrite(path + ".pgm", out_grid[::-1, :])
         labels = {str(idx): info for idx, info in SEMANTIC_CLASSES.items()}
         meta = {
@@ -277,17 +306,9 @@ class ThetaIndexedMapNode(Node):
         observed = self.texture_count > 0
         if np.any(observed):
             texture_rgb = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-            count = self.texture_count.astype(np.float64)
-            trimmed = self.texture_count > 2
-            regular = observed & ~trimmed
-            if np.any(regular):
-                texture_rgb[regular] = np.clip(
-                    np.round(self.texture_sum[regular] / count[regular, None]), 0, 255).astype(np.uint8)
-            if np.any(trimmed):
-                robust = (self.texture_sum[trimmed]
-                          - self.texture_min[trimmed].astype(np.float64)
-                          - self.texture_max[trimmed].astype(np.float64)) / (count[trimmed, None] - 2.0)
-                texture_rgb[trimmed] = np.clip(np.round(robust), 0, 255).astype(np.uint8)
+            denominator = np.minimum(self.texture_count, self.texture_k).astype(np.float64)
+            texture_rgb[observed] = np.clip(
+                np.round(self.texture_sum[observed] / denominator[observed, None]), 0, 255).astype(np.uint8)
             texture_bgra = np.dstack([texture_rgb[:, :, ::-1], (observed * 255).astype(np.uint8)])
             texture_base = path[:-len('.colored')] if path.endswith('.colored') else path
             cv2.imwrite(texture_base + ".texture.png", texture_bgra[::-1, :])

@@ -1,0 +1,23 @@
+# THETA マッピング用 SAM3 設定（ランチャーの「SAM3設定」から編集可能）。
+# theta_sam3_perspective_node が起動時に読み、SAM3サーバへ送信する。
+#
+# prompt:    SAM3でセグメントする対象（カンマ区切り）
+# threshold: 全体のconfidenceしきい値
+# score_min: BEV投票に採用する最低スコア
+# classes:   クラス名 -> {id: 予約ID, color: [R,G,B]}
+#   ※IDは予約パレットに合わせる: 3=grass, 4=tactile, 5=roadway, 6=sidewalk
+# class_thresholds: クラス別しきい値（任意。無ければ threshold を使用）
+prompt: "grass, tactile paving, line-type tactile paving"
+threshold: 0.3
+score_min: 0.3
+classes:
+  grass:
+    id: 3
+    color: [0, 255, 0]
+  tactile paving:
+    id: 4
+    color: [255, 255, 0]
+  line-type tactile paving:
+    id: 4
+    color: [255, 255, 0]
+class_thresholds: {}

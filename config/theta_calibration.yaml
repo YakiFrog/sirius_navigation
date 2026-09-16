@@ -8,7 +8,7 @@ image_size: [1920, 1080]
 camera_position: [0.0, 0.0, 1.1]
 rpy_degrees: [0.0, 0.0, 0.0]
 bev_size: 512
-bev_extent_m: 8.0
+bev_extent_m: 10.0
 front:
   center: [476.678, 481.148]
   focal: [285.297, 284.682]

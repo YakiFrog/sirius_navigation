@@ -36,7 +36,7 @@ class ThetaCaptureNode(Node):
         self.declare_parameter('fps', 5.0)
         self.declare_parameter('output_topic', '/theta/dual_fisheye/image_raw/compressed')
         self.declare_parameter('frame_id', 'sirius3/theta_link')
-        self.declare_parameter('jpeg_quality', 85)
+        self.declare_parameter('jpeg_quality', 92)
         # RViz2のImage表示は生Imageのみなので、デコード済みを生Imageでも配信する。
         self.declare_parameter('publish_raw', True)
         self.declare_parameter('raw_topic', '/theta/dual_fisheye/image_raw')

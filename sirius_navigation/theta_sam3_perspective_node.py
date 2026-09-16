@@ -8,6 +8,7 @@
 予約ID: 0=unknown,1=wall,2=floor,3=grass,4=tactile(line-type含む),5=roadway,6=sidewalk
 """
 import math
+import os
 import threading
 import time
 
@@ -46,6 +47,8 @@ class ThetaSam3PerspectiveNode(Node):
     def __init__(self):
         super().__init__('theta_sam3_perspective_node')
         self.declare_parameter('calibration', str(Path(get_package_share_directory('sirius_navigation')) / 'config' / 'theta_calibration.yaml'))
+        # SAM3設定の共有YAML（ランチャーの「SAM3設定」が保存。存在すればprompt/threshold/classes等を上書き）
+        self.declare_parameter('sam3_config', str(Path.home() / 'sirius_jazzy_ws' / 'src' / 'sirius' / 'sirius_navigation' / 'config' / 'theta_sam3.yaml'))
         self.declare_parameter('input_topic', '/theta/dual_fisheye/image_raw/compressed')
         self.declare_parameter('output_topic', '/theta/bev_semantic')
         self.declare_parameter('output_frame', 'sirius3/base_footprint')
@@ -57,7 +60,7 @@ class ThetaSam3PerspectiveNode(Node):
         self.declare_parameter('threshold', 0.3)
         self.declare_parameter('score_min', 0.3)
         self.declare_parameter('min_radius', 1.2)
-        self.declare_parameter('max_radius', 3.5)
+        self.declare_parameter('max_radius', 4.8)
         self.declare_parameter('infer_timeout_sec', 2.0)
         self.declare_parameter('min_interval_sec', 0.3)
         self.declare_parameter('publish_debug', False)
@@ -81,6 +84,29 @@ class ThetaSam3PerspectiveNode(Node):
         self.max_radius = float(self.get_parameter('max_radius').value)
         self.infer_timeout = max(0.1, float(self.get_parameter('infer_timeout_sec').value))
         self.min_interval = max(0.0, float(self.get_parameter('min_interval_sec').value))
+
+        # 共有設定YAML（ランチャーの「SAM3設定」が保存）。あればprompt/threshold/classes等を上書き。
+        self.class_registry = dict(CLASS_REGISTRY)
+        self.prompts = PROMPTS
+        self.class_thresholds_cfg = {}
+        sam3_config_path = self.get_parameter('sam3_config').value
+        if sam3_config_path and os.path.exists(sam3_config_path):
+            try:
+                with open(sam3_config_path) as stream:
+                    sam3_cfg = yaml.safe_load(stream) or {}
+                self.prompts = sam3_cfg.get('prompt', self.prompts)
+                if sam3_cfg.get('classes'):
+                    self.class_registry = sam3_cfg['classes']
+                if 'threshold' in sam3_cfg:
+                    self.threshold = float(sam3_cfg['threshold'])
+                if 'score_min' in sam3_cfg:
+                    self.score_min = float(sam3_cfg['score_min'])
+                self.class_thresholds_cfg = sam3_cfg.get('class_thresholds') or {}
+                self.get_logger().info(
+                    f'SAM3設定を読み込み: {sam3_config_path} '
+                    f'(prompt="{self.prompts}", threshold={self.threshold}, score_min={self.score_min})')
+            except Exception as error:
+                self.get_logger().warning(f'SAM3設定の読み込みに失敗（既定を使用）: {error}')
 
         self.bev_to_view = None
         self.remaps = None
@@ -219,9 +245,11 @@ class ThetaSam3PerspectiveNode(Node):
     def _configure_server(self):
         self._post('/source_mode', {'mode': 'network'})
         self._post('/crop', {'mode': 'none'})
-        self._post('/class_registry', {'classes': CLASS_REGISTRY})
-        self._post('/prompt', {'prompt': PROMPTS})
+        self._post('/class_registry', {'classes': self.class_registry})
+        self._post('/prompt', {'prompt': self.prompts})
         self._post('/threshold', {'threshold': self.threshold})
+        if self.class_thresholds_cfg:
+            self._post('/class_thresholds', {'default': self.threshold, 'classes': self.class_thresholds_cfg})
 
     def _debug_versions(self):
         try:
