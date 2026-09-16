@@ -223,12 +223,20 @@ class ThetaIndexedMapNode(Node):
         # 代表色パレットで路面を描く（wallは保護）。セマンティックは別途フレーム間投票で集約。
         not_wall = self.grid[gy, gx] != 1
         self.grid[gy[not_wall], gx[not_wall]] = indices[not_wall]
-        # 直近K枚の移動平均テクスチャ（リングバッファ）。古い観測を捨ててブレ蓄積を防ぐ。
-        np.add.at(self.texture_count, (gy, gx), 1)
-        slot = (self.texture_count[gy, gx] - 1) % self.texture_k
-        previous = self.texture_ring[gy, gx, slot].astype(np.float64)
-        self.texture_ring[gy, gx, slot] = rgb_u8
-        np.add.at(self.texture_sum, (gy, gx), rgb_u8.astype(np.float64) - previous)
+        # 直近K枚の移動平均テクスチャ。同一フレーム内の複数点はセルごとに平均し、
+        # 1セル=1観測としてリングへ入れる（点数で重複加算して白飛びするのを防ぐ）。
+        flat = gy.astype(np.int64) * self.width + gx
+        uniq, inverse = np.unique(flat, return_inverse=True)
+        frame_counts = np.bincount(inverse)
+        frame_sums = np.zeros((uniq.size, 3), dtype=np.float64)
+        np.add.at(frame_sums, inverse, rgb_u8.astype(np.float64))
+        cell_rgb = (frame_sums / frame_counts[:, None]).astype(np.uint8)
+        uy, ux = np.divmod(uniq, self.width)
+        np.add.at(self.texture_count, (uy, ux), 1)
+        slot = (self.texture_count[uy, ux] - 1) % self.texture_k
+        previous = self.texture_ring[uy, ux, slot].astype(np.float64)
+        self.texture_ring[uy, ux, slot] = cell_rgb
+        np.add.at(self.texture_sum, (uy, ux), cell_rgb.astype(np.float64) - previous)
         # セマンティックはフレーム間でクラスIDの投票（予約ID>=3）
         if 'semantic_id' in offsets:
             sid = data[:, offsets['semantic_id']].astype(np.int32)
