@@ -1,0 +1,582 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 78
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Status1
+        - /LiDAR Scan31
+      Splitter Ratio: 0.550000011920929
+    Tree Height: 86
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Time
+    Experimental: false
+    Name: Time
+    SyncMode: 0
+    SyncSource: LiDAR Scan3
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        map:
+          Value: true
+        sirius3/base_footprint:
+          Value: true
+        sirius3/base_link:
+          Value: true
+        sirius3/ear_left:
+          Value: true
+        sirius3/ear_right:
+          Value: true
+        sirius3/imu_link:
+          Value: true
+        sirius3/left_wheel:
+          Value: true
+        sirius3/lidar_link:
+          Value: true
+        sirius3/lidar_link2:
+          Value: true
+        sirius3/odom:
+          Value: true
+        sirius3/realsense_color_optical_frame:
+          Value: true
+        sirius3/realsense_depth_optical_frame:
+          Value: true
+        sirius3/realsense_link:
+          Value: true
+        sirius3/right_wheel:
+          Value: true
+        sirius3/theta_link:
+          Value: true
+        sirius3/zed_camera_link:
+          Value: true
+      Marker Scale: 0.5
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        map:
+          sirius3/odom:
+            sirius3/base_footprint:
+              sirius3/base_link:
+                sirius3/imu_link:
+                  {}
+                sirius3/left_wheel:
+                  {}
+                sirius3/lidar_link:
+                  sirius3/ear_left:
+                    {}
+                  sirius3/ear_right:
+                    {}
+                sirius3/lidar_link2:
+                  {}
+                sirius3/realsense_link:
+                  sirius3/realsense_color_optical_frame:
+                    {}
+                  sirius3/realsense_depth_optical_frame:
+                    {}
+                sirius3/right_wheel:
+                  {}
+                sirius3/theta_link:
+                  {}
+                sirius3/zed_camera_link:
+                  {}
+      Update Interval: 0
+      Value: true
+    - Alpha: 0.05000000074505806
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/LaserScan
+      Color: 0; 255; 255
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: LiDAR Scan3
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.03999999910593033
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /scan3
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+    - Alpha: 0.6499999761581421
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: true
+      Enabled: true
+      Name: RTAB-Map Grid
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rtabmap/grid_map
+      Update Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: ""
+      Use Timestamp: false
+      Value: true
+    - Alpha: 0.8500000238418579
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: raw
+      Draw Behind: false
+      Enabled: true
+      Name: RTAB-Map Grid (2)
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rtabmap/grid_map
+      Update Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: ""
+      Use Timestamp: false
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: THETA Ground Cloud
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.029999999329447746
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /theta/ground_cloud
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: RTAB-Map Cloud Map
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.03999999910593033
+      Style: Points
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /cloud_map
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+    - Class: rviz_default_plugins/Camera
+      Enabled: false
+      Far Plane Distance: 100
+      Image Rendering: background and overlay
+      Name: Dual Fisheye
+      Overlay Alpha: 0.5
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/dual_fisheye/image_raw
+      Value: false
+      Visibility:
+        BEV: true
+        Grid: true
+        LiDAR Scan3: true
+        RTAB-Map Cloud Map: true
+        RTAB-Map Grid: true
+        RTAB-Map Grid (2): true
+        SAM3 mask back: true
+        SAM3 mask front: true
+        SAM3 overlay back: true
+        SAM3 overlay front: true
+        SAM3 view back: true
+        SAM3 view front: true
+        TF: true
+        THETA BEV: true
+        THETA BEV Semantic: true
+        THETA BEV Semantic Color: true
+        THETA Dual Fisheye: true
+        THETA Ground Cloud: true
+        THETA Ground Cloud (semantic): true
+        Value: true
+      Zoom Factor: 1
+    - Class: rviz_default_plugins/Camera
+      Enabled: false
+      Far Plane Distance: 100
+      Image Rendering: background and overlay
+      Name: BEV
+      Overlay Alpha: 0.5
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/bev/image_raw
+      Value: false
+      Visibility:
+        Dual Fisheye: true
+        Grid: true
+        LiDAR Scan3: true
+        RTAB-Map Cloud Map: true
+        RTAB-Map Grid: true
+        RTAB-Map Grid (2): true
+        SAM3 mask back: true
+        SAM3 mask front: true
+        SAM3 overlay back: true
+        SAM3 overlay front: true
+        SAM3 view back: true
+        SAM3 view front: true
+        TF: true
+        THETA BEV: true
+        THETA BEV Semantic: true
+        THETA BEV Semantic Color: true
+        THETA Dual Fisheye: true
+        THETA Ground Cloud: true
+        THETA Ground Cloud (semantic): true
+        Value: true
+      Zoom Factor: 1
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: THETA Dual Fisheye
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/dual_fisheye/image_raw
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: THETA BEV
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/bev/image_raw
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: false
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: THETA BEV Semantic
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/bev_semantic
+      Value: false
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: THETA BEV Semantic Color
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/bev_semantic_color
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: SAM3 view front
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/sam3/view_front
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: SAM3 overlay front
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/sam3/overlay_front
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: false
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: SAM3 mask front
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/sam3/mask_front
+      Value: false
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: SAM3 view back
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/sam3/view_back
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: SAM3 overlay back
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/sam3/overlay_back
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: false
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: SAM3 mask back
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/sam3/mask_back
+      Value: false
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: THETA Ground Cloud (semantic)
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.05000000074505806
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /theta/ground_cloud_semantic
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Angle: -0.12999999523162842
+      Class: rviz_default_plugins/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Scale: 17.6528263092041
+      Target Frame: sirius3/base_footprint
+      Value: TopDownOrtho (rviz_default_plugins)
+      X: -5.575612545013428
+      Y: -0.16565623879432678
+    Saved: ~
+Window Geometry:
+  BEV:
+    collapsed: false
+  Displays:
+    collapsed: false
+  Dual Fisheye:
+    collapsed: false
+  Height: 1043
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000400000000000002060000024dfc020000000bfb000000100044006900730070006c0061007900730100000165000000e4000000cc00fffffffb0000001200530065006c0065006300740069006f006e0000000234000000730000005d00fffffffb0000000c00430061006d0065007200610000000337000000bd0000000000000000fb0000000c00430061006d00650072006101000002770000011b0000000000000000fb000000060042004500560000000122000000e80000001700fffffffb00000024005400480045005400410020004200450056002000530065006d0061006e00740069006300000002ab000000500000001700fffffffb0000002200530041004d00330020006f007600650072006c006100790020006200610063006b010000024f000000b20000001700fffffffb0000001c00530041004d0033002000760069006500770020006200610063006b0100000307000000ab0000001700fffffffb0000001e00530041004d00330020006d00610073006b002000660072006f006e00740000000314000000440000001700fffffffb00000018004400750061006c002000460069007300680065007900650200000314000002a00000020600000031fb0000001c00530041004d00330020006d00610073006b0020006200610063006b00000003560000005c0000001700ffffff00000001000001ea0000024dfc0200000003fb0000000a005600690065007700730100000165000000ec000000a900fffffffb0000001e00530041004d003300200076006900650077002000660072006f006e00740100000257000000ab0000001700fffffffb0000002400530041004d00330020006f007600650072006c00610079002000660072006f006e00740100000308000000aa0000001700ffffff000000020000078000000120fc0100000003fb00000024005400480045005400410020004400750061006c0020004600690073006800650079006501000000000000050c000000b900fffffffb0000001200540048004500540041002000420045005601000005120000012e0000008000fffffffb00000030005400480045005400410020004200450056002000530065006d0061006e00740069006300200043006f006c006f007201000006460000013a000000e900ffffff00000003000007800000003cfc0100000001fb0000000800540069006d00650100000000000007800000026f00ffffff000003840000024d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  SAM3 mask back:
+    collapsed: false
+  SAM3 mask front:
+    collapsed: false
+  SAM3 overlay back:
+    collapsed: false
+  SAM3 overlay front:
+    collapsed: false
+  SAM3 view back:
+    collapsed: false
+  SAM3 view front:
+    collapsed: false
+  Selection:
+    collapsed: false
+  THETA BEV:
+    collapsed: false
+  THETA BEV Semantic:
+    collapsed: false
+  THETA BEV Semantic Color:
+    collapsed: false
+  THETA Dual Fisheye:
+    collapsed: false
+  Time:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1920
+  X: 0
+  Y: 0

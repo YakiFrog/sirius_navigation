@@ -38,6 +38,8 @@ class ThetaGroundCloudNode(Node):
         # SAM3ラベルが同じstampで来るのを待つ上限[s]。過ぎたらsemantic無しで出力。
         self.declare_parameter('semantic_wait_sec', 1.0)
         self.declare_parameter('max_pending', 200)
+        # デバッグ用: クラス色にした点群のトピック（空文字で無効）
+        self.declare_parameter('semantic_debug_topic', '')
 
         with open(self.get_parameter('calibration').value) as f:
             calibration = yaml.safe_load(f)
@@ -62,6 +64,8 @@ class ThetaGroundCloudNode(Node):
         self.labels = {}              # stamp_key -> mono8 label
         self.warned_shape = False
         self.pub = self.create_publisher(PointCloud2, self.get_parameter('output_topic').value, 1)
+        debug_topic = self.get_parameter('semantic_debug_topic').value
+        self.debug_pub = self.create_publisher(PointCloud2, debug_topic, 1) if debug_topic else None
         self.sub = self.create_subscription(Image, self.get_parameter('input_topic').value, self.receive, qos_profile_sensor_data)
         self.semantic_sub = self.create_subscription(
             Image, self.get_parameter('semantic_topic').value, self.receive_semantic, qos_profile_sensor_data)
@@ -155,6 +159,17 @@ class ThetaGroundCloudNode(Node):
             return
         header = Header(stamp=stamp, frame_id=frame_id)
         self.pub.publish(pc2.create_cloud(header, self.fields, points))
+        if self.debug_pub is not None:
+            class_rgb = {3: (0, 255, 0), 4: (255, 255, 0), 5: (0, 0, 255), 6: (128, 128, 128)}
+            debug_points = []
+            for px, py, pz, prgb, sid in points:
+                if sid in class_rgb:
+                    red, green, blue = class_rgb[sid]
+                    packed = np.array([(red << 16) | (green << 8) | blue], np.uint32).view(np.float32)[0]
+                    debug_points.append((px, py, pz, float(packed), sid))
+                else:
+                    debug_points.append((px, py, pz, prgb, sid))
+            self.debug_pub.publish(pc2.create_cloud(header, self.fields, debug_points))
 
 
 def main():

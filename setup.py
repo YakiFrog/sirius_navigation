@@ -48,6 +48,7 @@ setup(
             'theta_ground_cloud_node = sirius_navigation.theta_ground_cloud_node:main',
             'theta_indexed_map_node = sirius_navigation.theta_indexed_map_node:main',
             'theta_sam3_bev_node = sirius_navigation.theta_sam3_bev_node:main',
+            'theta_sam3_perspective_node = sirius_navigation.theta_sam3_perspective_node:main',
             'twist_mux_monitor = sirius_navigation.twist_mux_monitor:main',
             'status_monitor = sirius_navigation.dialogue.status_monitor:main',
             'odom_path_publisher = sirius_navigation.odom_path_publisher:main',
