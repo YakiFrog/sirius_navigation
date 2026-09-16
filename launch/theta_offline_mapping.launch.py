@@ -31,6 +31,7 @@ def generate_launch_description():
     sam3 = LaunchConfiguration('sam3')
     publish_raw = LaunchConfiguration('publish_raw')
     publish_debug = LaunchConfiguration('publish_debug')
+    calibration = LaunchConfiguration('calibration')
     semantic_debug_topic = PythonExpression(
         ["'/theta/ground_cloud_semantic' if '", publish_debug, "' == 'true' else ''"])
 
@@ -43,6 +44,9 @@ def generate_launch_description():
     declare_rviz_config = DeclareLaunchArgument(
         'rviz_config', default_value=os.path.join(share, 'rviz', 'theta_offline.rviz'),
         description='RViz2 config（デバッグは theta_debug.rviz を指定）')
+    declare_calibration = DeclareLaunchArgument(
+        'calibration', default_value=os.path.join(share, 'config', 'theta_calibration.yaml'),
+        description='校正YAML（実機は theta_calibration_real.yaml を指定）')
     declare_sam3 = DeclareLaunchArgument(
         'sam3', default_value='false',
         description='Run theta_sam3_perspective_node (needs sam3 docker server)')
@@ -56,12 +60,14 @@ def generate_launch_description():
     theta_bev = Node(
         package='sirius_navigation', executable='theta_bev_node', name='theta_bev',
         parameters=[{'use_sim_time': use_sim_time, 'use_tf': True,
-                     'publish_raw': ParameterValue(publish_raw, value_type=bool)}],
+                     'publish_raw': ParameterValue(publish_raw, value_type=bool),
+                     'calibration': calibration}],
         output='screen')
 
     theta_cloud = Node(
         package='sirius_navigation', executable='theta_ground_cloud_node', name='theta_ground_cloud',
-        parameters=[{'use_sim_time': use_sim_time, 'semantic_debug_topic': semantic_debug_topic}],
+        parameters=[{'use_sim_time': use_sim_time, 'semantic_debug_topic': semantic_debug_topic,
+                     'calibration': calibration}],
         output='screen')
 
     theta_indexed = Node(
@@ -74,7 +80,8 @@ def generate_launch_description():
     theta_sam3 = Node(
         package='sirius_navigation', executable='theta_sam3_perspective_node', name='theta_sam3_perspective_node',
         parameters=[{'use_sim_time': use_sim_time,
-                     'publish_debug': ParameterValue(publish_debug, value_type=bool)}],
+                     'publish_debug': ParameterValue(publish_debug, value_type=bool),
+                     'calibration': calibration}],
         condition=IfCondition(sam3),
         output='screen')
 
@@ -125,6 +132,7 @@ def generate_launch_description():
         declare_use_sim_time,
         declare_rviz,
         declare_rviz_config,
+        declare_calibration,
         declare_sam3,
         declare_publish_raw,
         declare_publish_debug,

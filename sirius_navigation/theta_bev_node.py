@@ -22,7 +22,7 @@ from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from ament_index_python.packages import get_package_share_directory
-from sirius_navigation.theta_bev_projection import build_maps
+from sirius_navigation.theta_bev_projection import build_blend_maps
 
 
 def quaternion_to_rpy(x, y, z, w):
@@ -53,6 +53,9 @@ class ThetaBevNode(Node):
         self.declare_parameter('tf_timeout', 0.05)
         # build_mapsは pitch を反転して使う（UI規約: 正=前レンズが上向き）。ROS/SDF規約は逆なので符号を合わせる。
         self.declare_parameter('tf_pitch_sign', -1.0)
+        # 前後レンズのつなぎ目（ロボット真横, θ≈90°）をクロスフェードする帯の半角[deg]。
+        # 0で無効（従来のハード切り替え）。大きいほど広くブレンドする。
+        self.declare_parameter('blend_half_deg', 6.0)
 
         with open(self.get_parameter('calibration').value) as f:
             self.base_calibration = yaml.safe_load(f)
@@ -62,6 +65,7 @@ class ThetaBevNode(Node):
         self.camera_frame = self.get_parameter('camera_frame').value
         self.tf_timeout = Duration(seconds=float(self.get_parameter('tf_timeout').value))
         self.tf_pitch_sign = float(self.get_parameter('tf_pitch_sign').value)
+        self.blend_half_deg = float(self.get_parameter('blend_half_deg').value)
 
         self.topic_pose = None
         self.applied_pose = None
@@ -79,7 +83,7 @@ class ThetaBevNode(Node):
         self.sub = self.create_subscription(CompressedImage, self.get_parameter('input_topic').value, self.receive, qos_profile_sensor_data)
         self.pose_sub = self.create_subscription(String, self.get_parameter('pose_topic').value, self.receive_pose, 1)
         source = f'TF {self.robot_frame} <- {self.camera_frame}' if self.use_tf else 'topic/YAML'
-        self.get_logger().info(f'Dual Fisheye JPEG -> BEV ready (flat ground assumption, pose: {source})')
+        self.get_logger().info(f'Dual Fisheye JPEG -> BEV 準備完了（平面地面仮定, 姿勢取得元: {source}）')
 
     def receive_pose(self, msg):
         try:
@@ -103,7 +107,7 @@ class ThetaBevNode(Node):
                         'tf')
             except (LookupException, ConnectivityException, ExtrapolationException) as error:
                 self.get_logger().warning(
-                    f'TF {self.robot_frame} <- {self.camera_frame} unavailable: {error}',
+                    f'TF {self.robot_frame} <- {self.camera_frame} を取得できません（校正YAMLへフォールバック）: {error}',
                     throttle_duration_sec=5)
         if self.topic_pose is not None:
             return (self.topic_pose[0], self.topic_pose[1], 'topic')
@@ -119,9 +123,12 @@ class ThetaBevNode(Node):
         self.calibration['rpy_degrees'] = [float(v) for v in rpy]
         self.applied_pose = pose
         self.shape = None  # 次のフレームで再投影マップを作り直す
-        self.get_logger().info(
-            f'THETA pose ({source}): pos={self.calibration["camera_position"]} '
-            f'rpy={self.calibration["rpy_degrees"]}')
+        source_ja = {'tf': 'TF', 'topic': '姿勢トピック(/theta/mount_pose)', 'yaml': '校正YAML'}.get(source, source)
+        pose_text = f'位置={self.calibration["camera_position"]} rpy={self.calibration["rpy_degrees"]}'
+        if source == 'yaml':
+            self.get_logger().warning(f'THETA姿勢: TF/トピックが無いため校正YAMLにフォールバック（{pose_text}）')
+        else:
+            self.get_logger().info(f'THETA姿勢を{source_ja}から取得: {pose_text}')
 
     def receive(self, msg):
         try:
@@ -143,9 +150,13 @@ class ThetaBevNode(Node):
                 raw.data = frame.tobytes()
                 self.raw_pub.publish(raw)
             if self.shape != frame.shape:
-                self.maps = build_maps(self.calibration, frame.shape[1], frame.shape[0])
+                self.maps = build_blend_maps(self.calibration, frame.shape[1], frame.shape[0], self.blend_half_deg)
                 self.shape = frame.shape
-            bev = cv2.remap(frame, *self.maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            mx_f, my_f, mx_b, my_b, alpha = self.maps
+            front = cv2.remap(frame, mx_f, my_f, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            back = cv2.remap(frame, mx_b, my_b, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            a = alpha[..., None]
+            bev = np.clip(front.astype(np.float32) * a + back.astype(np.float32) * (1.0 - a), 0, 255).astype(np.uint8)
             out = Image()
             out.header.stamp = msg.header.stamp
             out.header.frame_id = self.get_parameter('output_frame').value

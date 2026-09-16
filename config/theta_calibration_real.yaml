@@ -1,0 +1,26 @@
+# Real RICOH THETA S via HDMI->USB capture (I-O DATA HDPC-UT / UGREEN).
+# Measured from a 1920x1080 YUYV capture: front circle ~ (514,476) r~464, back ~ (1447,489) r~460.
+# focal ~= radius / radians(max_theta). Approximate; refine by calibration.
+# ROS axes: X forward, Y left, Z up. Pixel UV origin: top left.
+#
+# image_roll_degrees: 実機THETA Sは各レンズが光軸周りに回転した状態で出力される
+#   （左=前面が反時計90°, 右=背面が時計90°）。画素は触らず、投影時にサンプリング方向を
+#   ロールして向きを正す（theta_bev_projection / theta_perspective が使用）。
+#   実測: front=-90, back=+90 でSIM(ThetaCamera)の正立規約と一致（参照BEVと相関0.949）。
+image_size: [1920, 1080]
+camera_position: [0.0, 0.0, 1.1]   # fallback only; real pose comes from TF (sirius3/theta_link)
+rpy_degrees: [0.0, 0.0, 0.0]
+bev_size: 512
+bev_extent_m: 8.0
+front:
+  center: [514.0, 476.0]
+  focal: [280.0, 280.0]
+  distortion: [0.0, 0.0, 0.0, 0.0]
+  max_theta_degrees: 95.0
+  image_roll_degrees: -90.0
+back:
+  center: [1447.0, 489.0]
+  focal: [277.5, 277.5]
+  distortion: [0.0, 0.0, 0.0, 0.0]
+  max_theta_degrees: 95.0
+  image_roll_degrees: 90.0

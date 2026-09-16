@@ -39,15 +39,25 @@ def _fisheye_uv(rays_robot, calibration, image_size, mount):
     right = -sign * rays_cam[..., 1]
     down = -rays_cam[..., 2]
     transverse = np.maximum(np.hypot(right, down), 1e-12)
-    direction = np.stack([right / transverse, down / transverse], axis=-1)
-    uv = np.zeros_like(direction)
+    right = right / transverse
+    down = down / transverse
+    uv = np.zeros_like(np.stack([right, down], axis=-1))
     valid = np.zeros(theta.shape, dtype=bool)
     for name, mask in (('front', front), ('back', ~front)):
         if not np.any(mask):
             continue
         lens = calibration[name]
+        # 実機レンズの光軸周り回転を、サンプリング方向のロールで補正（theta_bev_projection と同一）。
+        roll = np.deg2rad(float(lens.get('image_roll_degrees', 0.0)))
+        if roll:
+            cr, sr = np.cos(roll), np.sin(roll)
+            right_l = right * cr - down * sr
+            down_l = right * sr + down * cr
+        else:
+            right_l, down_l = right, down
         k = lens['distortion']
         radius = theta * (1.0 + sum(float(k[i]) * theta ** (2 * (i + 1)) for i in range(4)))
+        direction = np.stack([right_l, down_l], axis=-1)
         uv_lens = (np.asarray(lens['center'], dtype=np.float64) + direction * radius[..., None] * np.asarray(lens['focal'], dtype=np.float64)) * scale
         lens_valid = mask & (theta <= np.deg2rad(float(lens['max_theta_degrees'])))
         uv[lens_valid] = uv_lens[lens_valid]

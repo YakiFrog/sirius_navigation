@@ -172,7 +172,13 @@ class ThetaSam3PerspectiveNode(Node):
             transform = self.tf_buffer.lookup_transform(
                 self.robot_frame, self.camera_frame, Time(), Duration(seconds=0.05))
         except (LookupException, ConnectivityException, ExtrapolationException):
+            if not getattr(self, '_tf_fallback_logged', False):
+                self.get_logger().warning(
+                    f'TF {self.robot_frame} <- {self.camera_frame} を取得できません'
+                    f'（校正YAMLの camera_position にフォールバック）')
+                self._tf_fallback_logged = True
             return False
+        self._tf_fallback_logged = False
         translation = transform.transform.translation
         quaternion = transform.transform.rotation
         roll, pitch, yaw = quaternion_to_rpy(quaternion.x, quaternion.y, quaternion.z, quaternion.w)
@@ -185,7 +191,7 @@ class ThetaSam3PerspectiveNode(Node):
         self.calibration['camera_position'] = position
         self.calibration['rpy_degrees'] = rpy
         self.mount_from_tf = True
-        self.get_logger().info(f'THETA mount from TF: pos={position} rpy(UI deg)={rpy}')
+        self.get_logger().info(f'THETA姿勢をTFから取得: 位置={position} rpy(UI度)={rpy}')
         return True
 
     def _ensure_remaps(self, image_size):
