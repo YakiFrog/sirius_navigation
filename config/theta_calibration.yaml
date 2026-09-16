@@ -1,17 +1,23 @@
-# Ideal simulator calibration, NOT measured THETA S intrinsics.
+# Real RICOH THETA S 実測校正をSIMへ輸入した値（2026-09, チェッカーボード校正 rms<0.5px）。
+# SIMのThetaCameraは理想等距離射影（歪み0）でレンダリングするため、distortion は 0、
+# center/focal は実機実測値（レンズ円位置・大きさ・FOV）に一致させている。
 # ROS axes: X forward, Y left, Z up. Pixel UV origin: top left.
+# camera_position は実機マウント高さ（暫定1.1, 実測で更新）。SIMはTF(SDF sirius3/theta_link)優先。
+# SIMは正立レンズ（image_roll=0）。実機はレンズが回転しており image_roll=∓90 で補正する。
 image_size: [1920, 1080]
-camera_position: [0.0, 0.0, 1.35]
-rpy_degrees: [0.0, 0.0, 0.0] # roll, pitch (positive upward), yaw
+camera_position: [0.0, 0.0, 1.1]
+rpy_degrees: [0.0, 0.0, 0.0]
 bev_size: 512
 bev_extent_m: 8.0
 front:
-  center: [480.0, 540.0]
-  focal: [289.493, 289.493] # circle radius 480 / radians(95)
-  distortion: [0.0, 0.0, 0.0, 0.0] # theta polynomial k1..k4
-  max_theta_degrees: 95.0
-back:
-  center: [1440.0, 540.0]
-  focal: [289.493, 289.493]
+  center: [476.678, 481.148]
+  focal: [285.297, 284.682]
   distortion: [0.0, 0.0, 0.0, 0.0]
   max_theta_degrees: 95.0
+  image_roll_degrees: 0.0
+back:
+  center: [1441.082, 479.213]
+  focal: [287.065, 286.869]
+  distortion: [0.0, 0.0, 0.0, 0.0]
+  max_theta_degrees: 95.0
+  image_roll_degrees: 0.0
