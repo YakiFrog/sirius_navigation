@@ -17,7 +17,7 @@ import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Image, PointCloud2, PointField
+from sensor_msgs.msg import Image, PointCloud2, PointField, LaserScan
 from std_msgs.msg import Header
 import sensor_msgs_py.point_cloud2 as pc2
 from ament_index_python.packages import get_package_share_directory
@@ -40,6 +40,12 @@ class ThetaGroundCloudNode(Node):
         # （bag --rate 2.0 では実時間x2の遅延になる点に注意）。
         self.declare_parameter('semantic_wait_sec', 2.5)
         self.declare_parameter('max_pending', 600)
+        # Scan3(2D LiDAR)連動: フリースペース内の地面点だけを残す（壁の向こう/角の裏を除外）
+        self.declare_parameter('lidar_topic', '')
+        self.declare_parameter('lidar_gate', False)
+        self.declare_parameter('lidar_margin_m', 0.25)
+        self.declare_parameter('lidar_keep_outside_fov', True)
+        self.declare_parameter('lidar_offset', [0.0, 0.0])
         # デバッグ用: クラス色にした点群のトピック（空文字で無効）
         self.declare_parameter('semantic_debug_topic', '')
 
@@ -54,6 +60,11 @@ class ThetaGroundCloudNode(Node):
         self.max_radius = max(0.0, float(self.get_parameter('max_radius').value))
         self.semantic_wait = max(0.0, float(self.get_parameter('semantic_wait_sec').value))
         self.max_pending = max(1, int(self.get_parameter('max_pending').value))
+        self.lidar_gate = bool(self.get_parameter('lidar_gate').value)
+        self.lidar_margin = max(0.0, float(self.get_parameter('lidar_margin_m').value))
+        self.lidar_keep_outside_fov = bool(self.get_parameter('lidar_keep_outside_fov').value)
+        self.lidar_offset = [float(v) for v in self.get_parameter('lidar_offset').value]
+        self.latest_scan = None  # (angle_min, angle_increment, ranges, range_max)
 
         self.fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
@@ -71,6 +82,9 @@ class ThetaGroundCloudNode(Node):
         self.sub = self.create_subscription(Image, self.get_parameter('input_topic').value, self.receive, qos_profile_sensor_data)
         self.semantic_sub = self.create_subscription(
             Image, self.get_parameter('semantic_topic').value, self.receive_semantic, qos_profile_sensor_data)
+        lidar_topic = self.get_parameter('lidar_topic').value
+        if lidar_topic:
+            self.create_subscription(LaserScan, lidar_topic, self._on_scan, qos_profile_sensor_data)
         self.create_timer(0.1, self._flush_stale)
         self.get_logger().info(
             f'BEV {self.bev_size}x{self.bev_size} ({self.extent}m) -> {self.get_parameter("output_topic").value} '
@@ -131,6 +145,31 @@ class ThetaGroundCloudNode(Node):
                 self.labels.pop(key, None)
                 self._emit(stamp, frame_id, image, None)
 
+    def _on_scan(self, msg):
+        self.latest_scan = (msg.angle_min, msg.angle_increment,
+                            np.asarray(msg.ranges, dtype=np.float32), float(msg.range_max))
+
+    def _lidar_free_mask(self, xg, yg):
+        """地面点(x,y)[base_footprint] が LiDAR のフリースペース内かを返す。
+        ビームが点より手前で障害物に当たっている（beam < range）点と、LiDAR範囲外を除外する。"""
+        angle_min, angle_inc, ranges, range_max = self.latest_scan
+        if angle_inc == 0.0 or ranges.size == 0:
+            return np.ones_like(xg, dtype=bool)
+        px = xg - self.lidar_offset[0]
+        py = yg - self.lidar_offset[1]
+        distances = np.hypot(px, py)
+        angles = np.arctan2(py, px)
+        index = np.round(np.mod(angles - angle_min, 2.0 * np.pi) / angle_inc).astype(np.int64)
+        inside = index < ranges.size
+        beam = np.full(distances.shape, np.inf, dtype=np.float32)
+        beam[inside] = ranges[index[inside]]
+        blocked = beam < (distances - self.lidar_margin)
+        out_of_range = distances > range_max
+        keep = ~blocked & ~out_of_range
+        if self.lidar_keep_outside_fov:
+            keep = np.where(inside, keep, True)
+        return keep
+
     def _emit(self, stamp, frame_id, image, semantic):
         height, width = image.shape[:2]
         step = self.stride
@@ -151,6 +190,8 @@ class ThetaGroundCloudNode(Node):
             valid &= radius_sq >= self.min_radius ** 2
         if self.max_radius > 0.0:
             valid &= radius_sq <= self.max_radius ** 2
+        if self.lidar_gate and self.latest_scan is not None:
+            valid &= self._lidar_free_mask(x, y)
         rgb_float = (((r << 16) | (g << 8) | b).astype(np.uint32)).view(np.float32)
         label_ok = semantic is not None and semantic.shape == (height, width)
         if label_ok:

@@ -32,6 +32,11 @@ def generate_launch_description():
     publish_raw = LaunchConfiguration('publish_raw')
     publish_debug = LaunchConfiguration('publish_debug')
     calibration = LaunchConfiguration('calibration')
+    min_radius = LaunchConfiguration('min_radius')
+    max_radius = LaunchConfiguration('max_radius')
+    grid_range_max = LaunchConfiguration('grid_range_max')
+    lidar_topic = LaunchConfiguration('lidar_topic')
+    lidar_gate = LaunchConfiguration('lidar_gate')
     semantic_debug_topic = PythonExpression(
         ["'/theta/ground_cloud_semantic' if '", publish_debug, "' == 'true' else ''"])
 
@@ -47,6 +52,21 @@ def generate_launch_description():
     declare_calibration = DeclareLaunchArgument(
         'calibration', default_value=os.path.join(share, 'config', 'theta_calibration.yaml'),
         description='校正YAML（実機は theta_calibration_real.yaml を指定）')
+    declare_min_radius = DeclareLaunchArgument(
+        'min_radius', default_value='1.2',
+        description='地面点群に含める最小半径[m]（自機の足元を除外）')
+    declare_max_radius = DeclareLaunchArgument(
+        'max_radius', default_value='4.8',
+        description='地面点群に含める最大半径[m]。狭い曲がり角では小さくすると食い合いを軽減')
+    declare_grid_range_max = DeclareLaunchArgument(
+        'grid_range_max', default_value='7.0',
+        description='RTAB-Map Grid/RangeMax。max_radius に合わせて小さくすると安定')
+    declare_lidar_topic = DeclareLaunchArgument(
+        'lidar_topic', default_value='',
+        description='Scan3(2D LiDAR)のトピック。指定するとフリースペースで地面点を制限可能')
+    declare_lidar_gate = DeclareLaunchArgument(
+        'lidar_gate', default_value='false',
+        description='true で /scan3 のフリースペース内の地面点だけを残す（食い合い軽減）')
     declare_sam3 = DeclareLaunchArgument(
         'sam3', default_value='false',
         description='Run theta_sam3_perspective_node (needs sam3 docker server)')
@@ -67,6 +87,10 @@ def generate_launch_description():
     theta_cloud = Node(
         package='sirius_navigation', executable='theta_ground_cloud_node', name='theta_ground_cloud',
         parameters=[{'use_sim_time': use_sim_time, 'semantic_debug_topic': semantic_debug_topic,
+                     'min_radius': ParameterValue(min_radius, value_type=float),
+                     'max_radius': ParameterValue(max_radius, value_type=float),
+                     'lidar_topic': lidar_topic,
+                     'lidar_gate': ParameterValue(lidar_gate, value_type=bool),
                      'calibration': calibration}],
         output='screen')
 
@@ -81,6 +105,8 @@ def generate_launch_description():
         package='sirius_navigation', executable='theta_sam3_perspective_node', name='theta_sam3_perspective_node',
         parameters=[{'use_sim_time': use_sim_time,
                      'publish_debug': ParameterValue(publish_debug, value_type=bool),
+                     'min_radius': ParameterValue(min_radius, value_type=float),
+                     'max_radius': ParameterValue(max_radius, value_type=float),
                      'calibration': calibration}],
         condition=IfCondition(sam3),
         output='screen')
@@ -112,7 +138,7 @@ def generate_launch_description():
             'Rtabmap/DetectionRate': '2.0',
             'Grid/VoxelSize': '0.05',
             'Optimizer/Strategy': '1',
-            'Grid/RangeMax': '7.0',
+            'Grid/RangeMax': ParameterValue(grid_range_max, value_type=float),
             'Grid/RangeMin': '0.8',
             'Grid/NoiseFilteringRadius': '0.1',
             'Grid/NoiseFilteringMinNeighbors': '5',
@@ -133,6 +159,11 @@ def generate_launch_description():
         declare_rviz,
         declare_rviz_config,
         declare_calibration,
+        declare_min_radius,
+        declare_max_radius,
+        declare_grid_range_max,
+        declare_lidar_topic,
+        declare_lidar_gate,
         declare_sam3,
         declare_publish_raw,
         declare_publish_debug,
