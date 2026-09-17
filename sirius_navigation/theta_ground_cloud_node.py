@@ -111,7 +111,9 @@ class ThetaGroundCloudNode(Node):
         key = self._key(msg)
         self.pending[key] = (msg.header.stamp, msg.header.frame_id or self.frame_id, image, time.time())
         while len(self.pending) > self.max_pending:
-            self._emit(*self.pending.popitem(last=False))
+            old_key, entry = self.pending.popitem(last=False)
+            old_stamp, old_frame, old_image, _ = entry
+            self._emit(old_stamp, old_frame, old_image, self.labels.pop(old_key, None))
         self._process_if_ready(key)
 
     def receive_semantic(self, msg):

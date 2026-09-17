@@ -138,7 +138,7 @@ def generate_launch_description():
             'Rtabmap/DetectionRate': '2.0',
             'Grid/VoxelSize': '0.05',
             'Optimizer/Strategy': '1',
-            'Grid/RangeMax': ParameterValue(grid_range_max, value_type=float),
+            'Grid/RangeMax': ParameterValue(grid_range_max, value_type=str),
             'Grid/RangeMin': '0.8',
             'Grid/NoiseFilteringRadius': '0.1',
             'Grid/NoiseFilteringMinNeighbors': '5',
