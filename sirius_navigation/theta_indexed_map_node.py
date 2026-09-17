@@ -78,6 +78,7 @@ class ThetaIndexedMapNode(Node):
 
         self.grid = None
         self.struct_grid = None
+        self.struct_origin = None
         self.origin = [0.0, 0.0]
         self.width = 0
         self.height = 0
@@ -159,40 +160,35 @@ class ThetaIndexedMapNode(Node):
             self.semantic_votes[dst] = old[4][src]
 
     def _grid_callback(self, msg):
-        new_res = float(msg.info.resolution)
-        nw, nh = int(msg.info.width), int(msg.info.height)
-        nox, noy = float(msg.info.origin.position.x), float(msg.info.origin.position.y)
-        # RTABのgrid_mapはサイズ/原点が変動（縮小も）する。描画保持層は「単調拡大」で維持し、
-        # 縮小時にキャンバスを作り直して描画を失わないようにする。
-        if self.grid is None:
-            self._alloc_canvas(nox, noy, nw, nh, new_res)
-        elif abs(new_res - self.res) > 1e-9:
-            self._alloc_canvas(nox, noy, nw, nh, new_res)  # 解像度変更は稀
-        else:
-            x0, y0 = self.origin
-            nx0c = int(round((nox - x0) / self.res))
-            ny0c = int(round((noy - y0) / self.res))
-            left = min(0, nx0c)
-            bottom = min(0, ny0c)
-            right = max(self.width, nx0c + nw)
-            top = max(self.height, ny0c + nh)
-            if left < 0 or bottom < 0 or right > self.width or top > self.height:
-                self._expand_canvas(x0 + left * self.res, y0 + bottom * self.res,
-                                    right - left, top - bottom)
-                self.get_logger().info(f'Grid canvas expanded: {self.width}x{self.height}')
-        # 構造（壁/フリー）を今回のgrid_map範囲だけに反映（描画済み路面(>=3)は保持）
-        ix = int(round((nox - self.origin[0]) / self.res))
-        iy = int(round((noy - self.origin[1]) / self.res))
-        ix0, iy0 = max(0, ix), max(0, iy)
-        ix1, iy1 = min(self.width, ix + nw), min(self.height, iy + nh)
-        if ix1 > ix0 and iy1 > iy0:
-            struct = np.array(msg.data, dtype=np.int8).reshape((nh, nw))
-            region = self.grid[iy0:iy1, ix0:ix1]
-            struct_region = struct[iy0 - iy:iy1 - iy, ix0 - ix:ix1 - ix]
-            region[struct_region == 100] = 1
-            region[(struct_region == 0) & (region < 3)] = 2
-            self.struct_grid = struct
+        # 構造（壁/フリー）は別配列に保持するだけにし、描画キャンバスには触れない。
+        # （RTABのgrid_mapはサイズ/原点が変動するため、共有すると描画が壊れる）
+        self.struct_grid = np.array(msg.data, dtype=np.int8).reshape((msg.info.height, msg.info.width))
+        self.struct_origin = [float(msg.info.origin.position.x), float(msg.info.origin.position.y)]
         self.dirty = True
+
+    def _ensure_canvas_for(self, xs, ys, margin_m=1.0):
+        """描画する地図座標の範囲を含むようキャンバスを拡大（縮小はしない）。"""
+        if xs.size == 0:
+            return
+        res = self.res if self.res else 0.05
+        mnx, mxx = float(xs.min()), float(xs.max())
+        mny, mxy = float(ys.min()), float(ys.max())
+        if self.grid is None:
+            ox, oy = mnx - margin_m, mny - margin_m
+            w = int(round((mxx - ox + margin_m) / res)) + 1
+            h = int(round((mxy - oy + margin_m) / res)) + 1
+            self._alloc_canvas(ox, oy, w, h, res)
+            self.get_logger().info(f'Grid canvas created: {self.width}x{self.height}')
+            return
+        x0, y0 = self.origin
+        x1, y1 = x0 + self.width * res, y0 + self.height * res
+        ux0 = min(x0, mnx - margin_m)
+        uy0 = min(y0, mny - margin_m)
+        ux1 = max(x1, mxx + margin_m)
+        uy1 = max(y1, mxy + margin_m)
+        if ux0 < x0 - 1e-9 or uy0 < y0 - 1e-9 or ux1 > x1 + 1e-9 or uy1 > y1 + 1e-9:
+            self._expand_canvas(ux0, uy0, int(round((ux1 - ux0) / res)), int(round((uy1 - uy0) / res)))
+            self.get_logger().info(f'Grid canvas expanded: {self.width}x{self.height}')
 
     def _transform_to_map(self, x, y, z, header):
         transform = None
@@ -207,6 +203,7 @@ class ThetaIndexedMapNode(Node):
                                           throttle_duration_sec=5)
                 return None
         t, q = transform.transform.translation, transform.transform.rotation
+        self.last_tf = (float(t.x), float(t.y))
         rotation = quaternion_to_matrix(q.x, q.y, q.z, q.w)
         points = np.column_stack([x, y, z])
         return points @ rotation.T + np.array([t.x, t.y, t.z])
@@ -233,6 +230,7 @@ class ThetaIndexedMapNode(Node):
         mapped = self._transform_to_map(x, y, z, msg.header)
         if mapped is None:
             return
+        self._ensure_canvas_for(mapped[:, 0], mapped[:, 1])
         gx = ((mapped[:, 0] - self.origin[0]) / self.res).astype(np.int32)
         gy = ((mapped[:, 1] - self.origin[1]) / self.res).astype(np.int32)
         in_bounds = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
@@ -274,8 +272,11 @@ class ThetaIndexedMapNode(Node):
             if np.any(keep):
                 np.add.at(self.semantic_votes, (gy[keep], gx[keep], sid[keep]), 1.0)
         self.dirty = True
-        self.get_logger().info(f'Painted {int(np.sum(not_wall))} ground points onto grid.',
-                               throttle_duration_sec=5.0)
+        self.get_logger().info(
+            f'Painted {int(np.sum(not_wall))} ground points onto grid. '
+            f'mapped x[{mapped[:,0].min():.1f},{mapped[:,0].max():.1f}] '
+            f'y[{mapped[:,1].min():.1f},{mapped[:,1].max():.1f}] tf={getattr(self, "last_tf", None)}',
+            throttle_duration_sec=5.0)
 
     def _timer_callback(self):
         if self.grid is not None and self.dirty:
@@ -351,6 +352,11 @@ class ThetaIndexedMapNode(Node):
             texture_base = path[:-len('.colored')] if path.endswith('.colored') else path
             cv2.imwrite(texture_base + ".texture.png", texture_bgra[::-1, :])
         self.get_logger().info(f'SUCCESS: Saved indexed map to {path}.pgm / .json')
+        self.get_logger().info(
+            f'[save] grid={self.width}x{self.height} origin={self.origin} '
+            f'painted(>=3)={int(np.sum(self.grid >= 3))} '
+            f'saved_painted(>=3)={int(np.sum(out_grid >= 3))} '
+            f'struct_idx={getattr(self, "struct_grid", None) is not None}')
 
 
 def main():
