@@ -128,40 +128,70 @@ class ThetaIndexedMapNode(Node):
                     self.color_lut[ri, gi, bi] = np.argmin(dist) + len(reserved)
         return palette
 
+    def _alloc_canvas(self, ox, oy, width, height, res):
+        self.origin = [float(ox), float(oy)]
+        self.res = float(res)
+        self.width = int(max(1, width))
+        self.height = int(max(1, height))
+        self.grid = np.zeros((self.height, self.width), dtype=np.uint8)
+        self.texture_ring = np.zeros((self.height, self.width, self.texture_k, 3), dtype=np.uint8)
+        self.texture_sum = np.zeros((self.height, self.width, 3), dtype=np.float64)
+        self.texture_count = np.zeros((self.height, self.width), dtype=np.int32)
+        self.semantic_votes = np.zeros((self.height, self.width, MAX_CLASS_ID + 1), dtype=np.float32)
+
+    def _expand_canvas(self, ox, oy, width, height):
+        """キャンバスを拡大（既存の描画データを保持）。縮小はしない。"""
+        old = (self.grid, self.texture_ring, self.texture_sum, self.texture_count, self.semantic_votes,
+               self.origin[0], self.origin[1], self.width, self.height)
+        dx = int(round((old[5] - ox) / self.res))
+        dy = int(round((old[6] - oy) / self.res))
+        self._alloc_canvas(ox, oy, width, height, self.res)
+        sx0, sy0 = max(0, -dx), max(0, -dy)
+        sx1, sy1 = min(old[7], self.width - dx), min(old[8], self.height - dy)
+        ddx0, ddy0 = max(0, dx), max(0, dy)
+        if sx1 > sx0 and sy1 > sy0:
+            src = np.s_[sy0:sy1, sx0:sx1]
+            dst = np.s_[ddy0:ddy0 + (sy1 - sy0), ddx0:ddx0 + (sx1 - sx0)]
+            self.grid[dst] = old[0][src]
+            self.texture_ring[dst] = old[1][src]
+            self.texture_sum[dst] = old[2][src]
+            self.texture_count[dst] = old[3][src]
+            self.semantic_votes[dst] = old[4][src]
+
     def _grid_callback(self, msg):
-        new_width, new_height = msg.info.width, msg.info.height
-        new_origin = [msg.info.origin.position.x, msg.info.origin.position.y]
-        if (self.grid is None or self.width != new_width or self.height != new_height
-                or not np.allclose(self.origin, new_origin, atol=1e-3)):
-            old_grid, old_ring, old_sum, old_count, old_votes = (
-                self.grid, self.texture_ring, self.texture_sum, self.texture_count, self.semantic_votes)
-            old_width, old_height, old_origin = self.width, self.height, self.origin
-            self.width, self.height = new_width, new_height
-            self.origin = new_origin
-            self.res = msg.info.resolution
-            self.grid = np.zeros((self.height, self.width), dtype=np.uint8)
-            self.texture_ring = np.zeros((self.height, self.width, self.texture_k, 3), dtype=np.uint8)
-            self.texture_sum = np.zeros((self.height, self.width, 3), dtype=np.float64)
-            self.texture_count = np.zeros((self.height, self.width), dtype=np.int32)
-            self.semantic_votes = np.zeros((self.height, self.width, MAX_CLASS_ID + 1), dtype=np.float32)
-            if old_grid is not None:
-                dx = int(round((old_origin[0] - self.origin[0]) / self.res))
-                dy = int(round((old_origin[1] - self.origin[1]) / self.res))
-                sx0, sy0 = max(0, -dx), max(0, -dy)
-                sx1, sy1 = min(old_width, self.width - dx), min(old_height, self.height - dy)
-                ddx0, ddy0 = max(0, dx), max(0, dy)
-                if sx1 > sx0 and sy1 > sy0:
-                    src = np.s_[sy0:sy1, sx0:sx1]
-                    dst = np.s_[ddy0:ddy0 + (sy1 - sy0), ddx0:ddx0 + (sx1 - sx0)]
-                    self.grid[dst] = old_grid[src]
-                    self.texture_ring[dst] = old_ring[src]
-                    self.texture_sum[dst] = old_sum[src]
-                    self.texture_count[dst] = old_count[src]
-                    self.semantic_votes[dst] = old_votes[src]
-            self.get_logger().info(f'Grid resized: {self.width}x{self.height}')
-        self.struct_grid = np.array(msg.data, dtype=np.int8).reshape((self.height, self.width))
-        self.grid[self.struct_grid == 100] = 1
-        self.grid[(self.struct_grid == 0) & (self.grid < 3)] = 2
+        new_res = float(msg.info.resolution)
+        nw, nh = int(msg.info.width), int(msg.info.height)
+        nox, noy = float(msg.info.origin.position.x), float(msg.info.origin.position.y)
+        # RTABのgrid_mapはサイズ/原点が変動（縮小も）する。描画保持層は「単調拡大」で維持し、
+        # 縮小時にキャンバスを作り直して描画を失わないようにする。
+        if self.grid is None:
+            self._alloc_canvas(nox, noy, nw, nh, new_res)
+        elif abs(new_res - self.res) > 1e-9:
+            self._alloc_canvas(nox, noy, nw, nh, new_res)  # 解像度変更は稀
+        else:
+            x0, y0 = self.origin
+            nx0c = int(round((nox - x0) / self.res))
+            ny0c = int(round((noy - y0) / self.res))
+            left = min(0, nx0c)
+            bottom = min(0, ny0c)
+            right = max(self.width, nx0c + nw)
+            top = max(self.height, ny0c + nh)
+            if left < 0 or bottom < 0 or right > self.width or top > self.height:
+                self._expand_canvas(x0 + left * self.res, y0 + bottom * self.res,
+                                    right - left, top - bottom)
+                self.get_logger().info(f'Grid canvas expanded: {self.width}x{self.height}')
+        # 構造（壁/フリー）を今回のgrid_map範囲だけに反映（描画済み路面(>=3)は保持）
+        ix = int(round((nox - self.origin[0]) / self.res))
+        iy = int(round((noy - self.origin[1]) / self.res))
+        ix0, iy0 = max(0, ix), max(0, iy)
+        ix1, iy1 = min(self.width, ix + nw), min(self.height, iy + nh)
+        if ix1 > ix0 and iy1 > iy0:
+            struct = np.array(msg.data, dtype=np.int8).reshape((nh, nw))
+            region = self.grid[iy0:iy1, ix0:ix1]
+            struct_region = struct[iy0 - iy:iy1 - iy, ix0 - ix:ix1 - ix]
+            region[struct_region == 100] = 1
+            region[(struct_region == 0) & (region < 3)] = 2
+            self.struct_grid = struct
         self.dirty = True
 
     def _transform_to_map(self, x, y, z, header):
