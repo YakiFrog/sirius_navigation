@@ -24,15 +24,16 @@ class ThetaCaptureNode(Node):
     def __init__(self):
         super().__init__('theta_capture')
         self.declare_parameter('device', '/dev/theta_capture')
-        self.declare_parameter('width', 1920)
-        self.declare_parameter('height', 1080)
+        self.declare_parameter('width', 1280)
+        self.declare_parameter('height', 720)
         # I-O DATA HDPC-UT は MJPG が一様フレームになるため YUYV 既定。
         self.declare_parameter('fourcc', 'YUYV')
         # 間引きレート[Hz]。範囲 0.1〜30.0（上限30は THETA S の HDMI ライブ出力の上限）。
         # 既定 5.0 fps（bag容量/負荷対策）。根拠: RTAB-Mapの取り込みは
         # DetectionRate=2Hz、SAM3透視投影は約1.5Hz、画像が容量の大半。RVizプレビューを
-        # 滑らかにしたい場合は fps:=10〜15 に上げる（録画は5推奨）。実測はCPU律速で
-        # 1920x1080 YUYV取得+JPEG/生配信のため目標より下がることがある（例: 5→約3.4fps）。
+        # 滑らかにしたい場合は fps:=10〜15 に上げる（録画は5推奨）。既定解像度は1280x720
+        # （YUYV上限約10fps。投影側がimage_size比で自動スケール）。1920x1080はCPU/デバイス
+        # 律速で目標より下がることがある（例: 5→約3.4fps）。
         self.declare_parameter('fps', 5.0)
         self.declare_parameter('output_topic', '/theta/dual_fisheye/image_raw/compressed')
         self.declare_parameter('frame_id', 'sirius3/theta_link')
