@@ -39,7 +39,9 @@ class GetPose(Node):
                 'number': self.waypoint_number,
                 'x': float(translation.x),
                 'y': float(translation.y),
-                'angle_radians': float(yaw)
+                'angle_radians': float(yaw),
+                # 手動配置（Enterで記録）であることを示すステータス
+                'manual': True
             }
 
             # Load existing YAML (safe) if present and prepare data structure
@@ -74,7 +76,11 @@ class GetPose(Node):
             with open(file_path, 'w', encoding='utf-8') as f:
                 yaml.dump(existing_data, f, default_flow_style=False)
 
-            self.get_logger().info('Success!')
+            self.get_logger().info(
+                f"Success! Recorded as waypoint #{waypoint['number']} "
+                f"(x={waypoint['x']:.3f}, y={waypoint['y']:.3f}, "
+                f"yaw={waypoint['angle_radians']:.3f})"
+            )
 
             sys.exit()
 
