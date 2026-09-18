@@ -63,3 +63,21 @@ def test_network_status_contains_robot_confirmed_navigation_mode():
 
     assert gateway._status_payload()["navigation_mode"] == "strict_normal"
     gateway._broadcast_status.assert_called_once_with()
+
+
+def test_effective_navigation_mode_follows_live_controller():
+    effective = SiriusNetworkGateway._effective_navigation_mode
+
+    # Requested mode matches the live controller -> keep it.
+    assert effective("wait_normal", "WaitPath") == "wait_normal"
+    assert effective("normal", "FollowPath") == "normal"
+    assert effective("safe", "FollowPath") == "safe"
+    assert effective("strict_slow", "FollowPath") == "strict_slow"
+
+    # BT rebuilt and selection reverted to FollowPath while the requested mode
+    # was wait_normal -> report the mode actually in effect.
+    assert effective("wait_normal", "FollowPath") == "normal"
+
+    # No selector info yet -> trust the requested mode.
+    assert effective("wait_normal", "") == "wait_normal"
+    assert effective("unknown", "") == "normal"

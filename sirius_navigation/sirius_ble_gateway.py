@@ -17,6 +17,11 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Bool, Int32, String
 
+try:
+    from .navigation_modes import navigation_mode_controller, normalize_navigation_mode
+except ImportError:  # pragma: no cover - direct script execution
+    from navigation_modes import navigation_mode_controller, normalize_navigation_mode
+
 
 SIRIUS_SERVICE_UUID = "A07498CA-AD5B-474E-940D-16F1F1E0A123"
 SIRIUS_CHAR_UUID = "A07498CA-AD5B-474E-940D-16F1F1E0A124"
@@ -127,6 +132,12 @@ class SiriusBleGateway(Node):
             self._on_navigation_mode,
             navigation_mode_qos,
         )
+        self._controller_selector_sub = self.create_subscription(
+            String,
+            "/controller_selector",
+            self._on_controller_selector,
+            navigation_mode_qos,
+        )
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -150,6 +161,7 @@ class SiriusBleGateway(Node):
         self._tracked_people_count = None
         self._people_count_at = 0.0
         self._navigation_mode = "unknown"
+        self._controller_selector = ""
         self._estop_heartbeat_timer = self.create_timer(1.0, self._estop_heartbeat_timer_callback)
         self._ear_led_blinking = False
         self._ear_led_blink_on = True
@@ -631,7 +643,7 @@ class SiriusBleGateway(Node):
             "status": "connected",
             "emergency_stop": getattr(self, '_emergency_stop_active', False),
             "battery": getattr(self, '_last_battery_data', None),
-            "navigation_mode": getattr(self, '_navigation_mode', "unknown"),
+            **self._mode_status_fields(),
             **self._people_status_fields(),
         }
         characteristic.value = json.dumps(status_payload, ensure_ascii=False).encode("utf-8")
@@ -701,7 +713,7 @@ class SiriusBleGateway(Node):
             "active": active,
             "emergency_stop": getattr(self, '_emergency_stop_active', False),
             "battery": getattr(self, '_last_battery_data', None),
-            "navigation_mode": getattr(self, '_navigation_mode', "unknown"),
+            **self._mode_status_fields(),
             **self._people_status_fields(),
             "advertise_name": self.advertise_name,
             "service_uuid": self.service_uuid,
@@ -718,6 +730,8 @@ class SiriusBleGateway(Node):
             data.get("people_count"),
             data.get("tracked_people_count"),
             data.get("navigation_mode", "unknown"),
+            data.get("navigation_mode_effective", ""),
+            data.get("controller_selector", ""),
             data.get("last_payload", ""),
         )
         if cache_key == self._last_remote_status and not last_payload:
@@ -740,6 +754,39 @@ class SiriusBleGateway(Node):
         mode = str(msg.data or "").strip()
         if mode:
             self._navigation_mode = mode
+
+    def _on_controller_selector(self, msg: String):
+        controller = str(msg.data or "").strip()
+        if controller:
+            self._controller_selector = controller
+
+    @staticmethod
+    def _effective_navigation_mode(requested, controller_selector):
+        """Return the mode implied by the currently active controller.
+
+        The behavior tree resets its controller selection to the default
+        (FollowPath) whenever it is rebuilt, while /sirius/navigation_mode
+        keeps the last requested value. Deriving the effective mode from the
+        live /controller_selector keeps the remote display consistent with the
+        robot's actual behaviour.
+        """
+        requested_mode = normalize_navigation_mode(requested) or "normal"
+        if not controller_selector:
+            return requested_mode
+        if controller_selector == navigation_mode_controller(requested_mode):
+            return requested_mode
+        return "wait_normal" if controller_selector == "WaitPath" else "normal"
+
+    def _mode_status_fields(self):
+        requested = getattr(self, '_navigation_mode', "unknown")
+        selector = getattr(self, '_controller_selector', "")
+        return {
+            "navigation_mode": requested,
+            "navigation_mode_effective": self._effective_navigation_mode(
+                requested, selector
+            ),
+            "controller_selector": selector,
+        }
 
     def _people_status_fields(self):
         active = (
@@ -1220,7 +1267,7 @@ class SiriusBleGateway(Node):
                         "status": "connected",
                         "emergency_stop": getattr(self, '_emergency_stop_active', False),
                         "battery": data,
-                        "navigation_mode": getattr(self, '_navigation_mode', "unknown"),
+                        **self._mode_status_fields(),
                         **self._people_status_fields(),
                     }
                     char.value = json.dumps(status_payload, ensure_ascii=False).encode("utf-8")

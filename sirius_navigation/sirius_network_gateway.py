@@ -17,6 +17,11 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Int32, String
 
+try:
+    from .navigation_modes import navigation_mode_controller, normalize_navigation_mode
+except ImportError:  # pragma: no cover - direct script execution
+    from navigation_modes import navigation_mode_controller, normalize_navigation_mode
+
 
 @dataclass
 class PairingAuthority:
@@ -109,6 +114,12 @@ class SiriusNetworkGateway(Node):
             self._on_navigation_mode,
             navigation_mode_qos,
         )
+        self.create_subscription(
+            String,
+            "/controller_selector",
+            self._on_controller_selector,
+            navigation_mode_qos,
+        )
         self.create_subscription(Bool, "/stop", self._on_stop, 10)
         self.create_subscription(
             Int32,
@@ -134,6 +145,7 @@ class SiriusNetworkGateway(Node):
         self._last_status = {}
         self._battery = None
         self._navigation_mode = "unknown"
+        self._controller_selector = ""
         self._emergency_stop = False
         self._stop_state_received = False
         self._people_count = None
@@ -341,6 +353,30 @@ class SiriusNetworkGateway(Node):
             self._navigation_mode = mode
             self._broadcast_status()
 
+    def _on_controller_selector(self, msg: String):
+        controller = str(msg.data or "").strip()
+        if controller:
+            self._controller_selector = controller
+            self._broadcast_status()
+
+    @staticmethod
+    def _effective_navigation_mode(requested, controller_selector):
+        """Return the mode implied by the currently active controller.
+
+        The behavior tree resets its controller selection to the default
+        (FollowPath) whenever it is rebuilt, while /sirius/navigation_mode
+        keeps the last requested value. Deriving the effective mode from the
+        live /controller_selector keeps the remote display consistent with the
+        robot's actual behaviour.
+        """
+        requested_mode = normalize_navigation_mode(requested) or "normal"
+        if not controller_selector:
+            return requested_mode
+        if controller_selector == navigation_mode_controller(requested_mode):
+            return requested_mode
+        # Selection diverged from the requested mode: trust the live controller.
+        return "wait_normal" if controller_selector == "WaitPath" else "normal"
+
     def _on_stop(self, msg: Bool):
         self._emergency_stop = bool(msg.data)
         self._stop_state_received = True
@@ -380,6 +416,12 @@ class SiriusNetworkGateway(Node):
         navigation_mode = self._navigation_mode
         if navigation_mode == "unknown":
             navigation_mode = self._last_status.get("navigation_mode", "unknown")
+        controller_selector = getattr(self, '_controller_selector', "") or self._last_status.get(
+            "controller_selector", ""
+        )
+        navigation_mode_effective = self._effective_navigation_mode(
+            navigation_mode, controller_selector
+        )
         return {
             "type": "status",
             "status": "connected" if self._active_socket else "waiting",
@@ -392,6 +434,8 @@ class SiriusNetworkGateway(Node):
             "emergency_stop": emergency_stop,
             "battery": battery,
             "navigation_mode": navigation_mode,
+            "navigation_mode_effective": navigation_mode_effective,
+            "controller_selector": controller_selector,
             "people_detection_active": people_detection_active,
             "people_count": (
                 self._people_count if people_detection_active else None
