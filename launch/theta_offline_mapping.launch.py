@@ -87,6 +87,7 @@ def generate_launch_description():
     theta_cloud = Node(
         package='sirius_navigation', executable='theta_ground_cloud_node', name='theta_ground_cloud',
         parameters=[{'use_sim_time': use_sim_time, 'semantic_debug_topic': semantic_debug_topic,
+                     'semantic_cloud_topic': '/theta/ground_cloud_semantic',
                      'min_radius': ParameterValue(min_radius, value_type=float),
                      'max_radius': ParameterValue(max_radius, value_type=float),
                      'lidar_topic': lidar_topic,
@@ -96,7 +97,8 @@ def generate_launch_description():
 
     theta_indexed = Node(
         package='sirius_navigation', executable='theta_indexed_map_node', name='theta_indexed_map_node',
-        parameters=[{'use_sim_time': use_sim_time}],
+        parameters=[{'use_sim_time': use_sim_time,
+                     'cloud_topic': '/theta/ground_cloud_semantic'}],
         output='screen')
 
     # SAM3セマンティック（任意）。dual-fisheyeを透視投影しSAM3でクラス分類→地面逆投影して

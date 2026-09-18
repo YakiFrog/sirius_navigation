@@ -117,7 +117,7 @@ class ThetaSam3PerspectiveNode(Node):
         if bool(self.get_parameter('use_tf').value):
             self.robot_frame = self.get_parameter('robot_frame').value
             self.camera_frame = self.get_parameter('camera_frame').value
-            self.tf_buffer = Buffer()
+            self.tf_buffer = Buffer(cache_time=Duration(seconds=60.0))
             self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.lock = threading.Lock()

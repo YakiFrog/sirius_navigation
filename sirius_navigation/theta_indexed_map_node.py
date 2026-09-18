@@ -69,12 +69,16 @@ class ThetaIndexedMapNode(Node):
         self.declare_parameter('fill_hole_m', 0.75)
         # テクスチャに使う直近観測の枚数K（移動平均）。大きいほど滑らかだがブレが累積しやすい。
         self.declare_parameter('texture_samples', 5)
+        # 直近K観測の集約方法: 'median'（既定, エッジが滲みにくい）または 'mean'。
+        # 姿勢誤差でフレーム間がズレても、median は中央値を採るため二重像/滲みが減る。
+        self.declare_parameter('texture_aggregate', 'median')
 
         self.res = self.get_parameter('grid_resolution').value
         self.map_frame = self.get_parameter('map_frame').value
         self.min_cloud_interval = max(0.0, float(self.get_parameter('min_cloud_interval_sec').value))
         self.fill_hole_m = max(0.0, float(self.get_parameter('fill_hole_m').value))
         self.texture_k = max(1, int(self.get_parameter('texture_samples').value))
+        self.texture_aggregate = str(self.get_parameter('texture_aggregate').value).lower()
 
         self.grid = None
         self.struct_grid = None
@@ -90,7 +94,9 @@ class ThetaIndexedMapNode(Node):
         self.last_cloud_time = 0.0
 
         self.palette = self._generate_default_palette()
-        self.tf_buffer = Buffer()
+        # 地面点群はsemantic_waitで遅延するため、高レート再生でもTFが引けるよう
+        # tf2バッファのキャッシュを拡大（既定10sだと 遅延×rate で外挿エラーになる）。
+        self.tf_buffer = Buffer(cache_time=Duration(seconds=60.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         map_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -203,18 +209,25 @@ class ThetaIndexedMapNode(Node):
                                           throttle_duration_sec=5)
                 return None
         t, q = transform.transform.translation, transform.transform.rotation
-        self.last_tf = (float(t.x), float(t.y))
         rotation = quaternion_to_matrix(q.x, q.y, q.z, q.w)
         points = np.column_stack([x, y, z])
         return points @ rotation.T + np.array([t.x, t.y, t.z])
 
     def _cloud_callback(self, msg):
-        if self.grid is None:
-            return
+        if not getattr(self, '_first_cloud_logged', False):
+            self._first_cloud_logged = True
+            self.get_logger().info(
+                f'[cloud] first ground cloud received (frame={msg.header.frame_id}, '
+                f'stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec})')
+        if self.grid is None and not getattr(self, '_no_tf_logged', False):
+            self._no_tf_logged = True
+            self.get_logger().info('[cloud] painting directly (grid=None will be allocated on first successful transform)')
         now = self.get_clock().now().nanoseconds / 1e9
         if self.min_cloud_interval > 0.0 and now - self.last_cloud_time < self.min_cloud_interval:
             return
         self.last_cloud_time = now
+        if not hasattr(self, 'color_lut'):
+            self.palette = self._generate_default_palette()
         offsets = {f.name: f.offset for f in msg.fields}
         if 'x' not in offsets or 'y' not in offsets:
             return
@@ -272,11 +285,6 @@ class ThetaIndexedMapNode(Node):
             if np.any(keep):
                 np.add.at(self.semantic_votes, (gy[keep], gx[keep], sid[keep]), 1.0)
         self.dirty = True
-        self.get_logger().info(
-            f'Painted {int(np.sum(not_wall))} ground points onto grid. '
-            f'mapped x[{mapped[:,0].min():.1f},{mapped[:,0].max():.1f}] '
-            f'y[{mapped[:,1].min():.1f},{mapped[:,1].max():.1f}] tf={getattr(self, "last_tf", None)}',
-            throttle_duration_sec=5.0)
 
     def _timer_callback(self):
         if self.grid is not None and self.dirty:
@@ -312,8 +320,39 @@ class ThetaIndexedMapNode(Node):
         filled[hole] = nearest[hole]
         return filled
 
+    def _aggregate_texture(self):
+        """直近K観測(RGB)をセルごとに集約する。median はエッジ/二重像に強く滲みにくい。"""
+        count = self.texture_count
+        observed = count > 0
+        out = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        if not np.any(observed):
+            return out
+        n = np.minimum(count, self.texture_k)
+        mode = str(self.get_parameter('texture_aggregate').value).lower()
+        if mode != 'median':
+            denominator = n.astype(np.float64)
+            out[observed] = np.clip(
+                np.round(self.texture_sum[observed] / denominator[observed, None]), 0, 255).astype(np.uint8)
+            return out
+        # 下側中央値: 無効スロットを +inf 相当(=1000)にして昇順ソートすると、
+        # 有効な n 個が先頭に並ぶので index (n-1)//2 が下側中央値になる。
+        slot_axis = np.arange(self.texture_k)
+        valid = slot_axis[None, None, :] < n[:, :, None]
+        vals = np.where(valid[:, :, :, None], self.texture_ring.astype(np.int16), np.int16(1000))
+        vals.sort(axis=2)
+        med_index = np.clip((n - 1) // 2, 0, self.texture_k - 1)
+        rows, cols = np.indices((self.height, self.width))
+        median_rgb = vals[rows, cols, med_index]
+        out[observed] = np.clip(median_rgb[observed], 0, 255).astype(np.uint8)
+        return out
+
     def _save_callback(self, msg):
+        self.get_logger().info(
+            f'[save] request received: {msg.data} '
+            f'(grid={"set" if self.grid is not None else "None"}, '
+            f'painted={int(np.sum(self.grid >= 3)) if self.grid is not None else 0})')
         if self.grid is None:
+            self.get_logger().warning('[save] grid is None（描画前に保存要求）。保存をスキップします。')
             return
         path = msg.data
         if not path.startswith('/'):
@@ -341,13 +380,10 @@ class ThetaIndexedMapNode(Node):
         }
         with open(path + ".json", 'w') as stream:
             json.dump(meta, stream, indent=4)
-        # ロバストテクスチャ（3件超のセルは上下1件ずつ除外したトリム平均、それ以外は平均）
+        # ロバストテクスチャ（texture_aggregate=median なら直近Kの下側中央値）
         observed = self.texture_count > 0
         if np.any(observed):
-            texture_rgb = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-            denominator = np.minimum(self.texture_count, self.texture_k).astype(np.float64)
-            texture_rgb[observed] = np.clip(
-                np.round(self.texture_sum[observed] / denominator[observed, None]), 0, 255).astype(np.uint8)
+            texture_rgb = self._aggregate_texture()
             texture_bgra = np.dstack([texture_rgb[:, :, ::-1], (observed * 255).astype(np.uint8)])
             texture_base = path[:-len('.colored')] if path.endswith('.colored') else path
             cv2.imwrite(texture_base + ".texture.png", texture_bgra[::-1, :])

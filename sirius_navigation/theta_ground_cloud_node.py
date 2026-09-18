@@ -48,10 +48,17 @@ class ThetaGroundCloudNode(Node):
         self.declare_parameter('lidar_offset', [0.0, 0.0])
         # 自機ボディ等の近距離ビームは障害物とみなさない（誤除外防止）
         self.declare_parameter('lidar_min_obstacle_m', 0.4)
+        # 「明確な遮蔽のみ」を除外する比。beam < ratio*distance のときだけ遮蔽扱い
+        # （机0.85m等でTHETAは見える地面を誤除外しないため。0.6推奨）
+        self.declare_parameter('lidar_occlusion_ratio', 0.6)
         # ゲートで残る点の割合がこれ未満なら、そのフレームはゲートを無効化（過剰除外の防止）
-        self.declare_parameter('lidar_gate_min_keep_ratio', 0.5)
+        # 実測の生保持率は約0.55前後なので、それを許容する0.4を既定にする。
+        self.declare_parameter('lidar_gate_min_keep_ratio', 0.4)
         # デバッグ用: クラス色にした点群のトピック（空文字で無効）
         self.declare_parameter('semantic_debug_topic', '')
+        # semantic待ちをした「色+semantic付き」点群のトピック（空文字で無効）。
+        # output_topic は semantic待ちせず即配信する（RTAB等の遅延敏感な消費者向け）。
+        self.declare_parameter('semantic_cloud_topic', '/theta/ground_cloud_semantic')
 
         with open(self.get_parameter('calibration').value) as f:
             calibration = yaml.safe_load(f)
@@ -69,6 +76,7 @@ class ThetaGroundCloudNode(Node):
         self.lidar_keep_outside_fov = bool(self.get_parameter('lidar_keep_outside_fov').value)
         self.lidar_offset = [float(v) for v in self.get_parameter('lidar_offset').value]
         self.lidar_min_obstacle = max(0.0, float(self.get_parameter('lidar_min_obstacle_m').value))
+        self.lidar_occlusion_ratio = float(self.get_parameter('lidar_occlusion_ratio').value)
         self.lidar_min_keep = max(0.0, float(self.get_parameter('lidar_gate_min_keep_ratio').value))
         self.latest_scan = None  # (angle_min, angle_increment, ranges, range_max)
         self.scans = {}          # stamp_key -> scan（ゲートの時刻合わせ用）
@@ -84,6 +92,9 @@ class ThetaGroundCloudNode(Node):
         self.labels = {}              # stamp_key -> mono8 label
         self.warned_shape = False
         self.pub = self.create_publisher(PointCloud2, self.get_parameter('output_topic').value, 1)
+        semantic_cloud_topic = self.get_parameter('semantic_cloud_topic').value
+        self.semantic_pub = (self.create_publisher(PointCloud2, semantic_cloud_topic, 1)
+                             if semantic_cloud_topic else None)
         debug_topic = self.get_parameter('semantic_debug_topic').value
         self.debug_pub = self.create_publisher(PointCloud2, debug_topic, 1) if debug_topic else None
         self.sub = self.create_subscription(Image, self.get_parameter('input_topic').value, self.receive, qos_profile_sensor_data)
@@ -117,10 +128,15 @@ class ThetaGroundCloudNode(Node):
             image = image[:, :, ::-1].copy()
         key = self._key(msg)
         self.pending[key] = (msg.header.stamp, msg.header.frame_id or self.frame_id, image, time.time())
+        # 遅延敏感な消費者（RTAB等）へは semantic を待たず即配信する。
+        # semantic待ちで stamp が古くなると TF 外挿で棄却され、開始地点で塗りが止まるため。
+        self._emit(msg.header.stamp, msg.header.frame_id or self.frame_id, image, None,
+                   publish_main=True, publish_semantic=False)
         while len(self.pending) > self.max_pending:
             old_key, entry = self.pending.popitem(last=False)
             old_stamp, old_frame, old_image, _ = entry
-            self._emit(old_stamp, old_frame, old_image, self.labels.pop(old_key, None))
+            self._emit(old_stamp, old_frame, old_image, self.labels.pop(old_key, None),
+                       publish_main=False, publish_semantic=True)
         self._process_if_ready(key)
 
     def receive_semantic(self, msg):
@@ -139,7 +155,8 @@ class ThetaGroundCloudNode(Node):
     def _process_if_ready(self, key):
         if key in self.pending and key in self.labels:
             stamp, frame_id, image, _ = self.pending.pop(key)
-            self._emit(stamp, frame_id, image, self.labels.pop(key))
+            self._emit(stamp, frame_id, image, self.labels.pop(key),
+                       publish_main=False, publish_semantic=True)
 
     def _flush_stale(self):
         if self.semantic_wait <= 0.0:
@@ -151,8 +168,8 @@ class ThetaGroundCloudNode(Node):
             stamp, frame_id, image, arrival = self.pending[key]
             if self.semantic_wait <= 0.0 or now - arrival > wait:
                 self.pending.pop(key)
-                self.labels.pop(key, None)
-                self._emit(stamp, frame_id, image, None)
+                self._emit(stamp, frame_id, image, self.labels.pop(key, None),
+                           publish_main=False, publish_semantic=True)
 
     def _on_scan(self, msg):
         data = (msg.angle_min, msg.angle_increment,
@@ -194,17 +211,25 @@ class ThetaGroundCloudNode(Node):
         beam = np.full(distances.shape, np.inf, dtype=np.float32)
         valid = np.isfinite(ranges) & (ranges >= self.lidar_min_obstacle)
         beam[inside] = np.where(valid[index[inside]], ranges[index[inside]], np.inf)
-        blocked = beam < (distances - self.lidar_margin)
+        blocked = (beam < (distances - self.lidar_margin)) & (
+            beam < self.lidar_occlusion_ratio * distances)
         out_of_range = distances > range_max
         keep = ~blocked & ~out_of_range
         if self.lidar_keep_outside_fov:
             keep = np.where(inside, keep, True)
         # 過剰除外の防止: 残る割合が低すぎるならこのフレームはゲートしない
-        if self.lidar_min_keep > 0.0 and keep.mean() < self.lidar_min_keep:
+        raw_keep = float(keep.mean())
+        if self.lidar_min_keep > 0.0 and raw_keep < self.lidar_min_keep:
+            self.get_logger().info(
+                f'LiDAR gate: raw keep {raw_keep:.2f} < {self.lidar_min_keep:.2f} -> disabled (all kept)',
+                throttle_duration_sec=3.0)
             return np.ones_like(xg, dtype=bool)
+        self.get_logger().info(
+            f'LiDAR gate: raw keep {raw_keep:.2f} (applied)',
+            throttle_duration_sec=3.0)
         return keep
 
-    def _emit(self, stamp, frame_id, image, semantic):
+    def _emit(self, stamp, frame_id, image, semantic, publish_main=True, publish_semantic=True):
         height, width = image.shape[:2]
         step = self.stride
         rows = np.arange(0, height, step)
@@ -255,7 +280,10 @@ class ThetaGroundCloudNode(Node):
         msg.row_step = dtype.itemsize * count
         msg.is_dense = True
         msg.data = cloud.tobytes()
-        self.pub.publish(msg)
+        if publish_main:
+            self.pub.publish(msg)
+        if publish_semantic and self.semantic_pub is not None:
+            self.semantic_pub.publish(msg)
 
         if self.debug_pub is not None:
             debug_rgb = rv.copy()

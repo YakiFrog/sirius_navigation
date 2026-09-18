@@ -75,7 +75,7 @@ class ThetaBevNode(Node):
         self.buffer = None
         self.listener = None
         if self.use_tf:
-            self.buffer = Buffer()
+            self.buffer = Buffer(cache_time=Duration(seconds=60.0))
             self.listener = TransformListener(self.buffer, self)
 
         self.pub = self.create_publisher(Image, self.get_parameter('output_topic').value, 1)
