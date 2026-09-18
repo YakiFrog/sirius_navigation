@@ -25,8 +25,18 @@ def test_strict_normal_command_keeps_mode_information():
     assert "0.9" in navigation_mode_confirmation("strict_normal")
 
     config = NAVIGATION_MODE_CONFIGS["strict_normal"]
-    assert config["/controller_server"]["FollowPath.PathAlignCritic.cost_weight"] == 60.0
-    assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is False
+    assert config["/controller_server"]["FollowPath.PathAlignCritic.cost_weight"] == 12.0
+    assert config["/controller_server"]["FollowPath.CostCritic.cost_weight"] == 10.0
+    assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is True
+
+
+def test_strict_modes_keep_avoidance_and_path_emphasis():
+    for mode in ("strict_normal", "strict_safe", "strict_slow"):
+        config = NAVIGATION_MODE_CONFIGS[mode]
+        assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is True
+        controller = config["/controller_server"]
+        assert controller["FollowPath.CostCritic.cost_weight"] == 10.0
+        assert controller["FollowPath.PathAlignCritic.cost_weight"] == 12.0
 
 
 def test_unknown_navigation_mode_is_rejected_before_llm_fallback():

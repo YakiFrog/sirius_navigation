@@ -88,18 +88,21 @@ NAVIGATION_MODE_CONFIGS = {
         },
         "/global_costmap/global_costmap": {"obstacle_layer.enabled": True},
     },
+    # slow(4): 速度が低く障害物前で膠着しやすい。
+    #   ・CostCritic 20->10: 障害物コストを下げ、過剰回避で固まるのを防ぐ。
+    #   ・vx_std/wz_std 拡大: 探索ノイズを増やし、逃げ道となる軌道を見つけやすくする。
     "slow": {
         "/controller_server": {
             "FollowPath.vx_max": 0.20,
-            "FollowPath.time_steps": 200,
+            "FollowPath.time_steps": 200,  # 低速でも先読み距離(約4m)を確保するため維持
             "FollowPath.vx_min": -0.10,
             "FollowPath.wz_max": 0.20,
-            "FollowPath.vx_std": 0.20,
-            "FollowPath.wz_std": 0.20,
+            "FollowPath.vx_std": 0.25,
+            "FollowPath.wz_std": 0.30,
             "FollowPath.ax_max": 0.20,
             "FollowPath.ax_min": -0.20,
             "FollowPath.az_max": 0.50,
-            "FollowPath.CostCritic.cost_weight": 20.0,
+            "FollowPath.CostCritic.cost_weight": 10.0,
             "FollowPath.PathAlignCritic.cost_weight": 8.0,
             "FollowPath.PathFollowCritic.cost_weight": 8.0,
             "FollowPath.PathAngleCritic.cost_weight": 2.0,
@@ -148,6 +151,14 @@ NAVIGATION_MODE_CONFIGS = {
         # original static-map route while the wait controller is selected.
         "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
     },
+    # strict系(6/7/8): 「回避しつつパス追従を重視」する設計。
+    #   ・global obstacle_layer を False->True: 再計画で障害物を迂回させる。
+    #     （旧設定はパスが障害物を貫通し、全軌道衝突→NoValidControl→
+    #       BTリカバリのSpinで回り続ける原因になっていた）
+    #   ・PathAlignCritic 60->12: normal(8)より高くして追従を強めるが、
+    #     過剰な横偏差ペナルティで回避できなくなるのを防ぐ。
+    #   ・CostCritic/PathFollow/PathAngle/Twirling/PreferForward/Goal は
+    #     normal相当に揃え、strict同士で挙動が発散しないようにする。
     "strict_normal": {
         "/controller_server": {
             "FollowPath.vx_max": 0.90,
@@ -159,14 +170,14 @@ NAVIGATION_MODE_CONFIGS = {
             "FollowPath.ax_max": 0.90,
             "FollowPath.ax_min": -0.90,
             "FollowPath.az_max": 1.50,
-            "FollowPath.CostCritic.cost_weight": 15.0,
-            "FollowPath.PathAlignCritic.cost_weight": 60.0,
-            "FollowPath.PathFollowCritic.cost_weight": 3.0,
-            "FollowPath.PathAngleCritic.cost_weight": 1.5,
-            "FollowPath.TwirlingCritic.cost_weight": 5.0,
-            "FollowPath.PreferForwardCritic.cost_weight": 25.0,
-            "FollowPath.GoalCritic.cost_weight": 0.5,
-            "FollowPath.GoalAngleCritic.cost_weight": 0.5,
+            "FollowPath.CostCritic.cost_weight": 10.0,
+            "FollowPath.PathAlignCritic.cost_weight": 12.0,
+            "FollowPath.PathFollowCritic.cost_weight": 8.0,
+            "FollowPath.PathAngleCritic.cost_weight": 2.0,
+            "FollowPath.TwirlingCritic.cost_weight": 3.0,
+            "FollowPath.PreferForwardCritic.cost_weight": 15.0,
+            "FollowPath.GoalCritic.cost_weight": 3.0,
+            "FollowPath.GoalAngleCritic.cost_weight": 1.0,
         },
         "/velocity_smoother": {
             "max_velocity": [0.90, 0.0, 0.90],
@@ -174,7 +185,7 @@ NAVIGATION_MODE_CONFIGS = {
             "max_accel": [0.90, 0.0, 1.50],
             "max_decel": [-0.90, 0.0, -1.50],
         },
-        "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
+        "/global_costmap/global_costmap": {"obstacle_layer.enabled": True},
     },
     "strict_safe": {
         "/controller_server": {
@@ -187,14 +198,14 @@ NAVIGATION_MODE_CONFIGS = {
             "FollowPath.ax_max": 0.40,
             "FollowPath.ax_min": -0.40,
             "FollowPath.az_max": 1.00,
-            "FollowPath.CostCritic.cost_weight": 15.0,
-            "FollowPath.PathAlignCritic.cost_weight": 60.0,
-            "FollowPath.PathFollowCritic.cost_weight": 3.0,
-            "FollowPath.PathAngleCritic.cost_weight": 1.5,
-            "FollowPath.TwirlingCritic.cost_weight": 5.0,
-            "FollowPath.PreferForwardCritic.cost_weight": 25.0,
-            "FollowPath.GoalCritic.cost_weight": 0.5,
-            "FollowPath.GoalAngleCritic.cost_weight": 0.5,
+            "FollowPath.CostCritic.cost_weight": 10.0,
+            "FollowPath.PathAlignCritic.cost_weight": 12.0,
+            "FollowPath.PathFollowCritic.cost_weight": 8.0,
+            "FollowPath.PathAngleCritic.cost_weight": 2.0,
+            "FollowPath.TwirlingCritic.cost_weight": 3.0,
+            "FollowPath.PreferForwardCritic.cost_weight": 15.0,
+            "FollowPath.GoalCritic.cost_weight": 3.0,
+            "FollowPath.GoalAngleCritic.cost_weight": 1.0,
         },
         "/velocity_smoother": {
             "max_velocity": [0.40, 0.0, 0.40],
@@ -202,7 +213,7 @@ NAVIGATION_MODE_CONFIGS = {
             "max_accel": [0.40, 0.0, 1.00],
             "max_decel": [-0.40, 0.0, -1.00],
         },
-        "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
+        "/global_costmap/global_costmap": {"obstacle_layer.enabled": True},
     },
     "strict_slow": {
         "/controller_server": {
@@ -210,19 +221,19 @@ NAVIGATION_MODE_CONFIGS = {
             "FollowPath.time_steps": 200,
             "FollowPath.vx_min": -0.10,
             "FollowPath.wz_max": 0.20,
-            "FollowPath.vx_std": 0.20,
-            "FollowPath.wz_std": 0.20,
+            "FollowPath.vx_std": 0.25,
+            "FollowPath.wz_std": 0.30,
             "FollowPath.ax_max": 0.20,
             "FollowPath.ax_min": -0.20,
             "FollowPath.az_max": 0.50,
-            "FollowPath.CostCritic.cost_weight": 20.0,
-            "FollowPath.PathAlignCritic.cost_weight": 60.0,
-            "FollowPath.PathFollowCritic.cost_weight": 3.0,
-            "FollowPath.PathAngleCritic.cost_weight": 1.5,
-            "FollowPath.TwirlingCritic.cost_weight": 5.0,
-            "FollowPath.PreferForwardCritic.cost_weight": 25.0,
-            "FollowPath.GoalCritic.cost_weight": 0.5,
-            "FollowPath.GoalAngleCritic.cost_weight": 0.5,
+            "FollowPath.CostCritic.cost_weight": 10.0,
+            "FollowPath.PathAlignCritic.cost_weight": 12.0,
+            "FollowPath.PathFollowCritic.cost_weight": 8.0,
+            "FollowPath.PathAngleCritic.cost_weight": 2.0,
+            "FollowPath.TwirlingCritic.cost_weight": 3.0,
+            "FollowPath.PreferForwardCritic.cost_weight": 15.0,
+            "FollowPath.GoalCritic.cost_weight": 3.0,
+            "FollowPath.GoalAngleCritic.cost_weight": 1.0,
         },
         "/velocity_smoother": {
             "max_velocity": [0.20, 0.0, 0.20],
@@ -230,7 +241,7 @@ NAVIGATION_MODE_CONFIGS = {
             "max_accel": [0.20, 0.0, 0.50],
             "max_decel": [-0.20, 0.0, -0.50],
         },
-        "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
+        "/global_costmap/global_costmap": {"obstacle_layer.enabled": True},
     },
 }
 
