@@ -22,7 +22,7 @@ from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from ament_index_python.packages import get_package_share_directory
-from sirius_navigation.theta_bev_projection import build_blend_maps
+from sirius_navigation.theta_bev_projection import build_blend_maps, build_vignette_gains
 
 
 def quaternion_to_rpy(x, y, z, w):
@@ -56,6 +56,15 @@ class ThetaBevNode(Node):
         # 前後レンズのつなぎ目（ロボット真横, θ≈90°）をクロスフェードする帯の半角[deg]。
         # 0で無効（従来のハード切り替え）。大きいほど広くブレンドする。
         self.declare_parameter('blend_half_deg', 6.0)
+        # 魚眼->BEV リサンプリングのアンチエイリアス。近距離(≈1.2m)では魚眼の地上GSDが
+        # BEV画素より細かく、折り返し(モアレ)が出る。remap前に魚眼へGaussianを掛けて抑える。
+        # 単位は魚眼画像のpx。0で無効（既定）。1.0〜2.0が目安（50cmタイルは保持される）。
+        self.declare_parameter('aa_blur_sigma', 0.0)
+        # 地面投影の同心円状ムラ(ビネット)補正。view=斜め視(入射角)補正の強さ, lens=レンズ
+        # 周辺減光(cos^4θ)補正の強さ, gain_max=ゲイン上限クリップ。0で無補正。
+        self.declare_parameter('vignette_view_strength', 1.0)
+        self.declare_parameter('vignette_lens_strength', 0.0)
+        self.declare_parameter('vignette_gain_max', 2.5)
 
         with open(self.get_parameter('calibration').value) as f:
             self.base_calibration = yaml.safe_load(f)
@@ -72,6 +81,8 @@ class ThetaBevNode(Node):
         self.calibration = self.base_calibration
         self.maps = None
         self.shape = None
+        self.vignette_gain = None
+        self.vignette_key = None
         self.buffer = None
         self.listener = None
         if self.use_tf:
@@ -123,6 +134,7 @@ class ThetaBevNode(Node):
         self.calibration['rpy_degrees'] = [float(v) for v in rpy]
         self.applied_pose = pose
         self.shape = None  # 次のフレームで再投影マップを作り直す
+        self.vignette_gain = None  # 姿勢が変わるとビネットゲインも作り直す
         source_ja = {'tf': 'TF', 'topic': '姿勢トピック(/theta/mount_pose)', 'yaml': '校正YAML'}.get(source, source)
         pose_text = f'位置={self.calibration["camera_position"]} rpy={self.calibration["rpy_degrees"]}'
         if source == 'yaml':
@@ -153,10 +165,21 @@ class ThetaBevNode(Node):
                 self.maps = build_blend_maps(self.calibration, frame.shape[1], frame.shape[0], self.blend_half_deg)
                 self.shape = frame.shape
             mx_f, my_f, mx_b, my_b, alpha = self.maps
-            front = cv2.remap(frame, mx_f, my_f, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-            back = cv2.remap(frame, mx_b, my_b, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            vv = float(self.get_parameter('vignette_view_strength').value)
+            vl = float(self.get_parameter('vignette_lens_strength').value)
+            vmax = float(self.get_parameter('vignette_gain_max').value)
+            vkey = (self.shape, round(vv, 4), round(vl, 4), round(vmax, 4))
+            if self.vignette_gain is None or self.vignette_key != vkey:
+                self.vignette_gain = build_vignette_gains(self.calibration, vv, vl, vmax)
+                self.vignette_key = vkey
+            aa_sigma = float(self.get_parameter('aa_blur_sigma').value)
+            frame_aa = cv2.GaussianBlur(frame, (0, 0), aa_sigma) if aa_sigma > 0.0 else frame
+            front = cv2.remap(frame_aa, mx_f, my_f, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            back = cv2.remap(frame_aa, mx_b, my_b, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
             a = alpha[..., None]
-            bev = np.clip(front.astype(np.float32) * a + back.astype(np.float32) * (1.0 - a), 0, 255).astype(np.uint8)
+            gain = self.vignette_gain[..., None]
+            bev = np.clip(front.astype(np.float32) * gain * a + back.astype(np.float32) * gain * (1.0 - a),
+                          0, 255).astype(np.uint8)
             out = Image()
             out.header.stamp = msg.header.stamp
             out.header.frame_id = self.get_parameter('output_frame').value

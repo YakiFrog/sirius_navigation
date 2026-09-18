@@ -14,10 +14,20 @@ from visualization_msgs.msg import Marker
 
 try:
     from ..local_parser import DIALOGUE_TEMPLATES
-    from ...navigation_modes import NAVIGATION_MODE_CONFIGS, NAVIGATION_MODE_INFO
+    from ...navigation_modes import (
+        NAVIGATION_MODE_CONFIGS,
+        NAVIGATION_MODE_INFO,
+        build_speed_parameters,
+        speed_setting_to_mode,
+    )
 except ImportError:
     from local_parser import DIALOGUE_TEMPLATES
-    from navigation_modes import NAVIGATION_MODE_CONFIGS, NAVIGATION_MODE_INFO
+    from navigation_modes import (
+        NAVIGATION_MODE_CONFIGS,
+        NAVIGATION_MODE_INFO,
+        build_speed_parameters,
+        speed_setting_to_mode,
+    )
 from .landmark_manager import JAPANESE_TO_ROMAJI
 
 class NavController:
@@ -322,112 +332,13 @@ class NavController:
         return success
 
     def set_controller_speed(self, speed_setting):
-        """Configure controller_server and velocity_smoother based on navigation mode configs"""
-        nav_modes = {
-            'slow': {
-                '/controller_server': {
-                    'FollowPath.vx_max': 0.20,
-                    'FollowPath.vx_min': -0.10,
-                    'FollowPath.wz_max': 0.20,
-                    'FollowPath.vx_std': 0.20,
-                    'FollowPath.wz_std': 0.20,
-                    'FollowPath.ax_max': 0.20,
-                    'FollowPath.ax_min': -0.20,
-                    'FollowPath.az_max': 0.50,
-                },
-                '/velocity_smoother': {
-                    'max_velocity': [0.20, 0.0, 0.20],
-                    'min_velocity': [-0.10, 0.0, -0.20],
-                    'max_accel': [0.20, 0.0, 0.50],
-                    'max_decel': [-0.20, 0.0, -0.50]
-                }
-            },
-            'safe': {
-                '/controller_server': {
-                    'FollowPath.vx_max': 0.40,
-                    'FollowPath.vx_min': -0.20,
-                    'FollowPath.wz_max': 0.40,
-                    'FollowPath.vx_std': 0.20,
-                    'FollowPath.wz_std': 0.20,
-                    'FollowPath.ax_max': 0.40,
-                    'FollowPath.ax_min': -0.40,
-                    'FollowPath.az_max': 1.00,
-                },
-                '/velocity_smoother': {
-                    'max_velocity': [0.40, 0.0, 0.40],
-                    'min_velocity': [-0.20, 0.0, -0.40],
-                    'max_accel': [0.40, 0.0, 1.00],
-                    'max_decel': [-0.40, 0.0, -1.00]
-                }
-            },
-            'normal': {
-                '/controller_server': {
-                    'FollowPath.vx_max': 0.90,
-                    'FollowPath.vx_min': -0.60,
-                    'FollowPath.wz_max': 0.90,
-                    'FollowPath.vx_std': 0.25,
-                    'FollowPath.wz_std': 0.30,
-                    'FollowPath.ax_max': 0.90,
-                    'FollowPath.ax_min': -0.90,
-                    'FollowPath.az_max': 1.50,
-                },
-                '/velocity_smoother': {
-                    'max_velocity': [0.90, 0.0, 0.90],
-                    'min_velocity': [-0.90, 0.0, -0.90],
-                    'max_accel': [0.90, 0.0, 1.50],
-                    'max_decel': [-0.90, 0.0, -1.50]
-                }
-            },
-            'fast': {
-                '/controller_server': {
-                    'FollowPath.vx_max': 1.00,
-                    'FollowPath.vx_min': -0.60,
-                    'FollowPath.wz_max': 1.00,
-                    'FollowPath.vx_std': 0.40,
-                    'FollowPath.wz_std': 0.48,
-                    'FollowPath.ax_max': 1.50,
-                    'FollowPath.ax_min': -1.50,
-                    'FollowPath.az_max': 2.20,
-                },
-                '/velocity_smoother': {
-                    'max_velocity': [1.00, 0.0, 1.00],
-                    'min_velocity': [-0.60, 0.0, -1.00],
-                    'max_accel': [1.50, 0.0, 2.20],
-                    'max_decel': [-1.50, 0.0, -2.20]
-                }
-            }
-        }
-
-        if isinstance(speed_setting, str):
-            mode = speed_setting.lower()
-        else:
-            try:
-                val = float(speed_setting)
-                if val <= 0.25:
-                    mode = 'slow'
-                elif val <= 0.55:
-                    mode = 'safe'
-                elif val <= 0.95:
-                    mode = 'normal'
-                else:
-                    mode = 'fast'
-            except Exception:
-                mode = 'normal'
-                
-        if mode not in nav_modes:
-            mode = 'normal'
-            
-        self.node.get_logger().info(f"Applying navigation mode config: '{mode}'")
+        """Apply the speed-only subset of a navigation mode (values live in navigation_modes)."""
+        mode = speed_setting_to_mode(speed_setting)
+        self.node.get_logger().info(f"Applying navigation speed profile: '{mode}'")
         with self.node.lock:
-            self.node.current_speed_setting = {
-                "slow": 0.20,
-                "safe": 0.40,
-                "normal": 0.90,
-                "fast": 1.00,
-            }.get(mode, 0.90)
-        
-        cfg = nav_modes[mode]
-        for node_name, params in cfg.items():
+            self.node.current_speed_setting = NAVIGATION_MODE_INFO[mode]["speed"]
+
+        for node_name, params in build_speed_parameters(mode).items():
             self.set_node_parameters(node_name, params)
 
     def set_node_parameters(

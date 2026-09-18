@@ -50,6 +50,33 @@ def build_maps(calibration, width, height):
     return maps[...,0], maps[...,1]
 
 
+def build_vignette_gains(calibration, view_strength=0.0, lens_strength=0.0, gain_max=2.5):
+    """地面投影の同心円状ムラ（ビネット）補正ゲインを返す（BEV座標, 前後共通）。
+
+    - 斜め視による落ち: 地面点の視線入射角 φ に対し輝度 ∝ cosφ = h/√(ρ²+h²)。
+      その逆数 (√(ρ²+h²)/h) を view_strength 乗する。
+    - レンズ周辺減光: 光軸角 θ に対し概ね ∝ cos⁴θ。その逆数 (1/cosθ) を lens_strength 乗する。
+      cosθ = |ray.x|（前後レンズ共通）。
+    - 壁/天井は ρ,θ が極端で過補正になるため gain_max でクリップする。
+    view_strength=lens_strength=0.0 のときは全1（無補正）。
+    """
+    size, extent = int(calibration['bev_size']), float(calibration['bev_extent_m'])
+    h = float(calibration['camera_position'][2])
+    _, _, rays = _ray_grid(calibration)
+    u, v = np.meshgrid((np.arange(size) + .5) / size, (np.arange(size) + .5) / size)
+    x = (0.5 - v) * extent
+    y = (0.5 - u) * extent
+    rho = np.hypot(x, y)
+    gain = np.ones_like(rho, dtype=np.float64)
+    if view_strength > 0.0 and h > 0.0:
+        gain *= (np.sqrt(rho ** 2 + h ** 2) / h) ** float(view_strength)
+    if lens_strength > 0.0:
+        cos_t = np.maximum(np.abs(rays[..., 0]), 1e-3)
+        gain *= (1.0 / cos_t) ** float(lens_strength)
+    gain = np.clip(gain, 1.0, float(gain_max)).astype(np.float32)
+    return gain
+
+
 def build_blend_maps(calibration, width, height, blend_half_deg=6.0):
     """前後レンズをクロスフェード合成するBEV逆投影マップ。
 

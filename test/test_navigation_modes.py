@@ -9,9 +9,11 @@ from sirius_navigation.dialogue.llm_dynamic_goal import LlmDynamicGoal
 from sirius_navigation.dialogue.modules.nav_controller import NavController
 from sirius_navigation.navigation_modes import (
     NAVIGATION_MODE_CONFIGS,
+    build_speed_parameters,
     navigation_mode_controller,
     navigation_mode_confirmation,
     parse_navigation_mode_command,
+    speed_setting_to_mode,
 )
 
 
@@ -101,3 +103,37 @@ def test_remote_wait_mode_selects_wait_path_controller():
     assert selector.data == "WaitPath"
     status = node.navigation_mode_pub.publish.call_args.args[0]
     assert status.data == "wait_normal"
+
+
+def test_all_modes_keep_prediction_distance_near_normal():
+    for mode, config in NAVIGATION_MODE_CONFIGS.items():
+        controller = config["/controller_server"]
+        lookahead = controller["FollowPath.vx_max"] * controller["FollowPath.time_steps"] * 0.10
+        assert 3.9 <= lookahead <= 5.5, f"{mode} lookahead={lookahead:.2f}m"
+
+
+def test_speed_setting_maps_to_named_modes():
+    assert speed_setting_to_mode(0.20) == "slow"
+    assert speed_setting_to_mode(0.40) == "safe"
+    assert speed_setting_to_mode(0.90) == "normal"
+    assert speed_setting_to_mode(1.00) == "normal_active"
+    assert speed_setting_to_mode("safe") == "safe"
+    assert speed_setting_to_mode("fast") == "normal_active"
+    assert speed_setting_to_mode("unknown-mode") == "normal"
+    assert speed_setting_to_mode("not-a-number") == "normal"
+
+
+def test_build_speed_parameters_excludes_critics_and_costmap():
+    params = build_speed_parameters("slow")
+    assert set(params) == {"/controller_server", "/velocity_smoother"}
+
+    controller = params["/controller_server"]
+    assert controller["FollowPath.vx_max"] == 0.20
+    assert controller["FollowPath.time_steps"] == 200
+    assert all("Critic" not in key for key in controller)
+
+    named = NAVIGATION_MODE_CONFIGS["slow"]["/controller_server"]
+    for key, value in controller.items():
+        assert named[key] == value
+
+    assert params["/velocity_smoother"] == NAVIGATION_MODE_CONFIGS["slow"]["/velocity_smoother"]

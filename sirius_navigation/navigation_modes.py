@@ -7,6 +7,7 @@ NAVIGATION_MODE_CONFIGS = {
     "normal": {
         "/controller_server": {
             "FollowPath.vx_max": 0.90,
+            "FollowPath.time_steps": 60,
             "FollowPath.vx_min": -0.60,
             "FollowPath.wz_max": 0.90,
             "FollowPath.vx_std": 0.25,
@@ -34,6 +35,7 @@ NAVIGATION_MODE_CONFIGS = {
     "normal_active": {
         "/controller_server": {
             "FollowPath.vx_max": 1.00,
+            "FollowPath.time_steps": 54,
             "FollowPath.vx_min": -0.60,
             "FollowPath.wz_max": 1.00,
             "FollowPath.vx_std": 0.40,
@@ -61,6 +63,7 @@ NAVIGATION_MODE_CONFIGS = {
     "safe": {
         "/controller_server": {
             "FollowPath.vx_max": 0.40,
+            "FollowPath.time_steps": 135,
             "FollowPath.vx_min": -0.20,
             "FollowPath.wz_max": 0.40,
             "FollowPath.vx_std": 0.20,
@@ -88,6 +91,7 @@ NAVIGATION_MODE_CONFIGS = {
     "slow": {
         "/controller_server": {
             "FollowPath.vx_max": 0.20,
+            "FollowPath.time_steps": 200,
             "FollowPath.vx_min": -0.10,
             "FollowPath.wz_max": 0.20,
             "FollowPath.vx_std": 0.20,
@@ -115,6 +119,7 @@ NAVIGATION_MODE_CONFIGS = {
     "wait_normal": {
         "/controller_server": {
             "FollowPath.vx_max": 0.90,
+            "FollowPath.time_steps": 60,
             "FollowPath.vx_min": -0.60,
             "FollowPath.wz_max": 0.90,
             "FollowPath.vx_std": 0.25,
@@ -146,6 +151,7 @@ NAVIGATION_MODE_CONFIGS = {
     "strict_normal": {
         "/controller_server": {
             "FollowPath.vx_max": 0.90,
+            "FollowPath.time_steps": 60,
             "FollowPath.vx_min": -0.60,
             "FollowPath.wz_max": 0.90,
             "FollowPath.vx_std": 0.25,
@@ -173,6 +179,7 @@ NAVIGATION_MODE_CONFIGS = {
     "strict_safe": {
         "/controller_server": {
             "FollowPath.vx_max": 0.40,
+            "FollowPath.time_steps": 135,
             "FollowPath.vx_min": -0.20,
             "FollowPath.wz_max": 0.40,
             "FollowPath.vx_std": 0.20,
@@ -200,6 +207,7 @@ NAVIGATION_MODE_CONFIGS = {
     "strict_slow": {
         "/controller_server": {
             "FollowPath.vx_max": 0.20,
+            "FollowPath.time_steps": 200,
             "FollowPath.vx_min": -0.10,
             "FollowPath.wz_max": 0.20,
             "FollowPath.vx_std": 0.20,
@@ -237,6 +245,69 @@ NAVIGATION_MODE_INFO = {
     "strict_safe": {"label": "パス厳守・安全", "speed": 0.40, "strict": True},
     "strict_slow": {"label": "パス厳守・超低速", "speed": 0.20, "strict": True},
 }
+
+
+# Speed-only parameter subset shared by the legacy numeric speed command.
+# NAVIGATION_MODE_CONFIGS stays the single source of truth for these values so
+# the named modes and the numeric speed command cannot drift apart.
+SPEED_CONTROLLER_PARAM_KEYS = (
+    "FollowPath.vx_max",
+    "FollowPath.vx_min",
+    "FollowPath.wz_max",
+    "FollowPath.vx_std",
+    "FollowPath.wz_std",
+    "FollowPath.ax_max",
+    "FollowPath.ax_min",
+    "FollowPath.az_max",
+    "FollowPath.time_steps",
+)
+
+# String buckets accepted by the legacy speed command, mapped to named modes.
+_SPEED_STRING_MODES = {
+    "slow": "slow",
+    "safe": "safe",
+    "normal": "normal",
+    "fast": "normal_active",
+}
+
+# Numeric speed upper bounds -> named mode (checked in ascending order).
+_SPEED_NUMERIC_BUCKETS = (
+    (0.25, "slow"),
+    (0.55, "safe"),
+    (0.95, "normal"),
+)
+_SPEED_NUMERIC_DEFAULT_MODE = "normal_active"
+
+
+def speed_setting_to_mode(speed_setting):
+    """Map a legacy numeric/string speed setting to a named navigation mode."""
+    if isinstance(speed_setting, str):
+        return _SPEED_STRING_MODES.get(speed_setting.strip().lower(), "normal")
+    try:
+        value = float(speed_setting)
+    except (TypeError, ValueError):
+        return "normal"
+    for threshold, mode in _SPEED_NUMERIC_BUCKETS:
+        if value <= threshold:
+            return mode
+    return _SPEED_NUMERIC_DEFAULT_MODE
+
+
+def build_speed_parameters(mode):
+    """Return only the speed-related params of a named mode (no critics/costmap)."""
+    canonical = normalize_navigation_mode(mode)
+    if canonical is None:
+        raise ValueError(f"unknown navigation mode: {mode!r}")
+    config = NAVIGATION_MODE_CONFIGS[canonical]
+    controller = {
+        key: value
+        for key, value in config.get("/controller_server", {}).items()
+        if key in SPEED_CONTROLLER_PARAM_KEYS
+    }
+    params = {"/controller_server": controller}
+    if "/velocity_smoother" in config:
+        params["/velocity_smoother"] = dict(config["/velocity_smoother"])
+    return params
 
 
 def navigation_mode_controller(mode):
