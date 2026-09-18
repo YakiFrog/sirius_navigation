@@ -129,13 +129,14 @@ class ThetaIndexedMapNode(Node):
     def _generate_default_palette(self):
         steps = [0, 64, 128, 192, 255]
         reserved = [SEMANTIC_CLASSES[i]["color"] for i in sorted(SEMANTIC_CLASSES)]
+        # 予約色(0-6)と同値のキューブ色も必ずパレットへ含める。
+        # 除外すると、その色に量子化された実色（例: グレー [128,128,128]）が
+        # 最近傍探索で隣の色（ティール等）へ誤って割り当てられ、色再現が崩れる。
         colors = []
         for r in steps:
             for g in steps:
                 for b in steps:
-                    color = [r, g, b]
-                    if color not in reserved:
-                        colors.append(color)
+                    colors.append([r, g, b])
         palette = np.array(reserved + colors, dtype=np.uint8)
         # 5段量子化RGB -> パレットindex のLUT
         self.color_lut = np.zeros((5, 5, 5), dtype=np.uint8)
