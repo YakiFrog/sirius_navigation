@@ -7,14 +7,19 @@ import struct
 import json
 from sklearn.cluster import KMeans
 
-# Predefined semantic categories mapping to colors and default costmap costs
+try:
+    from sirius_navigation.semantic_costs import load_semantic_costs, costs_for
+except ImportError:  # スクリプト直接実行時
+    from semantic_costs import load_semantic_costs, costs_for
+
+# クラス名 → 代表色。コストは config/semantic_costs.yaml から読み込む。
 PREDEFINED_CATEGORIES = {
-    "wall": {"color": [0, 0, 0], "default_cost": 254},
-    "floor": {"color": [255, 255, 255], "default_cost": 0},
-    "grass": {"color": [0, 255, 0], "default_cost": 120},
-    "tactile paving": {"color": [255, 255, 0], "default_cost": 50},
-    "roadway": {"color": [0, 0, 255], "default_cost": 254},
-    "sidewalk": {"color": [128, 128, 128], "default_cost": 10}
+    "wall": {"color": [0, 0, 0]},
+    "floor": {"color": [255, 255, 255]},
+    "grass": {"color": [0, 255, 0]},
+    "tactile paving": {"color": [255, 255, 0]},
+    "roadway": {"color": [0, 0, 255]},
+    "sidewalk": {"color": [128, 128, 128]}
 }
 
 DEFAULT_DARK_THRESHOLD = 12
@@ -164,18 +169,13 @@ def main():
     # Overwrite PREDEFINED_CATEGORIES with dynamically loaded colors
     if dynamic_colors:
         for name, rgb in dynamic_colors.items():
-            cost = 100
-            if name in PREDEFINED_CATEGORIES:
-                cost = PREDEFINED_CATEGORIES[name]["default_cost"]
-            elif "grass" in name:
-                cost = 120
-            elif "tactile" in name:
-                cost = 50
-            elif "roadway" in name:
-                cost = 254
-            elif "sidewalk" in name:
-                cost = 10
-            PREDEFINED_CATEGORIES[name] = {"color": rgb, "default_cost": cost}
+            PREDEFINED_CATEGORIES[name] = {"color": rgb}
+
+    SEMANTIC_COSTS, costs_path = load_semantic_costs()
+    if costs_path:
+        print(f"Loaded semantic costs from: {costs_path}")
+    else:
+        print("Warning: semantic_costs.yaml not found; class costs default to 0.")
 
 
     print(f"Loading structural map: {pgm_file}")
@@ -379,10 +379,12 @@ def main():
             
             # If color matches close enough to a predefined class
             if best_dist < 2500:
+                cat_costs = costs_for(SEMANTIC_COSTS, best_cat)
                 labels_out[str(idx)] = {
                     "name": best_cat,
                     "color": color_rgb,
-                    "default_cost": PREDEFINED_CATEGORIES[best_cat]["default_cost"]
+                    "global_cost": cat_costs["global_cost"],
+                    "local_cost": cat_costs["local_cost"],
                 }
 
 

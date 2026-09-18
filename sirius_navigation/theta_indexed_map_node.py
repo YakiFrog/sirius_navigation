@@ -33,6 +33,8 @@ from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from sirius_navigation.semantic_costs import load_semantic_costs, costs_for
+
 # 0=unknown, 1=wall, 2=floor, 3+=semantic class + 代表色（ZEDと同一）
 SEMANTIC_CLASSES = {
     0: {"name": "unknown", "color": [127, 127, 127]},
@@ -445,7 +447,16 @@ class ThetaIndexedMapNode(Node):
             out_grid[semantic_mask] = best[semantic_mask]
         out_grid = self._fill_small_holes(out_grid)
         cv2.imwrite(path + ".pgm", out_grid[::-1, :])
-        labels = {str(idx): info for idx, info in SEMANTIC_CLASSES.items()}
+        semantic_costs, _ = load_semantic_costs()
+        labels = {}
+        for idx, info in SEMANTIC_CLASSES.items():
+            cat = costs_for(semantic_costs, info["name"])
+            labels[str(idx)] = {
+                "name": info["name"],
+                "color": info["color"],
+                "global_cost": cat["global_cost"],
+                "local_cost": cat["local_cost"],
+            }
         meta = {
             "resolution": self.res,
             "origin": self.origin,

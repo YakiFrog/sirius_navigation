@@ -20,15 +20,17 @@ from sirius_navigation.sam3_texture_fusion import (
     robust_color_residual_weights,
     weighted_texture_from_statistics,
 )
+from sirius_navigation.semantic_costs import load_semantic_costs, costs_for
 
+# クラス名 → 代表色。コストは config/semantic_costs.yaml から読み込む。
 SEMANTIC_CLASSES = {
-    0: {"name": "unknown", "color": [127, 127, 127], "default_cost": 0},
-    1: {"name": "wall", "color": [0, 0, 0], "default_cost": 254},
-    2: {"name": "floor", "color": [255, 255, 255], "default_cost": 0},
-    3: {"name": "grass", "color": [0, 255, 0], "default_cost": 120},
-    4: {"name": "tactile paving", "color": [255, 255, 0], "default_cost": 50},
-    5: {"name": "roadway", "color": [0, 0, 255], "default_cost": 254},
-    6: {"name": "sidewalk", "color": [128, 128, 128], "default_cost": 10},
+    0: {"name": "unknown", "color": [127, 127, 127]},
+    1: {"name": "wall", "color": [0, 0, 0]},
+    2: {"name": "floor", "color": [255, 255, 255]},
+    3: {"name": "grass", "color": [0, 255, 0]},
+    4: {"name": "tactile paving", "color": [255, 255, 0]},
+    5: {"name": "roadway", "color": [0, 0, 255]},
+    6: {"name": "sidewalk", "color": [128, 128, 128]},
 }
 
 
@@ -638,7 +640,16 @@ class SAM3IndexedMapNode(Node):
             path = os.path.join(os.path.expanduser('~/sirius_jazzy_ws/maps_waypoints/maps/'), path)
         
         cv2.imwrite(path + ".pgm", self.grid[::-1, :])
-        labels = {str(idx): info for idx, info in SEMANTIC_CLASSES.items()}
+        semantic_costs, _ = load_semantic_costs()
+        labels = {}
+        for idx, info in SEMANTIC_CLASSES.items():
+            cat = costs_for(semantic_costs, info["name"])
+            labels[str(idx)] = {
+                "name": info["name"],
+                "color": info["color"],
+                "global_cost": cat["global_cost"],
+                "local_cost": cat["local_cost"],
+            }
         meta = {
             "resolution": self.res,
             "origin": self.origin,
