@@ -69,10 +69,13 @@ class ThetaIndexedMapNode(Node):
         self.declare_parameter('fill_hole_m', 0.75)
         # テクスチャに使う直近観測の枚数K（移動平均）。大きいほど滑らかだがブレが累積しやすい。
         self.declare_parameter('texture_samples', 5)
-        # 直近K観測の集約方法: 'median'（既定, エッジが滲みにくい）/ 'mean' /
+        # 直近K観測の集約方法: 'median' / 'mean' /
         # 'weighted'（視点品質で重み付け: cos(入射角)/(1+r^2), 斜めボケに強い）/
-        # 'best'（最良視点=最大重みの観測を採用, ゴーストが最も少なく最もシャープ。既定）。
-        self.declare_parameter('texture_aggregate', 'best')
+        # 'best'（最良視点=最大重みの観測を採用, 最もシャープ）/
+        # 'soft'（直前K観測を視点重み w^γ で重み付き平均。γ大でbest寄り。段差を平滑化）。
+        self.declare_parameter('texture_aggregate', 'soft')
+        # 'soft' の重み強調指数γ。1=weighted（滑らか）, 大きいほど最良観測寄り（シャープ）。
+        self.declare_parameter('texture_soft_gamma', 6.0)
         # 重み計算に使うセンサ高さ[m]（カメラ高さ）。camera_position zと一致させる。
         self.declare_parameter('sensor_height', 1.135)
 
@@ -365,7 +368,8 @@ class ThetaIndexedMapNode(Node):
         """直近K観測(RGB)をセルごとに集約する。
         median: エッジ/二重像に強い / mean: 単純平均 /
         weighted: 視点品質 w=cos(入射角)/(1+r^2) の重み付き平均（斜めボケに強い）/
-        best: 最良視点（最大重み）の色を採用（ゴースト最小）。"""
+        best: 最良視点（最大重み）の色を採用（ゴースト最小）/
+        soft: 直近K観測を w^γ で重み付き平均（γ大でbest寄り、選択の段差を平滑化）。"""
         out = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         mode = str(self.get_parameter('texture_aggregate').value).lower()
         if mode == 'best':
@@ -378,6 +382,23 @@ class ThetaIndexedMapNode(Node):
                 out[observed] = np.clip(
                     np.round(self.texture_wcolor_sum[observed] / self.texture_weight_sum[observed, None]),
                     0, 255).astype(np.uint8)
+            return out
+        if mode == 'soft':
+            gamma = max(1.0, float(self.get_parameter('texture_soft_gamma').value))
+            n = np.minimum(self.texture_count, self.texture_k)
+            observed = n > 0
+            if not np.any(observed):
+                return out
+            num = np.zeros((self.height, self.width, 3), dtype=np.float32)
+            den = np.zeros((self.height, self.width), dtype=np.float32)
+            slot_axis = np.arange(self.texture_k)
+            for k in range(self.texture_k):
+                w = np.where(slot_axis[k] < n, self.texture_weight_ring[:, :, k], 0.0).astype(np.float32)
+                wk = w ** gamma
+                num += wk[:, :, None] * self.texture_ring[:, :, k].astype(np.float32)
+                den += wk
+            safe = np.maximum(den, 1e-12)
+            out[observed] = np.clip(np.round(num[observed] / safe[observed, None]), 0, 255).astype(np.uint8)
             return out
         count = self.texture_count
         observed = count > 0

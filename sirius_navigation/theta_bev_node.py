@@ -62,7 +62,7 @@ class ThetaBevNode(Node):
         self.declare_parameter('aa_blur_sigma', 0.0)
         # 地面投影の同心円状ムラ(ビネット)補正。view=斜め視(入射角)補正の強さ, lens=レンズ
         # 周辺減光(cos^4θ)補正の強さ, gain_max=ゲイン上限クリップ。0で無補正。
-        self.declare_parameter('vignette_view_strength', 1.0)
+        self.declare_parameter('vignette_view_strength', 0.0)
         self.declare_parameter('vignette_lens_strength', 0.0)
         self.declare_parameter('vignette_gain_max', 2.5)
 
