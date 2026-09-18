@@ -151,6 +151,40 @@ NAVIGATION_MODE_CONFIGS = {
         # original static-map route while the wait controller is selected.
         "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
     },
+    # wait_active: 待機優先モードの高速版。WaitPath(RPP)のまま最高速を1.2m/sへ
+    #   引き上げる。安全側として加減速は控えめ(1.2)、旋回は1.0rad/sで頭打ち、
+    #   CostCriticをwait_normal(10)より高め(14)にして障害物回避を優先する。
+    #   先読み距離はnormal相当(1.2*45*0.1=5.4m)を維持。
+    "wait_active": {
+        "/controller_server": {
+            "FollowPath.vx_max": 1.20,
+            "FollowPath.time_steps": 45,
+            "FollowPath.vx_min": -0.60,
+            "FollowPath.wz_max": 1.00,
+            "FollowPath.vx_std": 0.30,
+            "FollowPath.wz_std": 0.35,
+            "FollowPath.ax_max": 1.20,
+            "FollowPath.ax_min": -1.20,
+            "FollowPath.az_max": 1.80,
+            "FollowPath.CostCritic.cost_weight": 14.0,
+            "FollowPath.PathAlignCritic.cost_weight": 8.0,
+            "FollowPath.PathFollowCritic.cost_weight": 8.0,
+            "FollowPath.PathAngleCritic.cost_weight": 2.0,
+            "FollowPath.TwirlingCritic.cost_weight": 3.0,
+            "FollowPath.PreferForwardCritic.cost_weight": 15.0,
+            "FollowPath.GoalCritic.cost_weight": 3.0,
+            "FollowPath.GoalAngleCritic.cost_weight": 1.0,
+            "WaitPath.desired_linear_vel": 1.20,
+        },
+        "/velocity_smoother": {
+            "max_velocity": [1.20, 0.0, 1.00],
+            "min_velocity": [-0.60, 0.0, -1.00],
+            "max_accel": [1.20, 0.0, 1.80],
+            "max_decel": [-1.20, 0.0, -1.80],
+        },
+        # 待機モード同様、再計画では迂回せず元のパスを維持して停止待機する。
+        "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
+    },
     # strict系(6/7/8): 「回避しつつパス追従を重視」する設計。
     #   ・global obstacle_layer を False->True: 再計画で障害物を迂回させる。
     #     （旧設定はパスが障害物を貫通し、全軌道衝突→NoValidControl→
@@ -252,6 +286,7 @@ NAVIGATION_MODE_INFO = {
     "safe": {"label": "安全", "speed": 0.40, "strict": False},
     "slow": {"label": "超低速", "speed": 0.20, "strict": False},
     "wait_normal": {"label": "待機優先", "speed": 0.90, "strict": False},
+    "wait_active": {"label": "待機優先・高速", "speed": 1.20, "strict": False},
     "strict_normal": {"label": "パス厳守・通常", "speed": 0.90, "strict": True},
     "strict_safe": {"label": "パス厳守・安全", "speed": 0.40, "strict": True},
     "strict_slow": {"label": "パス厳守・超低速", "speed": 0.20, "strict": True},
@@ -326,7 +361,7 @@ def navigation_mode_controller(mode):
     canonical = normalize_navigation_mode(mode)
     if canonical is None:
         raise ValueError(f"unknown navigation mode: {mode!r}")
-    return "WaitPath" if canonical == "wait_normal" else "FollowPath"
+    return "WaitPath" if canonical in ("wait_normal", "wait_active") else "FollowPath"
 
 
 def normalize_navigation_mode(mode):

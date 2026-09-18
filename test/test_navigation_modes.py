@@ -57,6 +57,16 @@ def test_wait_normal_uses_normal_speed_and_wait_controller():
     assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is False
 
 
+def test_wait_active_uses_wait_controller_at_higher_speed():
+    assert navigation_mode_controller("wait_active") == "WaitPath"
+
+    config = NAVIGATION_MODE_CONFIGS["wait_active"]
+    assert config["/controller_server"]["WaitPath.desired_linear_vel"] == 1.20
+    assert config["/velocity_smoother"]["max_velocity"][0] == 1.20
+    assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is False
+    assert "1.2" in navigation_mode_confirmation("wait_active")
+
+
 def test_complete_mode_application_updates_state_only_after_all_services_succeed():
     node = Mock()
     node.lock = threading.Lock()
