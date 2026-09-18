@@ -5,7 +5,7 @@ ZEDの sam3_indexed_map_node と同じ「代表色パレット」方式:
   - RTAB-Map の /rtabmap/grid_map を構造として格子を作り、wall/floor を反映
   - /theta/ground_cloud（色付き地面点群）を map フレームへ変換し、
     RGB を 5段量子化した代表色パレットの index として格子へ描画
-  - 実RGBは重み付き平均で .texture.png に蓄積
+  - 実RGBは直近K枚の平均で .texture.png に蓄積
 
 保存（/theta/save_indexed_map にパスを publish）:
   <path>.colored.pgm  … パレットindex (class_id)
@@ -71,23 +71,12 @@ class ThetaIndexedMapNode(Node):
         self.declare_parameter('fill_hole_m', 0.75)
         # テクスチャに使う直近観測の枚数K（移動平均）。大きいほど滑らかだがブレが累積しやすい。
         self.declare_parameter('texture_samples', 5)
-        # 直近K観測の集約方法: 'median' / 'mean' /
-        # 'weighted'（視点品質で重み付け: cos(入射角)/(1+r^2), 斜めボケに強い）/
-        # 'best'（最良視点=最大重みの観測を採用, 最もシャープ）/
-        # 'soft'（直前K観測を視点重み w^γ で重み付き平均。γ大でbest寄り。段差を平滑化）。
-        self.declare_parameter('texture_aggregate', 'soft')
-        # 'soft' の重み強調指数γ。1=weighted（滑らか）, 大きいほど最良観測寄り（シャープ）。
-        self.declare_parameter('texture_soft_gamma', 6.0)
-        # 重み計算に使うセンサ高さ[m]（カメラ高さ）。camera_position zと一致させる。
-        self.declare_parameter('sensor_height', 1.135)
 
         self.res = self.get_parameter('grid_resolution').value
         self.map_frame = self.get_parameter('map_frame').value
         self.min_cloud_interval = max(0.0, float(self.get_parameter('min_cloud_interval_sec').value))
         self.fill_hole_m = max(0.0, float(self.get_parameter('fill_hole_m').value))
         self.texture_k = max(1, int(self.get_parameter('texture_samples').value))
-        self.texture_aggregate = str(self.get_parameter('texture_aggregate').value).lower()
-        self.sensor_height = max(1e-3, float(self.get_parameter('sensor_height').value))
 
         self.grid = None
         self.struct_grid = None
@@ -98,11 +87,6 @@ class ThetaIndexedMapNode(Node):
         self.texture_ring = None   # (H,W,K,3) uint8 直近K枚
         self.texture_sum = None    # (H,W,3) 直近K枚の合計
         self.texture_count = None  # (H,W) 総観測数
-        self.texture_weight_ring = None  # (H,W,K) 直近K枚の視点重み
-        self.texture_weight_sum = None   # (H,W) 直近K枚の重み合計
-        self.texture_wcolor_sum = None   # (H,W,3) 直近K枚の weighted color 合計
-        self.best_weight = None          # (H,W) 最良視点の重み
-        self.best_rgb = None             # (H,W,3) 最良視点の色
         self.semantic_votes = None
         self.dirty = False
         self.last_cloud_time = 0.0
@@ -159,24 +143,17 @@ class ThetaIndexedMapNode(Node):
         self.texture_ring = np.zeros((self.height, self.width, self.texture_k, 3), dtype=np.uint8)
         self.texture_sum = np.zeros((self.height, self.width, 3), dtype=np.float64)
         self.texture_count = np.zeros((self.height, self.width), dtype=np.int32)
-        self.texture_weight_ring = np.zeros((self.height, self.width, self.texture_k), dtype=np.float32)
-        self.texture_weight_sum = np.zeros((self.height, self.width), dtype=np.float64)
-        self.texture_wcolor_sum = np.zeros((self.height, self.width, 3), dtype=np.float64)
-        self.best_weight = np.zeros((self.height, self.width), dtype=np.float64)
-        self.best_rgb = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         self.semantic_votes = np.zeros((self.height, self.width, MAX_CLASS_ID + 1), dtype=np.float32)
 
     def _expand_canvas(self, ox, oy, width, height):
         """キャンバスを拡大（既存の描画データを保持）。縮小はしない。"""
         old = (self.grid, self.texture_ring, self.texture_sum, self.texture_count, self.semantic_votes,
-               self.texture_weight_ring, self.texture_weight_sum, self.texture_wcolor_sum,
-               self.best_weight, self.best_rgb,
                self.origin[0], self.origin[1], self.width, self.height)
-        dx = int(round((old[10] - ox) / self.res))
-        dy = int(round((old[11] - oy) / self.res))
+        dx = int(round((old[5] - ox) / self.res))
+        dy = int(round((old[6] - oy) / self.res))
         self._alloc_canvas(ox, oy, width, height, self.res)
         sx0, sy0 = max(0, -dx), max(0, -dy)
-        sx1, sy1 = min(old[12], self.width - dx), min(old[13], self.height - dy)
+        sx1, sy1 = min(old[7], self.width - dx), min(old[8], self.height - dy)
         ddx0, ddy0 = max(0, dx), max(0, dy)
         if sx1 > sx0 and sy1 > sy0:
             src = np.s_[sy0:sy1, sx0:sx1]
@@ -186,11 +163,6 @@ class ThetaIndexedMapNode(Node):
             self.texture_sum[dst] = old[2][src]
             self.texture_count[dst] = old[3][src]
             self.semantic_votes[dst] = old[4][src]
-            self.texture_weight_ring[dst] = old[5][src]
-            self.texture_weight_sum[dst] = old[6][src]
-            self.texture_wcolor_sum[dst] = old[7][src]
-            self.best_weight[dst] = old[8][src]
-            self.best_rgb[dst] = old[9][src]
 
     def _grid_callback(self, msg):
         # 構造（壁/フリー）は別配列に保持するだけにし、描画キャンバスには触れない。
@@ -274,8 +246,7 @@ class ThetaIndexedMapNode(Node):
         gx = ((mapped[:, 0] - self.origin[0]) / self.res).astype(np.int32)
         gy = ((mapped[:, 1] - self.origin[1]) / self.res).astype(np.int32)
         in_bounds = (gx >= 0) & (gx < self.width) & (gy >= 0) & (gy < self.height)
-        gx, gy, data, xr, yr = (gx[in_bounds], gy[in_bounds], data[in_bounds],
-                                x[in_bounds], y[in_bounds])
+        gx, gy, data = gx[in_bounds], gy[in_bounds], data[in_bounds]
         if len(gx) == 0:
             return
         color_off = offsets.get('rgb', offsets.get('rgba'))
@@ -292,39 +263,20 @@ class ThetaIndexedMapNode(Node):
         # 代表色パレットで路面を描く（wallは保護）。セマンティックは別途フレーム間投票で集約。
         not_wall = self.grid[gy, gx] != 1
         self.grid[gy[not_wall], gx[not_wall]] = indices[not_wall]
-        # 視点品質の重み: cos(入射角)/(1+r^2)。近く・正対した観測ほど高重み（斜めボケに強い）。
-        h2 = self.sensor_height ** 2
-        r2 = xr.astype(np.float64) ** 2 + yr.astype(np.float64) ** 2
-        weight = (self.sensor_height / np.sqrt(r2 + h2)) / (1.0 + r2)
-        # 直近K枚の移動平均テクスチャ。同一フレーム内の複数点はセルごとに重み付き平均し、
+        # 直近K枚の移動平均テクスチャ。同一フレーム内の複数点はセルごとに平均し、
         # 1セル=1観測としてリングへ入れる（点数で重複加算して白飛びするのを防ぐ）。
         flat = gy.astype(np.int64) * self.width + gx
         uniq, inverse = np.unique(flat, return_inverse=True)
         frame_counts = np.bincount(inverse)
-        rgb_f = rgb_u8.astype(np.float64)
-        frame_wcolor = np.zeros((uniq.size, 3), dtype=np.float64)
-        frame_wnorm = np.zeros(uniq.size, dtype=np.float64)
-        np.add.at(frame_wcolor, inverse, weight[:, None] * rgb_f)
-        np.add.at(frame_wnorm, inverse, weight)
-        np.maximum(frame_wnorm, 1e-12, out=frame_wnorm)
-        cell_rgb = np.clip(np.round(frame_wcolor / frame_wnorm[:, None]), 0, 255).astype(np.uint8)
-        cell_w = frame_wnorm / np.maximum(frame_counts, 1)
+        frame_sums = np.zeros((uniq.size, 3), dtype=np.float64)
+        np.add.at(frame_sums, inverse, rgb_u8.astype(np.float64))
+        cell_rgb = (frame_sums / frame_counts[:, None]).astype(np.uint8)
         uy, ux = np.divmod(uniq, self.width)
         np.add.at(self.texture_count, (uy, ux), 1)
         slot = (self.texture_count[uy, ux] - 1) % self.texture_k
         previous = self.texture_ring[uy, ux, slot].astype(np.float64)
         self.texture_ring[uy, ux, slot] = cell_rgb
         np.add.at(self.texture_sum, (uy, ux), cell_rgb.astype(np.float64) - previous)
-        prev_w = self.texture_weight_ring[uy, ux, slot].astype(np.float64)
-        self.texture_weight_ring[uy, ux, slot] = cell_w
-        np.add.at(self.texture_weight_sum, (uy, ux), cell_w - prev_w)
-        np.add.at(self.texture_wcolor_sum, (uy, ux),
-                  cell_w[:, None] * cell_rgb.astype(np.float64) - prev_w[:, None] * previous)
-        # 最良視点（最大重み）の色を保持（winner-take-all）
-        better = cell_w > self.best_weight[uy, ux]
-        if np.any(better):
-            self.best_weight[uy[better], ux[better]] = cell_w[better]
-            self.best_rgb[uy[better], ux[better]] = cell_rgb[better]
         # セマンティックはフレーム間でクラスIDの投票（予約ID>=3）
         if 'semantic_id' in offsets:
             sid = data[:, offsets['semantic_id']].astype(np.int32)
@@ -366,64 +318,6 @@ class ThetaIndexedMapNode(Node):
         filled = grid.copy()
         filled[hole] = nearest[hole]
         return filled
-
-    def _aggregate_texture(self):
-        """直近K観測(RGB)をセルごとに集約する。
-        median: エッジ/二重像に強い / mean: 単純平均 /
-        weighted: 視点品質 w=cos(入射角)/(1+r^2) の重み付き平均（斜めボケに強い）/
-        best: 最良視点（最大重み）の色を採用（ゴースト最小）/
-        soft: 直近K観測を w^γ で重み付き平均（γ大でbest寄り、選択の段差を平滑化）。"""
-        out = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        mode = str(self.get_parameter('texture_aggregate').value).lower()
-        if mode == 'best':
-            observed = self.best_weight > 0.0
-            out[observed] = self.best_rgb[observed]
-            return out
-        if mode == 'weighted':
-            observed = self.texture_weight_sum > 1e-9
-            if np.any(observed):
-                out[observed] = np.clip(
-                    np.round(self.texture_wcolor_sum[observed] / self.texture_weight_sum[observed, None]),
-                    0, 255).astype(np.uint8)
-            return out
-        if mode == 'soft':
-            gamma = max(1.0, float(self.get_parameter('texture_soft_gamma').value))
-            n = np.minimum(self.texture_count, self.texture_k)
-            observed = n > 0
-            if not np.any(observed):
-                return out
-            num = np.zeros((self.height, self.width, 3), dtype=np.float32)
-            den = np.zeros((self.height, self.width), dtype=np.float32)
-            slot_axis = np.arange(self.texture_k)
-            for k in range(self.texture_k):
-                w = np.where(slot_axis[k] < n, self.texture_weight_ring[:, :, k], 0.0).astype(np.float32)
-                wk = w ** gamma
-                num += wk[:, :, None] * self.texture_ring[:, :, k].astype(np.float32)
-                den += wk
-            safe = np.maximum(den, 1e-12)
-            out[observed] = np.clip(np.round(num[observed] / safe[observed, None]), 0, 255).astype(np.uint8)
-            return out
-        count = self.texture_count
-        observed = count > 0
-        if not np.any(observed):
-            return out
-        n = np.minimum(count, self.texture_k)
-        if mode != 'median':
-            denominator = n.astype(np.float64)
-            out[observed] = np.clip(
-                np.round(self.texture_sum[observed] / denominator[observed, None]), 0, 255).astype(np.uint8)
-            return out
-        # 下側中央値: 無効スロットを +inf 相当(=1000)にして昇順ソートすると、
-        # 有効な n 個が先頭に並ぶので index (n-1)//2 が下側中央値になる。
-        slot_axis = np.arange(self.texture_k)
-        valid = slot_axis[None, None, :] < n[:, :, None]
-        vals = np.where(valid[:, :, :, None], self.texture_ring.astype(np.int16), np.int16(1000))
-        vals.sort(axis=2)
-        med_index = np.clip((n - 1) // 2, 0, self.texture_k - 1)
-        rows, cols = np.indices((self.height, self.width))
-        median_rgb = vals[rows, cols, med_index]
-        out[observed] = np.clip(median_rgb[observed], 0, 255).astype(np.uint8)
-        return out
 
     def _save_callback(self, msg):
         self.get_logger().info(
@@ -468,10 +362,13 @@ class ThetaIndexedMapNode(Node):
         }
         with open(path + ".json", 'w') as stream:
             json.dump(meta, stream, indent=4)
-        # ロバストテクスチャ（texture_aggregate=median なら直近Kの下側中央値）
+        # ロバストテクスチャ（3件超のセルは上下1件ずつ除外したトリム平均、それ以外は平均）
         observed = self.texture_count > 0
         if np.any(observed):
-            texture_rgb = self._aggregate_texture()
+            texture_rgb = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            denominator = np.minimum(self.texture_count, self.texture_k).astype(np.float64)
+            texture_rgb[observed] = np.clip(
+                np.round(self.texture_sum[observed] / denominator[observed, None]), 0, 255).astype(np.uint8)
             texture_bgra = np.dstack([texture_rgb[:, :, ::-1], (observed * 255).astype(np.uint8)])
             texture_base = path[:-len('.colored')] if path.endswith('.colored') else path
             cv2.imwrite(texture_base + ".texture.png", texture_bgra[::-1, :])
