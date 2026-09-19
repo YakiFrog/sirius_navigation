@@ -52,8 +52,13 @@ def test_wait_normal_uses_normal_speed_and_wait_controller():
     assert navigation_mode_controller("normal") == "FollowPath"
 
     config = NAVIGATION_MODE_CONFIGS["wait_normal"]
-    assert config["/controller_server"]["WaitPath.desired_linear_vel"] == 0.90
-    assert config["/velocity_smoother"]["max_velocity"][0] == 0.90
+    assert config["/controller_server"]["WaitPath.desired_linear_vel"] == 0.60
+    assert config["/velocity_smoother"]["max_velocity"][0] == 0.60
+    assert config["/velocity_smoother"]["max_velocity"][2] == 0.60
+    assert config["/controller_server"]["WaitPath.min_lookahead_dist"] == 1.00
+    assert config["/controller_server"]["WaitPath.regulated_linear_scaling_min_radius"] == 1.50
+    assert config["/controller_server"]["WaitPath.cost_scaling_dist"] == 1.00
+    assert config["/controller_server"]["WaitPath.max_allowed_time_to_collision_up_to_carrot"] == 3.0
     assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is False
 
 
@@ -61,10 +66,15 @@ def test_wait_active_uses_wait_controller_at_higher_speed():
     assert navigation_mode_controller("wait_active") == "WaitPath"
 
     config = NAVIGATION_MODE_CONFIGS["wait_active"]
-    assert config["/controller_server"]["WaitPath.desired_linear_vel"] == 1.20
-    assert config["/velocity_smoother"]["max_velocity"][0] == 1.20
+    assert config["/controller_server"]["WaitPath.desired_linear_vel"] == 0.72
+    assert config["/velocity_smoother"]["max_velocity"][0] == 0.72
+    assert config["/velocity_smoother"]["max_velocity"][2] == 0.60
+    assert config["/controller_server"]["WaitPath.min_lookahead_dist"] == 1.00
+    assert config["/controller_server"]["WaitPath.regulated_linear_scaling_min_radius"] == 1.50
+    assert config["/controller_server"]["WaitPath.cost_scaling_dist"] == 1.00
+    assert config["/controller_server"]["WaitPath.max_allowed_time_to_collision_up_to_carrot"] == 3.0
     assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is False
-    assert "1.2" in navigation_mode_confirmation("wait_active")
+    assert "0.7" in navigation_mode_confirmation("wait_active")
 
 
 def test_complete_mode_application_updates_state_only_after_all_services_succeed():

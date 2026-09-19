@@ -119,17 +119,26 @@ NAVIGATION_MODE_CONFIGS = {
         },
         "/global_costmap/global_costmap": {"obstacle_layer.enabled": True},
     },
+    # wait_normal: 待機優先。巡航速度は0.60m/s(実測normal巡航相当)。
+    #   RPPはパス追従中の角速度上限を持たない(omega = v * 曲率)ため、低速でも
+    #   先読み距離Lが小さいと曲率 k=2y/L^2 が増幅し角速度が激しくなる。よって
+    #   L(min_lookahead含む)を大きめに固定する。
+    #   曲率減速の式 v = raw * r / R より、カーブ中は omega = raw / R 一定になる。
+    #   raw=0.60, R=1.50 で omega=0.40 となり velocity_smoother の角速度上限
+    #   0.60rad/sを常に下回る。
+    #   障害物にはもっと手前で減速・停止させるため cost_scaling_dist と
+    #   max_allowed_time_to_collision_up_to_carrot を base より強める。
     "wait_normal": {
         "/controller_server": {
-            "FollowPath.vx_max": 0.90,
-            "FollowPath.time_steps": 60,
+            "FollowPath.vx_max": 0.60,
+            "FollowPath.time_steps": 82,  # 0.60*82*0.1=4.92m 先読み維持(RPP未使用)
             "FollowPath.vx_min": -0.60,
-            "FollowPath.wz_max": 0.90,
-            "FollowPath.vx_std": 0.25,
-            "FollowPath.wz_std": 0.30,
-            "FollowPath.ax_max": 0.90,
-            "FollowPath.ax_min": -0.90,
-            "FollowPath.az_max": 1.50,
+            "FollowPath.wz_max": 0.60,
+            "FollowPath.vx_std": 0.22,
+            "FollowPath.wz_std": 0.27,
+            "FollowPath.ax_max": 0.60,
+            "FollowPath.ax_min": -0.60,
+            "FollowPath.az_max": 1.00,
             "FollowPath.CostCritic.cost_weight": 10.0,
             "FollowPath.PathAlignCritic.cost_weight": 8.0,
             "FollowPath.PathFollowCritic.cost_weight": 8.0,
@@ -138,35 +147,46 @@ NAVIGATION_MODE_CONFIGS = {
             "FollowPath.PreferForwardCritic.cost_weight": 15.0,
             "FollowPath.GoalCritic.cost_weight": 3.0,
             "FollowPath.GoalAngleCritic.cost_weight": 1.0,
-            "WaitPath.desired_linear_vel": 0.90,
+            "WaitPath.desired_linear_vel": 0.60,
+            # 角速度の激しさ対策: 先読みを短くしすぎない
+            "WaitPath.lookahead_dist": 1.20,
+            "WaitPath.min_lookahead_dist": 1.00,
+            "WaitPath.max_lookahead_dist": 2.00,
+            "WaitPath.lookahead_time": 1.20,
+            # カーブでは v=raw*r/R で減速し omega=raw/R=0.40 に抑える
+            "WaitPath.regulated_linear_scaling_min_radius": 1.50,
+            "WaitPath.regulated_linear_scaling_min_speed": 0.10,
+            # 障害物手前で早めに減速・停止 (base: 0.70 / 2.0)
+            "WaitPath.cost_scaling_dist": 1.00,
+            "WaitPath.max_allowed_time_to_collision_up_to_carrot": 3.0,
         },
         "/velocity_smoother": {
-            "max_velocity": [0.90, 0.0, 0.90],
-            "min_velocity": [-0.90, 0.0, -0.90],
-            "max_accel": [0.90, 0.0, 1.50],
-            "max_decel": [-0.90, 0.0, -1.50],
+            "max_velocity": [0.60, 0.0, 0.60],  # 角速度上限0.60rad/sで激しい旋回を抑制
+            "min_velocity": [-0.60, 0.0, -0.60],
+            "max_accel": [0.60, 0.0, 1.00],
+            "max_decel": [-0.60, 0.0, -1.00],
         },
         # The local costmap remains enabled for collision detection. Only the
         # global dynamic-obstacle layer is disabled so replanning keeps the
         # original static-map route while the wait controller is selected.
         "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
     },
-    # wait_active: 待機優先モードの高速版。WaitPath(RPP)のまま最高速を1.2m/sへ
-    #   引き上げる。安全側として加減速は控えめ(1.2)、旋回は1.0rad/sで頭打ち、
-    #   CostCriticをwait_normal(10)より高め(14)にして障害物回避を優先する。
-    #   先読み距離はnormal相当(1.2*45*0.1=5.4m)を維持。
+    # wait_active: 待機優先の速度違い。巡航速度はwait_normal(0.60)の1.2倍=0.72m/s。
+    #   角速度の激しさ対策(先読み固定・ωクランプ)はwait_normalと同じ方針。
+    #   raw=0.72, R=1.50 で omega=raw/R=0.48 となり角速度上限0.60rad/sに余裕を持つ。
+    #   障害物手前の減速・停止もwait_normalと同じく強める。
     "wait_active": {
         "/controller_server": {
-            "FollowPath.vx_max": 1.20,
-            "FollowPath.time_steps": 45,
-            "FollowPath.vx_min": -0.60,
-            "FollowPath.wz_max": 1.00,
-            "FollowPath.vx_std": 0.30,
-            "FollowPath.wz_std": 0.35,
-            "FollowPath.ax_max": 1.20,
-            "FollowPath.ax_min": -1.20,
-            "FollowPath.az_max": 1.80,
-            "FollowPath.CostCritic.cost_weight": 14.0,
+            "FollowPath.vx_max": 0.72,
+            "FollowPath.time_steps": 68,  # 0.72*68*0.1=4.90m 先読み維持(RPP未使用)
+            "FollowPath.vx_min": -0.66,
+            "FollowPath.wz_max": 0.60,
+            "FollowPath.vx_std": 0.25,
+            "FollowPath.wz_std": 0.30,
+            "FollowPath.ax_max": 0.72,
+            "FollowPath.ax_min": -0.72,
+            "FollowPath.az_max": 1.20,
+            "FollowPath.CostCritic.cost_weight": 10.0,
             "FollowPath.PathAlignCritic.cost_weight": 8.0,
             "FollowPath.PathFollowCritic.cost_weight": 8.0,
             "FollowPath.PathAngleCritic.cost_weight": 2.0,
@@ -174,13 +194,24 @@ NAVIGATION_MODE_CONFIGS = {
             "FollowPath.PreferForwardCritic.cost_weight": 15.0,
             "FollowPath.GoalCritic.cost_weight": 3.0,
             "FollowPath.GoalAngleCritic.cost_weight": 1.0,
-            "WaitPath.desired_linear_vel": 1.20,
+            "WaitPath.desired_linear_vel": 0.72,
+            # 角速度の激しさ対策: 先読みを短くしすぎない
+            "WaitPath.lookahead_dist": 1.20,
+            "WaitPath.min_lookahead_dist": 1.00,
+            "WaitPath.max_lookahead_dist": 2.00,
+            "WaitPath.lookahead_time": 1.20,
+            # カーブでは v=raw*r/R で減速し omega=raw/R=0.48 に抑える
+            "WaitPath.regulated_linear_scaling_min_radius": 1.50,
+            "WaitPath.regulated_linear_scaling_min_speed": 0.10,
+            # 障害物手前で早めに減速・停止 (base: 0.70 / 2.0)
+            "WaitPath.cost_scaling_dist": 1.00,
+            "WaitPath.max_allowed_time_to_collision_up_to_carrot": 3.0,
         },
         "/velocity_smoother": {
-            "max_velocity": [1.20, 0.0, 1.00],
-            "min_velocity": [-0.60, 0.0, -1.00],
-            "max_accel": [1.20, 0.0, 1.80],
-            "max_decel": [-1.20, 0.0, -1.80],
+            "max_velocity": [0.72, 0.0, 0.60],  # 角速度上限0.60rad/sで激しい旋回を抑制
+            "min_velocity": [-0.66, 0.0, -0.60],
+            "max_accel": [0.72, 0.0, 1.00],
+            "max_decel": [-0.72, 0.0, -1.00],
         },
         # 待機モード同様、再計画では迂回せず元のパスを維持して停止待機する。
         "/global_costmap/global_costmap": {"obstacle_layer.enabled": False},
@@ -285,8 +316,8 @@ NAVIGATION_MODE_INFO = {
     "normal_active": {"label": "通常・探索強化", "speed": 1.00, "strict": False},
     "safe": {"label": "安全", "speed": 0.40, "strict": False},
     "slow": {"label": "超低速", "speed": 0.20, "strict": False},
-    "wait_normal": {"label": "待機優先", "speed": 0.90, "strict": False},
-    "wait_active": {"label": "待機優先・高速", "speed": 1.20, "strict": False},
+    "wait_normal": {"label": "待機優先", "speed": 0.60, "strict": False},
+    "wait_active": {"label": "待機優先・高速", "speed": 0.72, "strict": False},
     "strict_normal": {"label": "パス厳守・通常", "speed": 0.90, "strict": True},
     "strict_safe": {"label": "パス厳守・安全", "speed": 0.40, "strict": True},
     "strict_slow": {"label": "パス厳守・超低速", "speed": 0.20, "strict": True},
