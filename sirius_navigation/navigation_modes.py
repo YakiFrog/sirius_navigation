@@ -159,6 +159,15 @@ NAVIGATION_MODE_CONFIGS = {
             # 障害物手前で早めに減速・停止 (base: 0.70 / 2.0)
             "WaitPath.cost_scaling_dist": 1.00,
             "WaitPath.max_allowed_time_to_collision_up_to_carrot": 3.0,
+            # パスが背後にあるときもその場旋回して向き直れるようにする。
+            # use_rotate_to_heading=falseだと shouldRotateToPath が常にfalseとなり、
+            # 背後パスでは曲率≈0で旋回せず前進してしまう(旋回しない問題の原因)。
+            # 障害物が正面にある場合は angle_to_path が小さく旋回条件を満たさず、
+            # 従来どおり停止・待機する。旋回時に壁が干渉すれば isCollisionImminent が
+            # NoValidControl を返し、BTが待機・再試行する(安全側)。
+            "WaitPath.use_rotate_to_heading": True,
+            "WaitPath.rotate_to_heading_angular_vel": 0.60,
+            "WaitPath.rotate_to_heading_min_angle": 0.785,
         },
         "/velocity_smoother": {
             "max_velocity": [0.60, 0.0, 0.60],  # 角速度上限0.60rad/sで激しい旋回を抑制
@@ -206,6 +215,10 @@ NAVIGATION_MODE_CONFIGS = {
             # 障害物手前で早めに減速・停止 (base: 0.70 / 2.0)
             "WaitPath.cost_scaling_dist": 1.00,
             "WaitPath.max_allowed_time_to_collision_up_to_carrot": 3.0,
+            # 背後パスでもその場旋回できるようwait_normalと同じく有効化する。
+            "WaitPath.use_rotate_to_heading": True,
+            "WaitPath.rotate_to_heading_angular_vel": 0.60,
+            "WaitPath.rotate_to_heading_min_angle": 0.785,
         },
         "/velocity_smoother": {
             "max_velocity": [0.72, 0.0, 0.60],  # 角速度上限0.60rad/sで激しい旋回を抑制

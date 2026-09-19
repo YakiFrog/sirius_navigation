@@ -59,6 +59,8 @@ def test_wait_normal_uses_normal_speed_and_wait_controller():
     assert config["/controller_server"]["WaitPath.regulated_linear_scaling_min_radius"] == 1.50
     assert config["/controller_server"]["WaitPath.cost_scaling_dist"] == 1.00
     assert config["/controller_server"]["WaitPath.max_allowed_time_to_collision_up_to_carrot"] == 3.0
+    assert config["/controller_server"]["WaitPath.use_rotate_to_heading"] is True
+    assert config["/controller_server"]["WaitPath.rotate_to_heading_angular_vel"] == 0.60
     assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is False
 
 
@@ -73,6 +75,8 @@ def test_wait_active_uses_wait_controller_at_higher_speed():
     assert config["/controller_server"]["WaitPath.regulated_linear_scaling_min_radius"] == 1.50
     assert config["/controller_server"]["WaitPath.cost_scaling_dist"] == 1.00
     assert config["/controller_server"]["WaitPath.max_allowed_time_to_collision_up_to_carrot"] == 3.0
+    assert config["/controller_server"]["WaitPath.use_rotate_to_heading"] is True
+    assert config["/controller_server"]["WaitPath.rotate_to_heading_angular_vel"] == 0.60
     assert config["/global_costmap/global_costmap"]["obstacle_layer.enabled"] is False
     assert "0.7" in navigation_mode_confirmation("wait_active")
 
