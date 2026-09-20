@@ -400,9 +400,10 @@ class Nav2GoalClient(Node):
         
         # 共分散を設定（初期位置の不確かさ）
         # 対角成分: [x, y, z, roll, pitch, yaw] の分散
-        initial_pose_msg.pose.covariance[0] = 0.25   # x の分散 (0.5m)^2
-        initial_pose_msg.pose.covariance[7] = 0.25   # y の分散 (0.5m)^2
-        initial_pose_msg.pose.covariance[35] = 0.07  # yaw の分散 (~0.26rad ≈ 15度)^2
+        # 指定位置から大きく飛ばないよう小さめに設定（σ≈5cm, yaw≈0.3°）
+        initial_pose_msg.pose.covariance[0] = 0.0025   # x の分散 (0.05m)^2
+        initial_pose_msg.pose.covariance[7] = 0.0025   # y の分散 (0.05m)^2
+        initial_pose_msg.pose.covariance[35] = 0.00003  # yaw の分散 (~0.0055rad ≈ 0.3度)^2
         
         self.initial_pose_publisher.publish(initial_pose_msg)
         self.get_logger().info(
