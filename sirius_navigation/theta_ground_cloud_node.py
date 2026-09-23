@@ -59,11 +59,19 @@ class ThetaGroundCloudNode(Node):
         # semantic待ちをした「色+semantic付き」点群のトピック（空文字で無効）。
         # output_topic は semantic待ちせず即配信する（RTAB等の遅延敏感な消費者向け）。
         self.declare_parameter('semantic_cloud_topic', '/theta/ground_cloud_semantic')
+        # 観測品質の重み（入射角cosのべき乗）。地面点に weight(float32) を付与し、
+        # 地図側(theta_indexed_map_node)が近距離・斜め視の品質差を重み付けできるようにする。
+        # w = (h / sqrt(ρ² + h²)) ** quality_power  （ρ=機体からの水平距離, h=カメラ高）
+        self.declare_parameter('quality_weight_enable', True)
+        self.declare_parameter('quality_power', 2.0)
+        # 0より大きいと weight < floor の点を配信から除外する（既定0=全点保持）
+        self.declare_parameter('quality_weight_floor', 0.0)
 
         with open(self.get_parameter('calibration').value) as f:
             calibration = yaml.safe_load(f)
         self.bev_size = int(calibration['bev_size'])
         self.extent = float(calibration['bev_extent_m'])
+        self.camera_height = float(calibration.get('camera_position', [0.0, 0.0, 1.0])[2])
         self.frame_id = self.get_parameter('frame_id').value
         self.stride = max(1, int(self.get_parameter('stride').value))
         self.min_value = int(self.get_parameter('min_value').value)
@@ -78,6 +86,9 @@ class ThetaGroundCloudNode(Node):
         self.lidar_min_obstacle = max(0.0, float(self.get_parameter('lidar_min_obstacle_m').value))
         self.lidar_occlusion_ratio = float(self.get_parameter('lidar_occlusion_ratio').value)
         self.lidar_min_keep = max(0.0, float(self.get_parameter('lidar_gate_min_keep_ratio').value))
+        self.quality_weight_enable = bool(self.get_parameter('quality_weight_enable').value)
+        self.quality_power = max(0.0, float(self.get_parameter('quality_power').value))
+        self.quality_weight_floor = max(0.0, float(self.get_parameter('quality_weight_floor').value))
         self.latest_scan = None  # (angle_min, angle_increment, ranges, range_max)
         self.scans = {}          # stamp_key -> scan（ゲートの時刻合わせ用）
 
@@ -86,7 +97,8 @@ class ThetaGroundCloudNode(Node):
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
             PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
-            PointField(name='semantic_id', offset=16, datatype=PointField.UINT8, count=1),
+            PointField(name='weight', offset=16, datatype=PointField.FLOAT32, count=1),
+            PointField(name='semantic_id', offset=20, datatype=PointField.UINT8, count=1),
         ]
         self.pending = OrderedDict()  # stamp_key -> (stamp, frame_id, image, arrival)
         self.labels = {}              # stamp_key -> mono8 label
@@ -249,6 +261,13 @@ class ThetaGroundCloudNode(Node):
             valid &= radius_sq >= self.min_radius ** 2
         if self.max_radius > 0.0:
             valid &= radius_sq <= self.max_radius ** 2
+        weight = np.ones_like(x, dtype=np.float32)
+        if self.quality_weight_enable and self.camera_height > 0.0:
+            weight = (self.camera_height / np.sqrt(radius_sq + self.camera_height ** 2)).astype(np.float32)
+            if self.quality_power != 1.0:
+                weight = np.power(weight, self.quality_power).astype(np.float32)
+            if self.quality_weight_floor > 0.0:
+                valid &= weight >= self.quality_weight_floor
         if self.lidar_gate and self.latest_scan is not None:
             before = int(np.count_nonzero(valid))
             valid &= self._lidar_free_mask(x, y, stamp)
@@ -262,14 +281,15 @@ class ThetaGroundCloudNode(Node):
         else:
             sid_full = np.zeros_like(grid_rows, dtype=np.uint8)
 
-        xv, yv, rv, sv = x[valid], y[valid], rgb_float[valid], sid_full[valid].astype(np.uint8)
+        xv, yv, rv, sv, wv = (x[valid], y[valid], rgb_float[valid],
+                              sid_full[valid].astype(np.uint8), weight[valid])
         count = xv.size
         if count == 0:
             return
-        dtype = np.dtype([('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('rgb', '<f4'), ('semantic_id', 'u1')])
+        dtype = np.dtype([('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('rgb', '<f4'), ('weight', '<f4'), ('semantic_id', 'u1')])
         cloud = np.empty(count, dtype=dtype)
         cloud['x'], cloud['y'], cloud['z'] = xv, yv, 0.0
-        cloud['rgb'], cloud['semantic_id'] = rv, sv
+        cloud['rgb'], cloud['weight'], cloud['semantic_id'] = rv, wv, sv
         header = Header(stamp=stamp, frame_id=frame_id)
         msg = PointCloud2()
         msg.header = header
@@ -295,7 +315,7 @@ class ThetaGroundCloudNode(Node):
                     debug_rgb[mask] = packed
             debug_cloud = np.empty(count, dtype=dtype)
             debug_cloud['x'], debug_cloud['y'], debug_cloud['z'] = xv, yv, 0.0
-            debug_cloud['rgb'], debug_cloud['semantic_id'] = debug_rgb, sv
+            debug_cloud['rgb'], debug_cloud['weight'], debug_cloud['semantic_id'] = debug_rgb, wv, sv
             debug_msg = PointCloud2()
             debug_msg.header = header
             debug_msg.height, debug_msg.width = 1, count

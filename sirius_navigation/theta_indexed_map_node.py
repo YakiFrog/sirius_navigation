@@ -48,6 +48,48 @@ SEMANTIC_CLASSES = {
 MAX_CLASS_ID = 6
 
 
+def select_best_per_cell(gy, gx, width, weight, payload):
+    """セルごとに最大 weight の観測を選ぶ。返り値 (uy, ux, payload値, weight値)。"""
+    flat = gy.astype(np.int64) * np.int64(width) + gx.astype(np.int64)
+    order = np.argsort(weight, kind='stable')[::-1]
+    flat_sorted = flat[order]
+    _, first = np.unique(flat_sorted, return_index=True)
+    chosen = order[first]
+    uy, ux = np.divmod(flat_sorted[first], width)
+    return uy, ux, payload[chosen], weight[chosen]
+
+
+def update_class_leader(grid, class_weight, uy, ux, best_idx, best_w, switch):
+    """重み付きリーダ方式でクラスを更新する。
+
+    同じクラスなら重みを加算して強化し、異なるクラスは新観測の重みが
+    現クラス重み×switch 以上のときだけ上書きする。遠方・斜めの低品質な
+    矛盾観測が、近傍の高品質な結果を潰すのを防ぐ。
+    """
+    current = grid[uy, ux]
+    current_w = class_weight[uy, ux]
+    same = current == best_idx
+    stronger = best_w >= (current_w * switch)
+    update = same | stronger
+    if not np.any(update):
+        return
+    uy_u, ux_u = uy[update], ux[update]
+    new_w = np.where(same[update], current_w[update] + best_w[update], best_w[update])
+    class_weight[uy_u, ux_u] = new_w.astype(np.float32)
+    grid[uy_u, ux_u] = best_idx[update].astype(np.uint8)
+
+
+def accumulate_weighted(gy, gx, width, weight, values):
+    """セルごとの重み付き和 (Σw, Σw·values) を返す。values は (N, C)。"""
+    flat = gy.astype(np.int64) * np.int64(width) + gx.astype(np.int64)
+    unique, inverse = np.unique(flat, return_inverse=True)
+    cell_w = np.bincount(inverse, weights=weight)
+    cell_sum = np.zeros((unique.size, values.shape[1]), dtype=np.float64)
+    np.add.at(cell_sum, inverse, values.astype(np.float64) * weight[:, None])
+    uy, ux = np.divmod(unique, width)
+    return uy, ux, cell_w, cell_sum
+
+
 def quaternion_to_matrix(x, y, z, w):
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
@@ -71,12 +113,25 @@ class ThetaIndexedMapNode(Node):
         self.declare_parameter('fill_hole_m', 0.75)
         # テクスチャに使う直近観測の枚数K（移動平均）。大きいほど滑らかだがブレが累積しやすい。
         self.declare_parameter('texture_samples', 5)
+        # 観測品質重み（theta_ground_cloud_node が付与する weight）を蓄積に反映する。
+        # 近距離・斜め視（高品質）の観測がテクスチャ/クラス/セマンティックを支配する。
+        self.declare_parameter('use_observation_weight', True)
+        # テクスチャの重み付き指数移動平均の減衰率（1に近いほど過去を長く保持）
+        self.declare_parameter('texture_decay', 0.7)
+        # クラス上書きに必要な重み比（新観測の重み >= 現クラス重み×switch で更新）
+        self.declare_parameter('class_weight_switch', 1.0)
+        # セマンティック採用に必要な重み合計の下限
+        self.declare_parameter('semantic_min_weight', 0.3)
 
         self.res = self.get_parameter('grid_resolution').value
         self.map_frame = self.get_parameter('map_frame').value
         self.min_cloud_interval = max(0.0, float(self.get_parameter('min_cloud_interval_sec').value))
         self.fill_hole_m = max(0.0, float(self.get_parameter('fill_hole_m').value))
         self.texture_k = max(1, int(self.get_parameter('texture_samples').value))
+        self.use_observation_weight = bool(self.get_parameter('use_observation_weight').value)
+        self.texture_decay = min(0.999, max(0.0, float(self.get_parameter('texture_decay').value)))
+        self.class_weight_switch = max(0.0, float(self.get_parameter('class_weight_switch').value))
+        self.semantic_min_weight = max(0.0, float(self.get_parameter('semantic_min_weight').value))
 
         self.grid = None
         self.struct_grid = None
@@ -84,9 +139,10 @@ class ThetaIndexedMapNode(Node):
         self.origin = [0.0, 0.0]
         self.width = 0
         self.height = 0
-        self.texture_ring = None   # (H,W,K,3) uint8 直近K枚
-        self.texture_sum = None    # (H,W,3) 直近K枚の合計
-        self.texture_count = None  # (H,W) 総観測数
+        self.texture_sum = None      # (H,W,3) 重み付き色和 Σ(w·rgb)
+        self.texture_weight = None   # (H,W) 重み和 Σw
+        self.texture_count = None    # (H,W) 総観測数
+        self.class_weight = None     # (H,W) 勝者クラスの重み
         self.semantic_votes = None
         self.dirty = False
         self.last_cloud_time = 0.0
@@ -140,29 +196,32 @@ class ThetaIndexedMapNode(Node):
         self.width = int(max(1, width))
         self.height = int(max(1, height))
         self.grid = np.zeros((self.height, self.width), dtype=np.uint8)
-        self.texture_ring = np.zeros((self.height, self.width, self.texture_k, 3), dtype=np.uint8)
         self.texture_sum = np.zeros((self.height, self.width, 3), dtype=np.float64)
+        self.texture_weight = np.zeros((self.height, self.width), dtype=np.float32)
         self.texture_count = np.zeros((self.height, self.width), dtype=np.int32)
+        self.class_weight = np.zeros((self.height, self.width), dtype=np.float32)
         self.semantic_votes = np.zeros((self.height, self.width, MAX_CLASS_ID + 1), dtype=np.float32)
 
     def _expand_canvas(self, ox, oy, width, height):
         """キャンバスを拡大（既存の描画データを保持）。縮小はしない。"""
-        old = (self.grid, self.texture_ring, self.texture_sum, self.texture_count, self.semantic_votes,
+        old = (self.grid, self.texture_sum, self.texture_weight, self.texture_count,
+               self.semantic_votes, self.class_weight,
                self.origin[0], self.origin[1], self.width, self.height)
-        dx = int(round((old[5] - ox) / self.res))
-        dy = int(round((old[6] - oy) / self.res))
+        dx = int(round((old[6] - ox) / self.res))
+        dy = int(round((old[7] - oy) / self.res))
         self._alloc_canvas(ox, oy, width, height, self.res)
         sx0, sy0 = max(0, -dx), max(0, -dy)
-        sx1, sy1 = min(old[7], self.width - dx), min(old[8], self.height - dy)
+        sx1, sy1 = min(old[8], self.width - dx), min(old[9], self.height - dy)
         ddx0, ddy0 = max(0, dx), max(0, dy)
         if sx1 > sx0 and sy1 > sy0:
             src = np.s_[sy0:sy1, sx0:sx1]
             dst = np.s_[ddy0:ddy0 + (sy1 - sy0), ddx0:ddx0 + (sx1 - sx0)]
             self.grid[dst] = old[0][src]
-            self.texture_ring[dst] = old[1][src]
-            self.texture_sum[dst] = old[2][src]
+            self.texture_sum[dst] = old[1][src]
+            self.texture_weight[dst] = old[2][src]
             self.texture_count[dst] = old[3][src]
             self.semantic_votes[dst] = old[4][src]
+            self.class_weight[dst] = old[5][src]
 
     def _grid_callback(self, msg):
         # 構造（壁/フリー）は別配列に保持するだけにし、描画キャンバスには触れない。
@@ -255,34 +314,40 @@ class ThetaIndexedMapNode(Node):
         r = data[:, color_off + 2].astype(np.float32)
         g = data[:, color_off + 1].astype(np.float32)
         b = data[:, color_off + 0].astype(np.float32)
+        weight_off = offsets.get('weight')
+        if self.use_observation_weight and weight_off is not None:
+            weight = data[:, weight_off:weight_off + 4].copy().view(np.float32).flatten()
+        else:
+            weight = np.ones(gx.size, dtype=np.float32)
+        weight = np.maximum(weight.astype(np.float32), 0.0)
         ri = np.clip(np.round(r / 63.75).astype(np.int32), 0, 4)
         gi = np.clip(np.round(g / 63.75).astype(np.int32), 0, 4)
         bi = np.clip(np.round(b / 63.75).astype(np.int32), 0, 4)
         indices = self.color_lut[ri, gi, bi]
         rgb_u8 = np.column_stack([r, g, b]).astype(np.uint8)
-        # 代表色パレットで路面を描く（wallは保護）。セマンティックは別途フレーム間投票で集約。
-        not_wall = self.grid[gy, gx] != 1
-        self.grid[gy[not_wall], gx[not_wall]] = indices[not_wall]
-        # 直近K枚の移動平均テクスチャ。同一フレーム内の複数点はセルごとに平均し、
-        # 1セル=1観測としてリングへ入れる（点数で重複加算して白飛びするのを防ぐ）。
-        flat = gy.astype(np.int64) * self.width + gx
-        uniq, inverse = np.unique(flat, return_inverse=True)
-        frame_counts = np.bincount(inverse)
-        frame_sums = np.zeros((uniq.size, 3), dtype=np.float64)
-        np.add.at(frame_sums, inverse, rgb_u8.astype(np.float64))
-        cell_rgb = (frame_sums / frame_counts[:, None]).astype(np.uint8)
-        uy, ux = np.divmod(uniq, self.width)
+        # クラス番号: 重み付きリーダで更新（低品質な矛盾観測による上書きを防ぐ）
+        if self.use_observation_weight:
+            uy, ux, best_idx, best_w = select_best_per_cell(
+                gy, gx, self.width, weight, indices)
+            update_class_leader(self.grid, self.class_weight, uy, ux, best_idx, best_w,
+                                self.class_weight_switch)
+        else:
+            not_wall = self.grid[gy, gx] != 1
+            self.grid[gy[not_wall], gx[not_wall]] = indices[not_wall]
+        # 実RGBテクスチャ: セルごとの重み付き和を指数移動平均で蓄積する。
+        # 近距離・良品質（重み大）の観測が支配し、遠方の薄い観測はわずかしか寄与しない。
+        uy, ux, cell_w, cell_sum = accumulate_weighted(gy, gx, self.width, weight, rgb_u8)
+        self.texture_sum[uy, ux] *= self.texture_decay
+        self.texture_sum[uy, ux] += cell_sum
+        self.texture_weight[uy, ux] *= self.texture_decay
+        self.texture_weight[uy, ux] += cell_w
         np.add.at(self.texture_count, (uy, ux), 1)
-        slot = (self.texture_count[uy, ux] - 1) % self.texture_k
-        previous = self.texture_ring[uy, ux, slot].astype(np.float64)
-        self.texture_ring[uy, ux, slot] = cell_rgb
-        np.add.at(self.texture_sum, (uy, ux), cell_rgb.astype(np.float64) - previous)
-        # セマンティックはフレーム間でクラスIDの投票（予約ID>=3）
+        # セマンティックはフレーム間でクラスIDを重み付き投票（予約ID>=3）
         if 'semantic_id' in offsets:
             sid = data[:, offsets['semantic_id']].astype(np.int32)
             keep = sid >= 3
             if np.any(keep):
-                np.add.at(self.semantic_votes, (gy[keep], gx[keep], sid[keep]), 1.0)
+                np.add.at(self.semantic_votes, (gy[keep], gx[keep], sid[keep]), weight[keep])
         self.dirty = True
 
     def _timer_callback(self):
@@ -337,7 +402,7 @@ class ThetaIndexedMapNode(Node):
         if self.semantic_votes is not None:
             best = np.argmax(self.semantic_votes, axis=2).astype(np.uint8)
             total = np.sum(self.semantic_votes, axis=2)
-            semantic_mask = (total >= 1.0) & (best >= 3)
+            semantic_mask = (total >= self.semantic_min_weight) & (best >= 3)
             out_grid[semantic_mask] = best[semantic_mask]
         out_grid = self._fill_small_holes(out_grid)
         cv2.imwrite(path + ".pgm", out_grid[::-1, :])
@@ -362,11 +427,11 @@ class ThetaIndexedMapNode(Node):
         }
         with open(path + ".json", 'w') as stream:
             json.dump(meta, stream, indent=4)
-        # ロバストテクスチャ（3件超のセルは上下1件ずつ除外したトリム平均、それ以外は平均）
-        observed = self.texture_count > 0
+        # 重み付きテクスチャ（近距離・良品質の観測が支配する重み付き平均）
+        observed = self.texture_weight > 0
         if np.any(observed):
             texture_rgb = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-            denominator = np.minimum(self.texture_count, self.texture_k).astype(np.float64)
+            denominator = np.maximum(self.texture_weight, 1e-6).astype(np.float64)
             texture_rgb[observed] = np.clip(
                 np.round(self.texture_sum[observed] / denominator[observed, None]), 0, 255).astype(np.uint8)
             texture_bgra = np.dstack([texture_rgb[:, :, ::-1], (observed * 255).astype(np.uint8)])

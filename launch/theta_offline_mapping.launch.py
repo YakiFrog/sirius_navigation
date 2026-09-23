@@ -37,6 +37,13 @@ def generate_launch_description():
     grid_range_max = LaunchConfiguration('grid_range_max')
     lidar_topic = LaunchConfiguration('lidar_topic')
     lidar_gate = LaunchConfiguration('lidar_gate')
+    quality_weight_enable = LaunchConfiguration('quality_weight_enable')
+    quality_power = LaunchConfiguration('quality_power')
+    quality_weight_floor = LaunchConfiguration('quality_weight_floor')
+    use_observation_weight = LaunchConfiguration('use_observation_weight')
+    texture_decay = LaunchConfiguration('texture_decay')
+    class_weight_switch = LaunchConfiguration('class_weight_switch')
+    semantic_min_weight = LaunchConfiguration('semantic_min_weight')
     semantic_debug_topic = PythonExpression(
         ["'/theta/ground_cloud_semantic' if '", publish_debug, "' == 'true' else ''"])
 
@@ -67,6 +74,27 @@ def generate_launch_description():
     declare_lidar_gate = DeclareLaunchArgument(
         'lidar_gate', default_value='false',
         description='true で /scan3 のフリースペース内の地面点だけを残す（食い合い軽減）')
+    declare_quality_weight_enable = DeclareLaunchArgument(
+        'quality_weight_enable', default_value='true',
+        description='地面点に観測品質weight（入射角cosのべき乗）を付与する')
+    declare_quality_power = DeclareLaunchArgument(
+        'quality_power', default_value='2.0',
+        description='weight=(h/sqrt(ρ²+h²))^p の指数p。大きいほど遠方を薄くする')
+    declare_quality_weight_floor = DeclareLaunchArgument(
+        'quality_weight_floor', default_value='0.0',
+        description='weight<floor の点を除外（0=全点保持）')
+    declare_use_observation_weight = DeclareLaunchArgument(
+        'use_observation_weight', default_value='true',
+        description='地図蓄積でweightを使う（false=従来の等重み・後勝ちに近い動作）')
+    declare_texture_decay = DeclareLaunchArgument(
+        'texture_decay', default_value='0.7',
+        description='テクスチャ重み付きEMAの減衰率（0-1）')
+    declare_class_weight_switch = DeclareLaunchArgument(
+        'class_weight_switch', default_value='1.0',
+        description='クラス上書きに必要な重み比（新観測 >= 現重み×switch）')
+    declare_semantic_min_weight = DeclareLaunchArgument(
+        'semantic_min_weight', default_value='0.3',
+        description='セマンティック採用に必要な重み合計の下限')
     declare_sam3 = DeclareLaunchArgument(
         'sam3', default_value='false',
         description='Run theta_sam3_perspective_node (needs sam3 docker server)')
@@ -92,13 +120,20 @@ def generate_launch_description():
                      'max_radius': ParameterValue(max_radius, value_type=float),
                      'lidar_topic': lidar_topic,
                      'lidar_gate': ParameterValue(lidar_gate, value_type=bool),
+                     'quality_weight_enable': ParameterValue(quality_weight_enable, value_type=bool),
+                     'quality_power': ParameterValue(quality_power, value_type=float),
+                     'quality_weight_floor': ParameterValue(quality_weight_floor, value_type=float),
                      'calibration': calibration}],
         output='screen')
 
     theta_indexed = Node(
         package='sirius_navigation', executable='theta_indexed_map_node', name='theta_indexed_map_node',
         parameters=[{'use_sim_time': use_sim_time,
-                     'cloud_topic': '/theta/ground_cloud_semantic'}],
+                     'cloud_topic': '/theta/ground_cloud_semantic',
+                     'use_observation_weight': ParameterValue(use_observation_weight, value_type=bool),
+                     'texture_decay': ParameterValue(texture_decay, value_type=float),
+                     'class_weight_switch': ParameterValue(class_weight_switch, value_type=float),
+                     'semantic_min_weight': ParameterValue(semantic_min_weight, value_type=float)}],
         output='screen')
 
     # SAM3セマンティック（任意）。dual-fisheyeを透視投影しSAM3でクラス分類→地面逆投影して
@@ -166,6 +201,13 @@ def generate_launch_description():
         declare_grid_range_max,
         declare_lidar_topic,
         declare_lidar_gate,
+        declare_quality_weight_enable,
+        declare_quality_power,
+        declare_quality_weight_floor,
+        declare_use_observation_weight,
+        declare_texture_decay,
+        declare_class_weight_switch,
+        declare_semantic_min_weight,
         declare_sam3,
         declare_publish_raw,
         declare_publish_debug,
