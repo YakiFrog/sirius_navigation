@@ -60,6 +60,40 @@ NAVIGATION_MODE_CONFIGS = {
         },
         "/global_costmap/global_costmap": {"obstacle_layer.enabled": True},
     },
+    # fast: 通常(0.90)より高速な1.20m/s。今回の同定・接地実験の知見を反映。
+    #   - ドライバのソフト閉ループ(既定ON)が左右輪差・蛇行を抑制する前提。
+    #   - 回生過電圧(OVL15V/FF=2)を抑えるため、減速は緩め(ax_min/max_decel=-0.55)。
+    #     停止距離 d=v^2/2a = 1.2^2/(2*0.55) = 1.31m。狭所では normal を使うこと。
+    #   - 旋回半径 R=v/w=1.0 を維持 (vx_max=wz_max=1.20)。
+    #   - 供給(C300 10A/120W)が上限のため、これ以上はサグ/失速の恐れ。
+    "fast": {
+        "/controller_server": {
+            "FollowPath.vx_max": 1.20,
+            "FollowPath.time_steps": 60,
+            "FollowPath.vx_min": -0.60,
+            "FollowPath.wz_max": 1.20,
+            "FollowPath.vx_std": 0.30,
+            "FollowPath.wz_std": 0.35,
+            "FollowPath.ax_max": 1.00,
+            "FollowPath.ax_min": -0.55,
+            "FollowPath.az_max": 1.80,
+            "FollowPath.CostCritic.cost_weight": 10.0,
+            "FollowPath.PathAlignCritic.cost_weight": 8.0,
+            "FollowPath.PathFollowCritic.cost_weight": 8.0,
+            "FollowPath.PathAngleCritic.cost_weight": 2.0,
+            "FollowPath.TwirlingCritic.cost_weight": 3.0,
+            "FollowPath.PreferForwardCritic.cost_weight": 15.0,
+            "FollowPath.GoalCritic.cost_weight": 3.0,
+            "FollowPath.GoalAngleCritic.cost_weight": 1.0,
+        },
+        "/velocity_smoother": {
+            "max_velocity": [1.20, 0.0, 1.20],
+            "min_velocity": [-0.60, 0.0, -1.20],
+            "max_accel": [1.00, 0.0, 1.80],
+            "max_decel": [-0.55, 0.0, -1.80],
+        },
+        "/global_costmap/global_costmap": {"obstacle_layer.enabled": True},
+    },
     "safe": {
         "/controller_server": {
             "FollowPath.vx_max": 0.40,
@@ -327,6 +361,7 @@ NAVIGATION_MODE_CONFIGS = {
 NAVIGATION_MODE_INFO = {
     "normal": {"label": "通常", "speed": 0.90, "strict": False},
     "normal_active": {"label": "通常・探索強化", "speed": 1.00, "strict": False},
+    "fast": {"label": "高速(減速緩和・OVL抑制)", "speed": 1.20, "strict": False},
     "safe": {"label": "安全", "speed": 0.40, "strict": False},
     "slow": {"label": "超低速", "speed": 0.20, "strict": False},
     "wait_normal": {"label": "待機優先", "speed": 0.60, "strict": False},
