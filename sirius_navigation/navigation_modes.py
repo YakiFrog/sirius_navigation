@@ -1,6 +1,17 @@
 """Shared Nav2 navigation mode definitions and remote-command helpers."""
 
 import json
+import os
+
+
+# wait系は「停止・待機」専用BT(Spin/BackUp/コストマップクリア無し)、
+# それ以外はnav2標準BT(リカバリ込み)を使う。'@pkg/relative/path' 形式は
+# resolve_navigation_mode_config() でインストール先share配下へ展開される。
+_WAIT_MODES = ("wait_normal", "wait_active")
+_WAIT_BT = "@sirius_navigation/behavior_trees/navigate_to_pose_wait_only.xml"
+_DEFAULT_BT = (
+    "@nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"
+)
 
 
 NAVIGATION_MODE_CONFIGS = {
@@ -449,6 +460,36 @@ def normalize_navigation_mode(mode):
     if normalized == "strict":
         normalized = "strict_safe"
     return normalized if normalized in NAVIGATION_MODE_CONFIGS else None
+
+
+def resolve_navigation_mode_config(mode):
+    """Return a mode config with the BT selector applied and '@pkg/path' expanded.
+
+    wait系には停止・待機専用BT、それ以外はnav2標準BTを bt_navigator に設定する。
+    '@package/relative/path' 形式の値はインストール済み share 配下の絶対パスへ
+    展開する（bt_navigator.default_nav_to_pose_bt_xml は絶対パスを要求するため）。
+    """
+    from ament_index_python.packages import get_package_share_directory
+
+    canonical = normalize_navigation_mode(mode)
+    if canonical is None:
+        raise ValueError(f"unknown navigation mode: {mode!r}")
+
+    default_bt = _WAIT_BT if canonical in _WAIT_MODES else _DEFAULT_BT
+    config = {"/bt_navigator": {"default_nav_to_pose_bt_xml": default_bt}}
+    config.update(NAVIGATION_MODE_CONFIGS[canonical])
+
+    resolved = {}
+    for node_name, params in config.items():
+        resolved_params = {}
+        for key, value in params.items():
+            if isinstance(value, str) and value.startswith("@"):
+                package, _, relative = value[1:].partition("/")
+                value = os.path.join(get_package_share_directory(package), relative)
+            resolved_params[key] = value
+        resolved[node_name] = resolved_params
+
+    return resolved
 
 
 def parse_navigation_mode_command(instruction):

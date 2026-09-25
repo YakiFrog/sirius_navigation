@@ -1,0 +1,51 @@
+<!--
+  wait専用BT: 障害物でパスが塞がれたら「その場で停止・待機」する。
+
+  既定BT(navigate_to_pose_w_replanning_and_recovery.xml)からの差分:
+    - WaitPath失敗時の再試行から ClearEntireCostmap を削除。
+      → 障害物をローカルコストマップから消さないため、WaitPathの衝突検出が
+         NoValidControlを返し続け、車体は動かず待機する(creep防止)。
+    - 外側リカバリを Wait のみに変更(Spin/BackUp/ClearCostmapを除去)。
+      → 旋回・後退(迂回)をなくす。
+  対象: wait_normal / wait_active のみ (bt_navigator.default_nav_to_pose_bt_xml
+  としてモード切替時に設定される)。
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecoveryWaitOnly">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <Switch2 variable="{selected_controller}" case_1="WaitPath" case_2="FollowPath">
+          <RecoveryNode number_of_retries="1000000" name="FollowPathWithWaiting">
+            <FollowPath path="{path}" controller_id="WaitPath" error_code_id="{follow_path_error_code}"/>
+            <!-- コストマップをクリアせず、2秒待って同じパスを再試行する。 -->
+            <Sequence name="WaitBeforeRetryingSamePath">
+              <Wait wait_duration="2.0"/>
+            </Sequence>
+          </RecoveryNode>
+          <RecoveryNode number_of_retries="1000000" name="FollowPathNormally">
+            <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+            <Sequence name="WaitBeforeRetryingSamePathNormal">
+              <Wait wait_duration="2.0"/>
+            </Sequence>
+          </RecoveryNode>
+          <RecoveryNode number_of_retries="1000000" name="FollowPathWithSelectedController">
+            <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+            <Sequence name="WaitBeforeRetryingSamePathSelected">
+              <Wait wait_duration="2.0"/>
+            </Sequence>
+          </RecoveryNode>
+        </Switch2>
+      </PipelineSequence>
+      <!-- 外側リカバリ: 旋回・後退は行わず待機のみ。 -->
+      <Wait wait_duration="2.0"/>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

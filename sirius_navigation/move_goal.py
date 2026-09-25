@@ -10,6 +10,7 @@ from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped, Quaternion, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
+from rcl_interfaces.srv import GetParameters
 import yaml
 import math
 import time
@@ -54,6 +55,14 @@ class Nav2GoalClient(Node):
         )
         self.nav_control_sub = self.create_subscription(String, '/nav_control', self.nav_control_callback, 10)
         self.odom_publisher = self.create_publisher(Odometry, 'target_odom', 10)
+        # bt_navigatorが選択中のBT(モード切替がdefault_nav_to_pose_bt_xmlを設定する)。
+        # default_nav_to_pose_bt_xmlはゴール毎には再読込されないため、ゴールの
+        # behavior_treeフィールドで明示指定する。
+        self._behavior_tree = self.fetch_default_bt()
+        if self._behavior_tree:
+            self.get_logger().info(
+                f"Navigation BT: {os.path.basename(self._behavior_tree)}"
+            )
         self.initial_pose_publisher = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10
         )
@@ -129,7 +138,33 @@ class Nav2GoalClient(Node):
             sin(yaw / 2.0),  # z
             cos(yaw / 2.0)   # w
         ]
-        
+
+    def fetch_default_bt(self) -> str:
+        """Query bt_navigator's active default BT (set by the nav-mode switch)."""
+        probe = rclpy.create_node('bt_param_probe')
+        try:
+            client = probe.create_client(GetParameters, '/bt_navigator/get_parameters')
+            if not client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().warning(
+                    "bt_navigator get_parameters unavailable; using default BT"
+                )
+                return ""
+            request = GetParameters.Request()
+            request.names = ["default_nav_to_pose_bt_xml"]
+            future = client.call_async(request)
+            rclpy.spin_until_future_complete(probe, future, timeout_sec=3.0)
+            if future.done() and future.result() and future.result().values:
+                return str(future.result().values[0].string_value)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to query bt_navigator BT: {exc}")
+        finally:
+            probe.destroy_node()
+        return ""
+
+    def current_behavior_tree(self) -> str:
+        """Return the BT path for the current navigation mode (empty = nav2 default)."""
+        return self._behavior_tree
+
     def send_goal(self):
         if self._paused_by_user or self._cancelled_by_user:
             self.get_logger().info("Goal dispatch suppressed because navigation is paused/cancelled.")
@@ -161,6 +196,11 @@ class Nav2GoalClient(Node):
         goal_msg.pose.pose.orientation.y = quat[1]
         goal_msg.pose.pose.orientation.z = quat[2]
         goal_msg.pose.pose.orientation.w = quat[3]
+        goal_msg.behavior_tree = self.current_behavior_tree()
+        if goal_msg.behavior_tree:
+            self.get_logger().info(
+                f"Using wait behavior tree: {os.path.basename(goal_msg.behavior_tree)}"
+            )
         
         # capture and store the current goal index for callbacks and logging
         self.current_goal_index = self.count
