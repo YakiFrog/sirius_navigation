@@ -26,6 +26,7 @@ from pathlib import Path
 import yaml
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from sirius_navigation.theta_perspective import build_perspective_remap, build_bev_to_view_maps
+from sirius_navigation.sam3_classes import load_sam3_classes
 
 
 def quaternion_to_rpy(x, y, z, w):
@@ -85,26 +86,42 @@ class ThetaSam3PerspectiveNode(Node):
         self.infer_timeout = max(0.1, float(self.get_parameter('infer_timeout_sec').value))
         self.min_interval = max(0.0, float(self.get_parameter('min_interval_sec').value))
 
-        # 共有設定YAML（ランチャーの「SAM3設定」が保存）。あればprompt/threshold/classes等を上書き。
+        # 共有クラス登録簿（config/sam3_classes.yaml）を優先。無ければ従来の
+        # theta_sam3.yaml、さらに無ければハードコード既定を使う。
         self.class_registry = dict(CLASS_REGISTRY)
         self.prompts = PROMPTS
         self.class_thresholds_cfg = {}
+        shared_cfg, shared_path = None, None
+        try:
+            shared_cfg, shared_path = load_sam3_classes()
+        except Exception as error:
+            self.get_logger().warning(f'共有クラス登録簿の読込に失敗: {error}')
+        if shared_cfg:
+            self.class_registry = shared_cfg['classes']
+            self.prompts = shared_cfg['prompt']
+            self.class_thresholds_cfg = shared_cfg['class_thresholds']
+            self.get_logger().info(
+                f'共有クラス登録簿を読み込み: {shared_path} '
+                f'({len(self.class_registry)} classes, prompt="{self.prompts}")')
+
         sam3_config_path = self.get_parameter('sam3_config').value
         if sam3_config_path and os.path.exists(sam3_config_path):
             try:
                 with open(sam3_config_path) as stream:
                     sam3_cfg = yaml.safe_load(stream) or {}
-                self.prompts = sam3_cfg.get('prompt', self.prompts)
-                if sam3_cfg.get('classes'):
-                    self.class_registry = sam3_cfg['classes']
+                # 共有登録簿が無い場合のみ theta_sam3.yaml の classes を後方互換で使う。
+                if not shared_cfg:
+                    self.prompts = sam3_cfg.get('prompt', self.prompts)
+                    if sam3_cfg.get('classes'):
+                        self.class_registry = sam3_cfg['classes']
+                    self.class_thresholds_cfg = sam3_cfg.get('class_thresholds') or {}
                 if 'threshold' in sam3_cfg:
                     self.threshold = float(sam3_cfg['threshold'])
                 if 'score_min' in sam3_cfg:
                     self.score_min = float(sam3_cfg['score_min'])
-                self.class_thresholds_cfg = sam3_cfg.get('class_thresholds') or {}
                 self.get_logger().info(
                     f'SAM3設定を読み込み: {sam3_config_path} '
-                    f'(prompt="{self.prompts}", threshold={self.threshold}, score_min={self.score_min})')
+                    f'(threshold={self.threshold}, score_min={self.score_min})')
             except Exception as error:
                 self.get_logger().warning(f'SAM3設定の読み込みに失敗（既定を使用）: {error}')
 

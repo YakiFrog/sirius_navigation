@@ -26,12 +26,14 @@ try:
         build_perspective_remap,
         build_bev_to_view_maps,
     )
+    from sirius_navigation.sam3_classes import load_sam3_classes
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from theta_perspective import (  # type: ignore
         build_perspective_remap,
         build_bev_to_view_maps,
     )
+    from sam3_classes import load_sam3_classes  # type: ignore
 
 
 CAMERA_TOPIC = '/theta/dual_fisheye/image_raw/compressed'
@@ -62,17 +64,33 @@ def load_sam3_config(path: Path) -> dict:
     if path and Path(path).exists():
         with open(path, encoding='utf-8') as stream:
             cfg = yaml.safe_load(stream) or {}
-    classes = cfg.get('classes') or {
-        'grass': {'id': 3, 'color': [0, 255, 0]},
-        'tactile paving': {'id': 4, 'color': [255, 255, 0]},
-        'line-type tactile paving': {'id': 4, 'color': [255, 255, 0]},
-    }
+
+    # 共有クラス登録簿（config/sam3_classes.yaml）を優先。無ければ theta_sam3.yaml。
+    classes = None
+    prompt = None
+    class_thresholds = cfg.get('class_thresholds') or {}
+    try:
+        shared_cfg, _ = load_sam3_classes()
+        if shared_cfg:
+            classes = shared_cfg['classes']
+            prompt = shared_cfg['prompt']
+            class_thresholds = shared_cfg['class_thresholds'] or class_thresholds
+    except Exception:
+        pass
+    if not classes:
+        classes = cfg.get('classes') or {
+            'grass': {'id': 3, 'color': [0, 255, 0]},
+            'tactile paving': {'id': 4, 'color': [255, 255, 0]},
+            'line-type tactile paving': {'id': 4, 'color': [255, 255, 0]},
+        }
+    if not prompt:
+        prompt = cfg.get('prompt', 'grass, tactile paving, line-type tactile paving')
     return {
-        'prompt': cfg.get('prompt', 'grass, tactile paving, line-type tactile paving'),
+        'prompt': prompt,
         'threshold': float(cfg.get('threshold', 0.3)),
         'score_min': float(cfg.get('score_min', 0.3)),
         'classes': classes,
-        'class_thresholds': cfg.get('class_thresholds') or {},
+        'class_thresholds': class_thresholds,
     }
 
 

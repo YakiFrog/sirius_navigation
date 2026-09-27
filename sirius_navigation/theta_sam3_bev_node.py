@@ -20,6 +20,8 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
+from sirius_navigation.sam3_classes import load_sam3_classes
+
 PROMPTS = 'grass, tactile paving, line-type tactile paving, roadway, sidewalk'
 # 予約IDと代表色（line-type tactile paving は tactile paving と同じID4=黄）
 CLASS_REGISTRY = {
@@ -50,6 +52,19 @@ class ThetaSam3BevNode(Node):
         self.threshold = float(self.get_parameter('threshold').value)
         self.infer_timeout = max(0.1, float(self.get_parameter('infer_timeout_sec').value))
         self.min_interval = max(0.0, float(self.get_parameter('min_interval_sec').value))
+
+        # 共有クラス登録簿（config/sam3_classes.yaml）があれば優先する。
+        self.class_registry = dict(CLASS_REGISTRY)
+        try:
+            shared_cfg, shared_path = load_sam3_classes()
+            self.class_registry = shared_cfg['classes']
+            if shared_path:
+                self.prompts = shared_cfg['prompt']
+                self.get_logger().info(
+                    f'共有クラス登録簿を読み込み: {shared_path} '
+                    f'({len(self.class_registry)} classes)')
+        except Exception as error:
+            self.get_logger().warning(f'共有クラス登録簿の読込に失敗（既定を使用）: {error}')
 
         self.lock = threading.Lock()
         self.latest = None  # (stamp, bgr)
@@ -83,7 +98,7 @@ class ThetaSam3BevNode(Node):
     def _infer_loop(self):
         self._post('/source_mode', {'mode': 'network'})
         self._post('/crop', {'mode': 'none'})
-        self._post('/class_registry', {'classes': CLASS_REGISTRY})
+        self._post('/class_registry', {'classes': self.class_registry})
         self._post('/prompt', {'prompt': self.prompts})
         self._post('/threshold', {'threshold': self.threshold})
         while rclpy.ok():

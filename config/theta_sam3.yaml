@@ -1,26 +1,6 @@
-prompt: grass, tactile paving, line-type tactile paving
+# THETA マッピング固有の SAM3 パラメータ。
+# クラス登録簿（prompt / classes / class_thresholds）は共有ファイル
+# config/sam3_classes.yaml に集約した。このファイルにはTHETA固有の
+# しきい値だけを置く（ランチャーの SAM3設定ダイアログが保存する）。
 threshold: 1.0
 score_min: 0.8
-classes:
-  grass:
-    id: 3
-    color:
-    - 0
-    - 255
-    - 0
-  tactile paving:
-    id: 4
-    color:
-    - 255
-    - 255
-    - 0
-  line-type tactile paving:
-    id: 4
-    color:
-    - 255
-    - 255
-    - 0
-class_thresholds:
-  grass: 0.3
-  tactile paving: 0.3
-  line-type tactile paving: 0.3

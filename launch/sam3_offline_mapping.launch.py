@@ -1,11 +1,27 @@
 import os
 import launch.conditions
+import yaml
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
+
+
+def _default_prompt(share_dir):
+    """config/sam3_classes.yaml から既定プロンプトを読む（無ければ従来値）."""
+    fallback = 'grass, tactile paving, roadway, sidewalk'
+    try:
+        with open(os.path.join(share_dir, 'config', 'sam3_classes.yaml'),
+                  encoding='utf-8') as stream:
+            data = yaml.safe_load(stream) or {}
+        classes = data.get('classes') or {}
+        prompt = str(data.get('prompt') or '').strip()
+        return prompt or ', '.join(classes) or fallback
+    except Exception:
+        return fallback
+
 
 def generate_launch_description():
     pkg_sirius_nav = get_package_share_directory('sirius_navigation')
@@ -41,7 +57,7 @@ def generate_launch_description():
 
     declare_prompt = DeclareLaunchArgument(
         'prompt',
-        default_value='grass, tactile paving, roadway, sidewalk',
+        default_value=_default_prompt(pkg_sirius_nav),
         description='SAM3 text prompts for semantic classes'
     )
 
