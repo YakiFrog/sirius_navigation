@@ -66,6 +66,24 @@ def _fisheye_uv(rays_robot, calibration, image_size, mount):
     return uv, valid & in_bounds
 
 
+def project_camera_frame_points(points_cam, calibration, image_size):
+    """THETAカメラフレーム(theta_link)の3D点をdual-fisheye画素へ投影する。
+
+    LiDAR点群の色付け用。points_cam はカメラ原点からの座標（メートル）で、
+    内部でレイ化・正規化してから _fisheye_uv で前後レンズを判定する。
+    マウント回転(rpy_degrees)は呼び出し側で点をカメラフレームへ変換済みの前提のため
+    恒等行列を使う（図形ではなく光束を渡すので camera_position は不要）。
+
+    Returns: (uv, valid)
+      uv    : float64 (..., 2) 実画像サイズの画素座標（無効点は不定）
+      valid : bool (...,) 投影先がレンズ有効域かつ画像内ならTrue
+    """
+    points = np.asarray(points_cam, dtype=np.float64)
+    norm = np.linalg.norm(points, axis=-1, keepdims=True)
+    rays = points / np.maximum(norm, 1e-12)
+    return _fisheye_uv(rays, calibration, image_size, np.eye(3))
+
+
 def build_perspective_remap(calibration, yaw_view_deg, image_size, out_size, hfov_deg=120.0):
     """dual-fisheye から透視ビューを切り出す cv2.remap 用マップを返す。
 
