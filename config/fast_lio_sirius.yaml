@@ -27,7 +27,7 @@
             fov_degree: 360.0
             det_range: 100.0
             extrinsic_est_en: false
-            extrinsic_T: [0.0, 0.0, 0.28]
+            extrinsic_T: [0.0, 0.0, 0.2]
             extrinsic_R: [1.0, 0.0, 0.0,
                           0.0, 1.0, 0.0,
                           0.0, 0.0, 1.0]

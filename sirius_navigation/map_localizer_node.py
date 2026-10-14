@@ -130,6 +130,62 @@ def _read_pcd_ascii(path):
     return arr[:, idx]
 
 
+_PLY_TYPES = {
+    "float": "f4", "float32": "f4", "double": "f8", "float64": "f8",
+    "char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1",
+    "short": "i2", "int16": "i2", "ushort": "u2", "uint16": "u2",
+    "int": "i4", "int32": "i4", "uint": "u4", "uint32": "u4",
+}
+
+
+def _read_ply_xyz(path):
+    """PLY（ascii / binary_little_endian）から x,y,z を読む（rgb等の追加属性は無視）。"""
+    with open(path, "rb") as f:
+        header_lines = []
+        while True:
+            raw = f.readline()
+            if not raw:
+                raise ValueError("invalid PLY header")
+            line = raw.decode("ascii", errors="ignore").strip()
+            header_lines.append(line)
+            if line == "end_header":
+                break
+
+        fmt = None
+        count = 0
+        props = []
+        in_vertex = False
+        for line in header_lines:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "format":
+                fmt = parts[1]
+            elif parts[0] == "element":
+                in_vertex = len(parts) > 1 and parts[1] == "vertex"
+                if in_vertex:
+                    count = int(parts[2])
+            elif parts[0] == "property" and in_vertex:
+                if parts[1] == "list":
+                    raise ValueError("PLY list property is not supported")
+                if parts[1] not in _PLY_TYPES:
+                    raise ValueError(f"unsupported PLY type: {parts[1]}")
+                props.append((parts[2], _PLY_TYPES[parts[1]]))
+
+        names = [n for n, _ in props]
+        if not all(k in names for k in ("x", "y", "z")):
+            raise ValueError("PLY has no x/y/z properties")
+
+        if fmt == "ascii":
+            arr = np.loadtxt(f, dtype=np.float64, ndmin=2, max_rows=count)
+            idx = [names.index(k) for k in ("x", "y", "z")]
+            return arr[:, idx]
+        if fmt != "binary_little_endian":
+            raise ValueError(f"unsupported PLY format: {fmt}")
+        data = np.fromfile(f, dtype=np.dtype(props), count=count)
+        return np.c_[data["x"], data["y"], data["z"]].astype(np.float64)
+
+
 def load_map_points(path):
     p = os.path.expanduser(path)
     if not os.path.exists(p):
@@ -137,7 +193,7 @@ def load_map_points(path):
     if p.endswith(".npy"):
         arr = np.load(p)
     elif p.endswith(".ply"):
-        arr = np.asarray(small_gicp.read_ply(p).points)
+        arr = _read_ply_xyz(p)
     elif p.endswith(".pcd"):
         arr = _read_pcd_ascii(p)
     else:

@@ -13,7 +13,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -24,6 +24,7 @@ def generate_launch_description():
     config_path = LaunchConfiguration('config_path')
     config_file = LaunchConfiguration('config_file')
     use_sim_time = LaunchConfiguration('use_sim_time')
+    imu_height = LaunchConfiguration('imu_height')
 
     args = [
         DeclareLaunchArgument(
@@ -31,6 +32,8 @@ def generate_launch_description():
             default_value=os.path.join(sirius, 'config')),
         DeclareLaunchArgument('config_file', default_value='fast_lio_sirius.yaml'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('imu_height', default_value='0.65',
+                              description='base_footprintからIMUまでの高さ[m]'),
     ]
 
     bridge_odom = Node(
@@ -41,7 +44,8 @@ def generate_launch_description():
     bridge_base = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='lio_bridge_base',
-        arguments=['--frame-id', 'body', '--child-frame-id', 'sirius3/base_footprint'],
+        arguments=['--frame-id', 'body', '--child-frame-id', 'sirius3/base_footprint',
+                   '--z', PythonExpression(['-', imu_height])],
     )
 
     lio = IncludeLaunchDescription(

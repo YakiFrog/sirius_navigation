@@ -11,6 +11,7 @@ import numpy as np
 import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
 from tf2_ros import Buffer, TransformListener
 
@@ -102,7 +103,7 @@ class SaveCloudNode(Node):
         super().__init__("save_cloud_node")
         self.declare_parameter("topic", "/cloud_map")
         self.declare_parameter("output_base", "")
-        self.declare_parameter("target_frame", "map")
+        self.declare_parameter("target_frame", "")
         self.declare_parameter("project_2d", True)
         self.declare_parameter("resolution", 0.05)
         self.declare_parameter("z_min", 0.2)
@@ -111,12 +112,25 @@ class SaveCloudNode(Node):
         self.declare_parameter("occupied_min_points", 1)
         self.declare_parameter("save_npy", True)
         self.declare_parameter("save_pcd", True)
+        self.declare_parameter("crop_above_floor", 0.0)
+        self.declare_parameter("crop_below_floor", 0.0)
+        self.declare_parameter("crop_floor_percentile", 2.0)
+        self.declare_parameter("normalize_floor_z", True)
 
         self._done = False
         self._buffer = Buffer()
         self._listener = TransformListener(self._buffer, self)
         topic = self.get_parameter("topic").value
-        self.create_subscription(PointCloud2, topic, self._on_cloud, 1)
+        # ラッチ配信(/cloud_map等)と通常配信(/Laser_map等)の両方を受けるため複数QoSで購読
+        qos_volatile = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                                  durability=DurabilityPolicy.VOLATILE)
+        qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                                 durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        qos_best_effort = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
+                                     durability=DurabilityPolicy.VOLATILE)
+        self.create_subscription(PointCloud2, topic, self._on_cloud, qos_volatile)
+        self.create_subscription(PointCloud2, topic, self._on_cloud, qos_latched)
+        self.create_subscription(PointCloud2, topic, self._on_cloud, qos_best_effort)
         self.get_logger().info(f"待機中: {topic} の点群を1回受信して保存します")
 
     def _on_cloud(self, msg):
@@ -139,6 +153,28 @@ class SaveCloudNode(Node):
             except Exception as error:  # noqa: BLE001
                 self.get_logger().warn(
                     f"{msg.header.frame_id} -> {target} のTFが無いため元フレームで保存: {error}")
+
+        # 床を推定し、天井・床下をカット（0で無効）。normalize_floor_z で床を z=0 に正規化
+        above = float(self.get_parameter("crop_above_floor").value)
+        below = float(self.get_parameter("crop_below_floor").value)
+        normalize = bool(self.get_parameter("normalize_floor_z").value)
+        if (above > 0.0 or below > 0.0 or normalize) and len(xyz) > 0:
+            z = xyz[:, 2]
+            floor = float(np.percentile(z, float(self.get_parameter("crop_floor_percentile").value)))
+            keep = np.ones(len(xyz), dtype=bool)
+            if below > 0.0:
+                keep &= z >= (floor - below)
+            if above > 0.0:
+                keep &= z <= (floor + above)
+            removed = int((~keep).sum())
+            xyz = xyz[keep]
+            self.get_logger().info(
+                f"床推定 z={floor:.2f}m / 天井カット上限 z={floor + above:.2f}m: "
+                f"除去 {removed} 点, 残り {len(xyz)} 点")
+            if normalize:
+                xyz = xyz.copy()
+                xyz[:, 2] -= floor
+                self.get_logger().info(f"床を z=0 に正規化しました (offset {-floor:+.3f}m)")
 
         base = os.path.expanduser(str(self.get_parameter("output_base").value))
         if not base:

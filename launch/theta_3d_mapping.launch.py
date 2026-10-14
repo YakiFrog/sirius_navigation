@@ -38,10 +38,10 @@ def generate_launch_description():
             'subscribe_rgb': False,
             'approx_sync': True,
             'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
-            'wait_for_transform': 0.2,
-            'publish_tf': False,
+            'wait_for_transform': 1.0,
+            'publish_tf': True,
             'odom_frame_id': 'sirius3/odom',
-            'Rtabmap/PublishTf': 'false',
+            'Rtabmap/PublishTf': 'true',
             'Mem/IncrementalMemory': 'true',
             'Mem/InitWMWithAllNodes': 'false',
             'RGBD/ProximityBySpace': 'true',
@@ -61,6 +61,7 @@ def generate_launch_description():
         remappings=[
             ('scan_cloud', cloud_topic),
             ('odom', odom_topic),
+            ('imu', '/sirius_3d_unused_imu'),
             ('map', '/rtabmap/grid_map'),
         ],
     )
