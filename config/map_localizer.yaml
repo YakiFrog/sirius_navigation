@@ -1,0 +1,28 @@
+map_localizer:
+  ros__parameters:
+    cloud_topic: /velodyne_points
+    map_path: ""
+    map_frame: map
+    odom_frame: sirius3/odom
+    base_frame: sirius3/base_footprint
+    update_period: 0.5
+    map_voxel: 0.2
+    scan_voxel: 0.2
+    registration_type: VGICP
+    voxel_resolution: 0.5
+    max_correspondence_distance: 1.0
+    max_iterations: 30
+    num_threads: 4
+    use_3dof: true
+    max_translation_correction: 0.5
+    max_rotation_correction_deg: 10.0
+    min_inlier_ratio: 0.3
+    min_range: 1.0
+    max_range: 60.0
+    initial_pose_x: 0.0
+    initial_pose_y: 0.0
+    initial_pose_z: 0.0
+    initial_pose_yaw: 0.0
+    initial_pose_file: ""
+    publish_tf: true
+    publish_diagnostics: true
