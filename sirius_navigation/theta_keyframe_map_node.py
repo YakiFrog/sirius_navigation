@@ -8,10 +8,21 @@
     -> ループ閉じ込め後は地図全体が最新の最適化姿勢で作り直される
 これにより壁の2重（ドリフト）が解消される。
 
+姿勢の与え方は2通り（pose_source）:
+  - tf   : odom_frame <- cloud.frame_id をTFでlookup（実機。SLAMのmap->odom補正に対応）
+  - odom : /Odometry（camera_init->body）をスキャンのstampで直結し、
+           静的TF(body<-lidar)を合成。FAST-LIOが各スキャンに使った姿勢と
+           完全に一致するため、TF補間/遅延由来のズレが出ない（Webシミュ向け）。
+
 使い方（例）:
+  # 実機（TF・SLAM補正あり）
   ros2 run sirius_navigation theta_keyframe_map_node --ros-args \
     -p cloud_topic:=/velodyne_points_colored -p odom_frame:=sirius3/odom \
     -p map_frame:=map -p save_path:=$HOME/colored_map_slam.ply
+  # Webシミュ（FAST-LIOの/Odometry直結。map_frame無し）
+  ros2 run sirius_navigation theta_keyframe_map_node --ros-args \
+    -p cloud_topic:=/velodyne_points -p pose_source:=odom \
+    -p 'map_frame:=""' -p save_path:=$HOME/colored_sim.ply
   （map_frame を空文字にすると odom のまま＝SLAM無し）
 SIGINTで最終再描画してPLY保存。
 """
@@ -25,11 +36,16 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.time import Time
 from rclpy.duration import Duration
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Header
 import sensor_msgs_py.point_cloud2 as pc2
 from tf2_ros import (Buffer, TransformListener, LookupException,
                      ConnectivityException, ExtrapolationException)
+
+
+def stamp_ns(msg):
+    return msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
 
 VOX_OFFSET = 1 << 20
 VOX_LIMIT = (1 << 21) - 1
@@ -104,6 +120,13 @@ class ThetaKeyframeMapNode(Node):
         self.declare_parameter('autosave_period', 0.0)  # >0 で定期保存
         self.declare_parameter('save_path', os.path.join(home, 'colored_map_slam.ply'))
         self.declare_parameter('max_keyframes', 3000)
+        # pose_source='tf'   : odom_frame <- cloud.frame_id をTFでlookup（実機）
+        # pose_source='odom' : /Odometry(camera_init->body)をstamp直結＋静的TF合成（Webシミュ）
+        self.declare_parameter('pose_source', 'tf')
+        self.declare_parameter('odom_topic', '/Odometry')
+        self.declare_parameter('body_frame', 'body')
+        self.declare_parameter('pose_tolerance', 0.15)
+        self.declare_parameter('cloud_buffer', 60)
 
         g = self.get_parameter
         self.odom_frame = g('odom_frame').value
@@ -116,11 +139,15 @@ class ThetaKeyframeMapNode(Node):
         self.min_interval = float(g('min_keyframe_interval').value)
         self.save_path = g('save_path').value
         self.max_keyframes = int(g('max_keyframes').value)
+        self.pose_source = str(g('pose_source').value)
+        self.body_frame = g('body_frame').value
+        self.pose_tol = max(1e-3, float(g('pose_tolerance').value))
+        self.cloud_buffer = int(g('cloud_buffer').value)
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.listener = TransformListener(self.tf_buffer, self)
 
-        self.key_xyz = deque()   # np arrays in odom frame
+        self.key_xyz = deque()   # np arrays (odom/camera_init frame)
         self.key_col = deque()
         self.last_pose = None
         self.last_kf_time = 0.0
@@ -128,6 +155,12 @@ class ThetaKeyframeMapNode(Node):
         self.skipped_tf = 0
         self.last_global = None  # 直近の正常な map->odom（終了時にTFが取れない場合の保険）
         self.dirty = False       # 新しいキーフレームが追加されたか
+        # pose_source='odom' 用
+        self.output_frame = self.odom_frame
+        self.odom_buffer = deque()   # (stamp_ns, rot, trans)
+        self.pending = deque()       # (stamp_ns, xyz, colors)
+        self.ext_cache = {}          # src frame -> (rot, trans)  body<-src
+        self.cloud_frame = ''
 
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -140,14 +173,17 @@ class ThetaKeyframeMapNode(Node):
         ]
         self.create_subscription(PointCloud2, g('cloud_topic').value, self.on_cloud,
                                  qos_profile_sensor_data)
+        if self.pose_source == 'odom':
+            self.create_subscription(Odometry, g('odom_topic').value, self.on_odom, 50)
         rp = max(1.0, float(g('rebuild_period').value))
         self.create_timer(rp, self.rebuild)
         asp = float(g('autosave_period').value)
         if asp > 0:
             self.create_timer(asp, lambda: self.save(self.save_path))
         self.get_logger().info(
-            f'keyframe map: {g("cloud_topic").value} odom={self.odom_frame} '
-            f'map="{self.map_frame}" voxel={self.voxel} -> {self.save_path}')
+            f'keyframe map: {g("cloud_topic").value} pose_source={self.pose_source} '
+            f'odom={self.odom_frame} map="{self.map_frame}" voxel={self.voxel} '
+            f'-> {self.save_path}')
 
     def _lookup(self, target, source, stamp):
         try:
@@ -176,6 +212,16 @@ class ThetaKeyframeMapNode(Node):
             xyz, colors = xyz[keep], colors[keep]
         if xyz.shape[0] == 0:
             return
+        if self.pose_source == 'odom':
+            self.cloud_frame = msg.header.frame_id or self.cloud_frame
+            self.pending.append((stamp_ns(msg), xyz, colors))
+            while len(self.pending) > self.cloud_buffer:
+                self.pending.popleft()
+            self._drain_pending()
+            return
+        self._add_tf_scan(msg, xyz, colors)
+
+    def _add_tf_scan(self, msg, xyz, colors):
         src = msg.header.frame_id or (self.map_frame or self.odom_frame)
         stamp = Time.from_msg(msg.header.stamp)
         # オフライン再生では雲とTFの到達順が前後して補間が外れることがあるため、
@@ -189,11 +235,64 @@ class ThetaKeyframeMapNode(Node):
                 self.get_logger().warning(
                     f'TF {self.odom_frame} <- {src} 取得待ち ({self.skipped_tf})')
             return
-        rot, trans = tfm
-        xyz_odom = xyz @ rot.T + trans
+        self._add_keyframe(xyz, colors, tfm[0], tfm[1])
+
+    def on_odom(self, msg):
+        p = msg.pose.pose
+        rot = quat_to_matrix(p.orientation.x, p.orientation.y,
+                             p.orientation.z, p.orientation.w)
+        trans = np.array([p.position.x, p.position.y, p.position.z])
+        self.odom_buffer.append((stamp_ns(msg), rot, trans))
+        self.output_frame = msg.header.frame_id or self.output_frame
+        while len(self.odom_buffer) > 200:
+            self.odom_buffer.popleft()
+        self._drain_pending()
+
+    def _extrinsic(self, src):
+        """body <- src の静的変換（キャッシュ）。"""
+        if src in self.ext_cache:
+            return self.ext_cache[src]
+        tfm = self._lookup(self.body_frame, src, Time())
+        if tfm is None:
+            return None
+        self.ext_cache[src] = tfm
+        return tfm
+
+    def _drain_pending(self):
+        if not self.odom_buffer:
+            return
+        while self.pending:
+            st, xyz, colors = self.pending[0]
+            match = None
+            for (ot, rot, trans) in self.odom_buffer:
+                if abs(ot - st) <= self.pose_tol * 1e9:
+                    match = (rot, trans, abs(ot - st))
+                    break
+            if match is None:
+                # 最新のodomより十分古いスキャンは対応が無いので破棄
+                if self.odom_buffer[-1][0] - st > self.pose_tol * 1e9:
+                    self.pending.popleft()
+                    self.skipped_tf += 1
+                    continue
+                break
+            self.pending.popleft()
+            ext = self._extrinsic(self.cloud_frame)
+            if ext is None:
+                self.skipped_tf += 1
+                if self.skipped_tf % 50 == 1:
+                    self.get_logger().warning(
+                        f'TF {self.body_frame} <- {self.cloud_frame} 取得待ち ({self.skipped_tf})')
+                continue
+            erot, etrans = ext
+            rot = match[0] @ erot
+            trans = match[0] @ etrans + match[1]
+            self._add_keyframe(xyz, colors, rot, trans)
+
+    def _add_keyframe(self, xyz, colors, rot, trans):
         now = time.time()
         if not self._is_keyframe(rot, trans, now):
             return
+        xyz_odom = xyz @ rot.T + trans
         sx, sc = voxel_reduce(xyz_odom, colors, self.voxel)
         self.key_xyz.append(sx)
         self.key_col.append(sc)
@@ -252,7 +351,7 @@ class ThetaKeyframeMapNode(Node):
         data['rgb'] = packed
         msg = PointCloud2()
         msg.header = Header(stamp=self.get_clock().now().to_msg(),
-                            frame_id=self.map_frame or self.odom_frame)
+                            frame_id=self.map_frame or self.output_frame)
         msg.height, msg.width = 1, xyz.shape[0]
         msg.fields = self.fields
         msg.is_bigendian = False
