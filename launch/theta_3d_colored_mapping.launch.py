@@ -13,6 +13,7 @@
   - autosave_period 秒ごと + SIGINT時に save_path へPLY保存
 """
 import os
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -70,11 +71,17 @@ def generate_launch_description():
             'max_range': 60.0,
         }])
 
+    with open(os.path.join(share, 'config', 'fast_lio_sirius.yaml')) as stream:
+        mapping = yaml.safe_load(stream)['/**']['ros__parameters']['mapping']
     keyframe = Node(
         package='sirius_navigation', executable='theta_keyframe_map_node',
         name='theta_keyframe_map', output='screen',
         parameters=[{
             'cloud_topic': '/velodyne_points_colored',
+            'pose_source': 'odom', 'odom_topic': '/Odometry', 'body_frame': 'body',
+            'use_lidar_extrinsic': True, 'lidar_frame': 'sirius3/lidar_link',
+            'lidar_translation': mapping['extrinsic_T'], 'lidar_rotation': mapping['extrinsic_R'],
+            'geometry_topic': '/Laser_map', 'color_max_distance': 0.5,
             'odom_frame': odom_frame,
             'map_frame': map_frame,
             'output_topic': '/colored_map_3d',

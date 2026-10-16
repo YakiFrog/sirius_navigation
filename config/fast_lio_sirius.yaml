@@ -7,6 +7,27 @@
         filter_size_map: 0.5
         cube_side_length: 1000.0
         runtime_pos_log_enable: false
+        wheel:
+          enabled: true
+          topic: /odom
+          child_frame: sirius3/base_footprint
+          max_age: 0.2
+          velocity_std: 0.05
+          yaw_rate_std: 0.05
+          imu_to_base_translation:
+          - 0.0
+          - 0.0
+          - -0.65
+          imu_from_base_rotation:
+          - 1.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 1.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 1.0
         map_file_path: "./test.pcd"
         common:
             lid_topic: "/velodyne_points"

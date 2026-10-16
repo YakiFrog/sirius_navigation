@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""色付き点群をキーフレーム化して蓄積し、SLAMの map->odom でその都度「全体を再描画」する。
+"""LaserMapへの色付け、または色付き点群のキーフレーム蓄積。
+
+geometry_topic指定時は、その地図のXYZ・点数・フレーム・時刻を保持してRGBだけ付与する。
+色付きスキャンは色の観測としてのみ保存し、地図の形状には使用しない。
+以下のキーフレームによる独立地図生成はgeometry_topic未指定時のみ。
 
 通常のオンライン蓄積だと、SLAMのループ閉じ込めで map->odom がジャンプしても
 過去の点は直らず継ぎ目が残る。本ノードは:
@@ -22,6 +26,7 @@
   # Webシミュ（FAST-LIOの/Odometry直結。map_frame無し）
   ros2 run sirius_navigation theta_keyframe_map_node --ros-args \
     -p cloud_topic:=/velodyne_points -p pose_source:=odom \
+    -p geometry_topic:=/Laser_map \
     -p 'map_frame:=""' -p save_path:=$HOME/colored_sim.ply
   （map_frame を空文字にすると odom のまま＝SLAM無し）
 SIGINTで最終再描画してPLY保存。
@@ -31,6 +36,7 @@ import time
 from collections import deque
 
 import numpy as np
+from scipy.spatial.transform import Rotation, Slerp
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -102,6 +108,23 @@ def write_ply(path, xyz, rgb_u8):
         f.write(arr.tobytes())
 
 
+def map_point_colors(xyz, samples, colors, max_distance):
+    """Assign nearby observed RGB without changing any map point, including NaNs."""
+    from scipy.spatial import cKDTree
+
+    result = np.full((len(xyz), 3), 0.5)
+    valid_samples = np.isfinite(samples).all(axis=1)
+    valid_map = np.flatnonzero(np.isfinite(xyz).all(axis=1))
+    if not valid_samples.any() or not len(valid_map):
+        return result
+    samples, colors = samples[valid_samples], colors[valid_samples]
+    distances, indices = cKDTree(samples).query(
+        xyz[valid_map], distance_upper_bound=max_distance)
+    matched = np.isfinite(distances)
+    result[valid_map[matched]] = colors[indices[matched]]
+    return result
+
+
 class ThetaKeyframeMapNode(Node):
     def __init__(self):
         super().__init__('theta_keyframe_map')
@@ -110,6 +133,8 @@ class ThetaKeyframeMapNode(Node):
         self.declare_parameter('odom_frame', 'sirius3/odom')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('output_topic', '/colored_map_3d')
+        self.declare_parameter('geometry_topic', '')
+        self.declare_parameter('color_max_distance', 0.5)
         self.declare_parameter('voxel', 0.05)
         self.declare_parameter('min_range', 0.5)
         self.declare_parameter('max_range', 60.0)
@@ -125,11 +150,23 @@ class ThetaKeyframeMapNode(Node):
         self.declare_parameter('pose_source', 'tf')
         self.declare_parameter('odom_topic', '/Odometry')
         self.declare_parameter('body_frame', 'body')
-        self.declare_parameter('pose_tolerance', 0.15)
+        self.declare_parameter('pose_tolerance', 0.002)
         self.declare_parameter('cloud_buffer', 60)
+        # FAST-LIO mapping.extrinsic_T/R と同じ body <- lidar。
+        # シミュではロボットTFが未配信でも同じ外部校正で地図を作る。
+        self.declare_parameter('use_lidar_extrinsic', False)
+        self.declare_parameter('lidar_frame', 'sirius3/lidar_link')
+        self.declare_parameter('lidar_translation', [0.0, 0.0, 0.0])
+        self.declare_parameter('lidar_rotation', np.eye(3).reshape(-1).tolist())
 
         g = self.get_parameter
         self.odom_frame = g('odom_frame').value
+        self.geometry_topic = g('geometry_topic').value
+        self.color_max_distance = float(g('color_max_distance').value)
+        self.geometry_msg = None
+        self.geometry_xyz = None
+        self.geometry_colors = None
+        self.geometry_publisher = None
         self.map_frame = g('map_frame').value
         self.voxel = float(g('voxel').value)
         self.min_range = float(g('min_range').value)
@@ -143,6 +180,12 @@ class ThetaKeyframeMapNode(Node):
         self.body_frame = g('body_frame').value
         self.pose_tol = max(1e-3, float(g('pose_tolerance').value))
         self.cloud_buffer = int(g('cloud_buffer').value)
+        self.lidar_frame = g('lidar_frame').value
+        self.lidar_extrinsic = None
+        if g('use_lidar_extrinsic').value:
+            self.lidar_extrinsic = (
+                np.asarray(g('lidar_rotation').value, dtype=float).reshape(3, 3),
+                np.asarray(g('lidar_translation').value, dtype=float).reshape(3))
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.listener = TransformListener(self.tf_buffer, self)
@@ -158,9 +201,8 @@ class ThetaKeyframeMapNode(Node):
         # pose_source='odom' 用
         self.output_frame = self.odom_frame
         self.odom_buffer = deque()   # (stamp_ns, rot, trans)
-        self.pending = deque()       # (stamp_ns, xyz, colors)
+        self.pending = deque()       # (stamp_ns, source_frame, xyz, colors)
         self.ext_cache = {}          # src frame -> (rot, trans)  body<-src
-        self.cloud_frame = ''
 
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -175,6 +217,9 @@ class ThetaKeyframeMapNode(Node):
                                  qos_profile_sensor_data)
         if self.pose_source == 'odom':
             self.create_subscription(Odometry, g('odom_topic').value, self.on_odom, 50)
+        if self.geometry_topic:
+            self.create_subscription(PointCloud2, self.geometry_topic, self.on_geometry,
+                                     QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE))
         rp = max(1.0, float(g('rebuild_period').value))
         self.create_timer(rp, self.rebuild)
         asp = float(g('autosave_period').value)
@@ -183,7 +228,33 @@ class ThetaKeyframeMapNode(Node):
         self.get_logger().info(
             f'keyframe map: {g("cloud_topic").value} pose_source={self.pose_source} '
             f'odom={self.odom_frame} map="{self.map_frame}" voxel={self.voxel} '
+            f'geometry="{self.geometry_topic}" '
             f'-> {self.save_path}')
+
+    def on_geometry(self, msg, info):
+        """Replace geometry with the latest LaserMap; never accumulate map messages."""
+        publisher = (info.get('publisher_gid') if isinstance(info, dict)
+                     else getattr(info, 'publisher_gid', None))
+        if publisher is None:
+            # Jazzyの一部のrclpyは時刻だけをMessageInfo辞書に含める。
+            publishers = self.get_publishers_info_by_topic(self.geometry_topic)
+            publisher = publishers[0].endpoint_gid if len(publishers) == 1 else b''
+        publisher = bytes(publisher)
+        if self.geometry_publisher is not None and publisher != self.geometry_publisher:
+            # FAST-LIO再起動前の原点で得た色の観測を再利用しない。
+            self.key_xyz.clear()
+            self.key_col.clear()
+            self.odom_buffer.clear()
+            self.pending.clear()
+            self.last_pose = None
+        self.geometry_publisher = publisher
+        pts = pc2.read_points(msg, field_names=['x', 'y', 'z'], skip_nans=False)
+        self.geometry_xyz = np.stack([pts['x'], pts['y'], pts['z']], axis=-1).reshape(-1, 3)
+        # 元メッセージの大きなdataバッファは保持せず、形状とヘッダだけ保存する。
+        self.geometry_msg = PointCloud2(
+            header=msg.header, width=msg.width, height=msg.height, is_dense=msg.is_dense)
+        self.geometry_colors = None
+        self.dirty = True
 
     def _lookup(self, target, source, stamp):
         try:
@@ -202,6 +273,7 @@ class ThetaKeyframeMapNode(Node):
         packed = np.asarray(pts['rgb'], dtype=np.float32).view(np.uint32)
         colors = np.stack([((packed >> 16) & 255), ((packed >> 8) & 255), (packed & 255)],
                           axis=-1).astype(np.float64) / 255.0
+        offsets = np.asarray(pts['time'], dtype=float).reshape(-1) if 'time' in pts.dtype.names else None
         if self.min_range > 0 or self.max_range > 0:
             dist = np.linalg.norm(xyz, axis=-1)
             keep = np.ones(xyz.shape[0], bool)
@@ -210,11 +282,12 @@ class ThetaKeyframeMapNode(Node):
             if self.max_range > 0:
                 keep &= dist <= self.max_range
             xyz, colors = xyz[keep], colors[keep]
+            if offsets is not None:
+                offsets = offsets[keep]
         if xyz.shape[0] == 0:
             return
         if self.pose_source == 'odom':
-            self.cloud_frame = msg.header.frame_id or self.cloud_frame
-            self.pending.append((stamp_ns(msg), xyz, colors))
+            self.pending.append((stamp_ns(msg), msg.header.frame_id, xyz, colors, offsets))
             while len(self.pending) > self.cloud_buffer:
                 self.pending.popleft()
             self._drain_pending()
@@ -250,6 +323,10 @@ class ThetaKeyframeMapNode(Node):
 
     def _extrinsic(self, src):
         """body <- src の静的変換（キャッシュ）。"""
+        if src == self.body_frame:
+            return np.eye(3), np.zeros(3)
+        if src == self.lidar_frame and self.lidar_extrinsic is not None:
+            return self.lidar_extrinsic
         if src in self.ext_cache:
             return self.ext_cache[src]
         tfm = self._lookup(self.body_frame, src, Time())
@@ -262,30 +339,56 @@ class ThetaKeyframeMapNode(Node):
         if not self.odom_buffer:
             return
         while self.pending:
-            st, xyz, colors = self.pending[0]
-            match = None
-            for (ot, rot, trans) in self.odom_buffer:
-                if abs(ot - st) <= self.pose_tol * 1e9:
-                    match = (rot, trans, abs(ot - st))
+            item = self.pending[0]
+            st, src, xyz, colors = item[:4]
+            offsets = item[4] if len(item) > 4 else None
+            if offsets is not None and len(offsets) and np.max(offsets) > 0:
+                if not np.isfinite(offsets).all() or np.min(offsets) < 0 or np.max(offsets) > .5:
+                    self.pending.popleft(); self.skipped_tf += 1
+                    continue
+                end = st + float(np.max(offsets)) * 1e9
+                if self.odom_buffer[-1][0] < end - 1000:
                     break
-            if match is None:
-                # 最新のodomより十分古いスキャンは対応が無いので破棄
-                if self.odom_buffer[-1][0] - st > self.pose_tol * 1e9:
-                    self.pending.popleft()
+                if self.odom_buffer[0][0] > st + 1000:
+                    self.pending.popleft(); self.skipped_tf += 1
+                    continue
+                ext = self._extrinsic(src)
+                if ext is None:
+                    break
+                self.pending.popleft()
+                samples = list(self.odom_buffer)
+                ts = np.array([(p[0]-st)*1e-9 for p in samples])
+                keep = np.r_[True, np.diff(ts) > 0]
+                ts = ts[keep]
+                rotations = np.array([p[1] for p in samples])[keep]
+                positions = np.array([p[2] for p in samples])[keep]
+                if len(ts) < 2:
                     self.skipped_tf += 1
                     continue
+                query = np.clip(offsets, ts[0], ts[-1])
+                world = Slerp(ts, Rotation.from_matrix(rotations))(query).apply(xyz @ ext[0].T + ext[1])
+                world += np.column_stack([np.interp(query, ts, positions[:, axis]) for axis in range(3)])
+                anchor = Slerp(ts, Rotation.from_matrix(rotations))([query.max()]).as_matrix()[0]
+                trans = np.array([np.interp(query.max(), ts, positions[:, axis]) for axis in range(3)])
+                self._add_keyframe((world-trans) @ anchor, colors, anchor, trans)
+                continue
+            ot, orot, otrans = min(self.odom_buffer, key=lambda p: abs(p[0] - st))
+            # FAST-LIOのdouble秒→ROS stamp変換によるns丸めだけは同時刻扱い。
+            # 古い姿勢しか届いていない場合は対応するスキャンの処理完了を待つ。
+            if self.odom_buffer[-1][0] < st - 1000:
+                break
+            if abs(ot - st) > self.pose_tol * 1e9:
+                self.pending.popleft()
+                self.skipped_tf += 1
+                continue
+            ext = self._extrinsic(src)
+            if ext is None:
+                # TFが後から届く場合に備えてキューに残す。
                 break
             self.pending.popleft()
-            ext = self._extrinsic(self.cloud_frame)
-            if ext is None:
-                self.skipped_tf += 1
-                if self.skipped_tf % 50 == 1:
-                    self.get_logger().warning(
-                        f'TF {self.body_frame} <- {self.cloud_frame} 取得待ち ({self.skipped_tf})')
-                continue
             erot, etrans = ext
-            rot = match[0] @ erot
-            trans = match[0] @ etrans + match[1]
+            rot = orot @ erot
+            trans = orot @ etrans + otrans
             self._add_keyframe(xyz, colors, rot, trans)
 
     def _add_keyframe(self, xyz, colors, rot, trans):
@@ -296,6 +399,7 @@ class ThetaKeyframeMapNode(Node):
         sx, sc = voxel_reduce(xyz_odom, colors, self.voxel)
         self.key_xyz.append(sx)
         self.key_col.append(sc)
+        self.geometry_colors = None
         while len(self.key_xyz) > self.max_keyframes:
             self.key_xyz.popleft(); self.key_col.popleft()
         self.last_pose = (rot, trans)
@@ -325,6 +429,16 @@ class ThetaKeyframeMapNode(Node):
         return tfm
 
     def _assemble(self):
+        if self.geometry_topic:
+            if self.geometry_xyz is None:
+                return None, None
+            if self.geometry_colors is None:
+                self.geometry_colors = np.full((len(self.geometry_xyz), 3), 0.5)
+                if self.key_xyz and self.geometry_msg.header.frame_id == self.output_frame:
+                    self.geometry_colors = map_point_colors(
+                        self.geometry_xyz, np.concatenate(self.key_xyz),
+                        np.concatenate(self.key_col), self.color_max_distance)
+            return self.geometry_xyz, self.geometry_colors
         if not self.key_xyz:
             return None, None
         tfm = self._global_transform()
@@ -350,14 +464,18 @@ class ThetaKeyframeMapNode(Node):
         data['x'], data['y'], data['z'] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
         data['rgb'] = packed
         msg = PointCloud2()
-        msg.header = Header(stamp=self.get_clock().now().to_msg(),
-                            frame_id=self.map_frame or self.output_frame)
-        msg.height, msg.width = 1, xyz.shape[0]
+        if self.geometry_topic:
+            msg.header = self.geometry_msg.header
+            msg.height, msg.width = self.geometry_msg.height, self.geometry_msg.width
+        else:
+            msg.header = Header(stamp=self.get_clock().now().to_msg(),
+                                frame_id=self.map_frame or self.output_frame)
+            msg.height, msg.width = 1, xyz.shape[0]
         msg.fields = self.fields
         msg.is_bigendian = False
         msg.point_step = dtype.itemsize
-        msg.row_step = dtype.itemsize * xyz.shape[0]
-        msg.is_dense = True
+        msg.row_step = dtype.itemsize * msg.width
+        msg.is_dense = self.geometry_msg.is_dense if self.geometry_topic else True
         msg.data = data.tobytes()
         self.pub.publish(msg)
         self.get_logger().info(

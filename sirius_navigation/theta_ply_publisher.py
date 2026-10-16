@@ -84,6 +84,7 @@ class PlyPublisher(Node):
         home = os.path.expanduser('~')
         self.declare_parameter('ply_file', '')
         self.declare_parameter('topic', '/colored_map')
+        self.declare_parameter('geometry_topic', '')
         self.declare_parameter('frame_id', 'sirius3/odom')
         self.declare_parameter('period_sec', 3.0)
         self.declare_parameter('rosbag_dir', os.path.join(home, 'rosbag2_data'))
@@ -107,6 +108,8 @@ class PlyPublisher(Node):
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub = self.create_publisher(PointCloud2, self.get_parameter('topic').value, qos)
+        geometry_topic = self.get_parameter('geometry_topic').value
+        self.geometry_pub = self.create_publisher(PointCloud2, geometry_topic, qos) if geometry_topic else None
         period = max(0.5, float(self.get_parameter('period_sec').value))
         self.create_timer(period, self.publish)
         self.publish()
@@ -130,6 +133,10 @@ class PlyPublisher(Node):
         msg.is_dense = True
         msg.data = self.data.tobytes()
         self.pub.publish(msg)
+        if self.geometry_pub is not None:
+            # The RGB bytes become padding; XYZ and point order stay identical.
+            msg.fields = msg.fields[:3]
+            self.geometry_pub.publish(msg)
 
 
 def main():

@@ -55,6 +55,29 @@ def quaternion_to_matrix(x, y, z, w):
     ])
 
 
+
+def color_cloud_preserving_fields(msg, rgb):
+    """Add packed RGB while preserving XYZ, ring, time, order and every input field."""
+    import copy
+    count = msg.width * msg.height
+    existing = next((f for f in msg.fields if f.name == 'rgb'), None)
+    if existing is not None and (existing.datatype != PointField.FLOAT32 or existing.count != 1):
+        raise ValueError('Existing rgb field must be FLOAT32 count=1')
+    offset = existing.offset if existing is not None else (msg.point_step + 3) // 4 * 4
+    step = msg.point_step if existing is not None else offset+4
+    rows = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(msg.height, msg.row_step)
+    original = rows[:, :msg.width*msg.point_step].copy().reshape(count, msg.point_step)
+    data = np.zeros((count, step), dtype=np.uint8)
+    data[:, :msg.point_step] = original
+    packed = np.ndarray((count,), dtype='>u4' if msg.is_bigendian else '<u4', buffer=data, offset=offset, strides=(step,))
+    packed[:] = np.asarray(rgb, dtype=np.uint32).reshape(-1)
+    fields = copy.deepcopy(msg.fields)
+    if existing is None:
+        fields.append(PointField(name='rgb', offset=offset, datatype=PointField.FLOAT32, count=1))
+    return PointCloud2(header=msg.header, height=msg.height, width=msg.width, fields=fields,
+                       is_bigendian=msg.is_bigendian, point_step=step, row_step=step*msg.width,
+                       is_dense=msg.is_dense, data=data.tobytes())
+
 class ThetaColorizeCloudNode(Node):
     def __init__(self):
         super().__init__('theta_colorize_cloud')
@@ -207,7 +230,7 @@ class ThetaColorizeCloudNode(Node):
             self.get_logger().warning('THETA画像が未受信のため色付けできません',
                                       throttle_duration_sec=5)
             return
-        points = pc2.read_points(msg, field_names=None, skip_nans=False)
+        points = pc2.read_points(msg, field_names=None, skip_nans=False).reshape(-1)
         xyz = np.stack([points['x'], points['y'], points['z']], axis=-1).astype(np.float64)
         intensity = (points['intensity'].astype(np.float32)
                      if 'intensity' in points.dtype.names else np.zeros(len(xyz), np.float32))
@@ -237,21 +260,7 @@ class ThetaColorizeCloudNode(Node):
             r = bgr[keep, 2].astype(np.uint32)
             rgb[sel] = (r << 16) | (g << 8) | b
 
-        out = np.empty(count, dtype=self.dtype)
-        out['x'], out['y'], out['z'] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-        out['intensity'] = intensity
-        out['rgb'] = rgb.view(np.float32)
-
-        header = Header(stamp=msg.header.stamp, frame_id=msg.header.frame_id)
-        cloud = PointCloud2()
-        cloud.header = header
-        cloud.height, cloud.width = 1, count
-        cloud.fields = self.fields
-        cloud.is_bigendian = False
-        cloud.point_step = self.dtype.itemsize
-        cloud.row_step = self.dtype.itemsize * count
-        cloud.is_dense = False
-        cloud.data = out.tobytes()
+        cloud = color_cloud_preserving_fields(msg, rgb)
         self.pub.publish(cloud)
 
     def _sample_rgb(self, image, uv):
