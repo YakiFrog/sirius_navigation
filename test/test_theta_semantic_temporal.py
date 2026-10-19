@@ -172,3 +172,13 @@ def test_reverse_tactile_cannot_inherit_a_high_road_score_and_protects_grass():
     ids,score=merge_tactile_tracks(raw,forward,fs,reverse,rs)
     np.testing.assert_array_equal(ids,[[4,4,3,0]])
     np.testing.assert_array_equal(score,[[150,190,250,0]])
+
+
+def test_shadow_color_fraction_is_opt_in_and_never_seeds_gray_only_components():
+    from sirius_navigation.theta_semantic_temporal import yellow_tactile_seeds
+    image=np.full((20,20,3),45,np.uint8);image[:5]=(10,70,85)
+    ids=np.full((20,20),4,np.uint8);scores=np.full_like(ids,200)
+    assert not yellow_tactile_seeds(image,ids,scores).any()
+    assert yellow_tactile_seeds(image,ids,scores,yellow_fraction=.2).all()
+    image[:]=45
+    assert not yellow_tactile_seeds(image,ids,scores,yellow_fraction=.2).any()

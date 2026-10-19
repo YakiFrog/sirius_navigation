@@ -153,17 +153,17 @@ def yellow_tactile_appearance(image,min_saturation=100,hue_max=32,close_holes=Fa
     return keep.astype(bool)
 
 
-def yellow_tactile_seeds(image,labels,scores,score_min=.5,min_area=16):
+def yellow_tactile_seeds(image,labels,scores,score_min=.5,min_area=16,*,yellow_fraction=.35,min_saturation=45):
     """Require SAM3's yellow-tactile class plus component-level yellow evidence.
 
     Preserve dark ridges within a yellow block instead of clipping each yellow
     pixel. Gray components are unknown, never automatically relabeled sidewalk.
     """
     candidate=(labels==4)&(scores.astype(np.float32)/255.>=score_min)
-    yellow=yellow_tactile_appearance(image,45,40)
+    yellow=yellow_tactile_appearance(image,min_saturation,40)
     n,components,stats,_=cv2.connectedComponentsWithStats(candidate.astype(np.uint8),8)
     area=stats[:,cv2.CC_STAT_AREA];hits=np.bincount(components[yellow],minlength=n)
-    valid=(area>=min_area)&(hits/np.maximum(area,1)>=.35);valid[0]=False
+    valid=(area>=min_area)&(hits/np.maximum(area,1)>=yellow_fraction);valid[0]=False
     return valid[components]
 
 
@@ -184,8 +184,9 @@ class CausalTactileConsistency(CausalRoadConsistency):
     counted as a fresh detector observation: it retains its detector score.
     Unmatched, occluded and out-of-view pixels are discarded every frame.
     """
-    def __init__(self,history_size=4,max_gap=1.5,score_min=.5):
+    def __init__(self,history_size=4,max_gap=1.5,score_min=.5,*,yellow_fraction=.35,min_saturation=45):
         super().__init__(history_size,max_gap,score_min)
+        self.yellow_fraction=yellow_fraction;self.min_saturation=min_saturation
         self.track=None
 
     def clear(self):
@@ -195,7 +196,8 @@ class CausalTactileConsistency(CausalRoadConsistency):
         if self.history and (stamp<=self.history[-1].stamp or stamp-self.history[-1].stamp>self.max_gap
                              or image.shape!=self.history[-1].image.shape):self.clear()
         result=labels.copy();result_scores=scores.copy()
-        seed=yellow_tactile_seeds(image,labels,scores,self.score_min)
+        seed=yellow_tactile_seeds(image,labels,scores,self.score_min,
+            yellow_fraction=self.yellow_fraction,min_saturation=self.min_saturation)
         rejected=(labels==4)&~seed
         result[rejected]=0;result_scores[rejected]=0
         tracked=np.zeros(labels.shape,bool);conf=np.zeros(labels.shape,np.float32)
@@ -205,7 +207,8 @@ class CausalTactileConsistency(CausalRoadConsistency):
             # Component appearance prevents tracks migrating to gray tile. Local
             # mismatches remain holes; no dilation bridges an occluder or border.
             tracked=yellow_tactile_seeds(image,np.where(tracked,4,0).astype(np.uint8),
-                np.rint(conf*255).astype(np.uint8),self.score_min)
+                np.rint(conf*255).astype(np.uint8),self.score_min,
+                yellow_fraction=self.yellow_fraction,min_saturation=self.min_saturation)
         fill=tracked&~seed
         result[fill]=4;result_scores[fill]=np.rint(conf[fill]*255).astype(np.uint8)
         state=np.where(seed|tracked,4,0).astype(np.uint8)
