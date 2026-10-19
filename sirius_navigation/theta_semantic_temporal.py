@@ -190,7 +190,7 @@ class CausalTactileConsistency(CausalRoadConsistency):
         rejected=(labels==4)&~seed
         result[rejected]=0;result_scores[rejected]=0
         tracked=np.zeros(labels.shape,bool);conf=np.zeros(labels.shape,np.float32)
-        if self.track is not None:
+        if self.track is not None and np.any(self.track.labels==4):
             ids,conf,reliability=align_observation(image,self.track)
             tracked=(ids==4)&(reliability>=.4)&np.isin(labels,(0,4,5,6))
             # Component appearance prevents tracks migrating to gray tile. Local
