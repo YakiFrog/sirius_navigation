@@ -37,6 +37,10 @@ def generate_launch_description():
     grid_range_max = LaunchConfiguration('grid_range_max')
     lidar_topic = LaunchConfiguration('lidar_topic')
     lidar_gate = LaunchConfiguration('lidar_gate')
+    lidar_strict = LaunchConfiguration('lidar_strict_visibility')
+    lidar_padding = LaunchConfiguration('lidar_obstacle_padding_m')
+    rear_weight = LaunchConfiguration('rear_observation_weight')
+    min_relative_weight = LaunchConfiguration('min_relative_observation_weight')
     quality_weight_enable = LaunchConfiguration('quality_weight_enable')
     quality_power = LaunchConfiguration('quality_power')
     quality_weight_floor = LaunchConfiguration('quality_weight_floor')
@@ -74,6 +78,15 @@ def generate_launch_description():
     declare_lidar_gate = DeclareLaunchArgument(
         'lidar_gate', default_value='false',
         description='true で /scan3 のフリースペース内の地面点だけを残す（食い合い軽減）')
+    declare_lidar_strict = DeclareLaunchArgument(
+        'lidar_strict_visibility', default_value='false',
+        description='同期LiDARとTFで遮蔽を判定。スキャン不明時は路面を取り込まない')
+    declare_lidar_padding = DeclareLaunchArgument('lidar_obstacle_padding_m', default_value='0.0',
+        description='厳密な遮蔽判定で障害物の周囲に付ける余白の半径[m]')
+    declare_rear_weight = DeclareLaunchArgument('rear_observation_weight', default_value='1.0',
+        description='後方の観測重み。前方=1、側方は滑らかに補間（0..1）')
+    declare_min_relative_weight = DeclareLaunchArgument('min_relative_observation_weight', default_value='0.0',
+        description='各セルの最良観測に対して採用する最低品質比。0=保護無効（0..1）')
     declare_quality_weight_enable = DeclareLaunchArgument(
         'quality_weight_enable', default_value='true',
         description='地面点に観測品質weight（入射角cosのべき乗）を付与する')
@@ -120,8 +133,11 @@ def generate_launch_description():
                      'max_radius': ParameterValue(max_radius, value_type=float),
                      'lidar_topic': lidar_topic,
                      'lidar_gate': ParameterValue(lidar_gate, value_type=bool),
+                     'lidar_strict_visibility': ParameterValue(lidar_strict, value_type=bool),
+                     'lidar_obstacle_padding_m': ParameterValue(lidar_padding, value_type=float),
                      'quality_weight_enable': ParameterValue(quality_weight_enable, value_type=bool),
                      'quality_power': ParameterValue(quality_power, value_type=float),
+                     'rear_observation_weight': ParameterValue(rear_weight, value_type=float),
                      'quality_weight_floor': ParameterValue(quality_weight_floor, value_type=float),
                      'calibration': calibration}],
         output='screen')
@@ -133,7 +149,10 @@ def generate_launch_description():
                      'use_observation_weight': ParameterValue(use_observation_weight, value_type=bool),
                      'texture_decay': ParameterValue(texture_decay, value_type=float),
                      'class_weight_switch': ParameterValue(class_weight_switch, value_type=float),
-                     'semantic_min_weight': ParameterValue(semantic_min_weight, value_type=float)}],
+                     'semantic_min_weight': ParameterValue(semantic_min_weight, value_type=float),
+                     'min_relative_observation_weight': ParameterValue(min_relative_weight, value_type=float),
+                     'fill_hole_m': ParameterValue(PythonExpression([
+                         "0.0 if '", lidar_strict, "' == 'true' else 0.75"]), value_type=float)}],
         output='screen')
 
     # SAM3セマンティック（任意）。dual-fisheyeを透視投影しSAM3でクラス分類→地面逆投影して
@@ -201,6 +220,10 @@ def generate_launch_description():
         declare_grid_range_max,
         declare_lidar_topic,
         declare_lidar_gate,
+        declare_lidar_strict,
+        declare_lidar_padding,
+        declare_rear_weight,
+        declare_min_relative_weight,
         declare_quality_weight_enable,
         declare_quality_power,
         declare_quality_weight_floor,

@@ -20,6 +20,11 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, PointCloud2, PointField, LaserScan
 from std_msgs.msg import Header
 import sensor_msgs_py.point_cloud2 as pc2
+from rclpy.duration import Duration
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener, TransformException
+from sirius_navigation.theta_road_visibility import visible_ground
+from sirius_navigation.theta_road_weights import directional_weights
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -43,7 +48,11 @@ class ThetaGroundCloudNode(Node):
         # Scan3(2D LiDAR)連動: フリースペース内の地面点だけを残す（壁の向こう/角の裏を除外）
         self.declare_parameter('lidar_topic', '')
         self.declare_parameter('lidar_gate', False)
+        self.declare_parameter('lidar_strict_visibility', False)
+        self.declare_parameter('lidar_max_age_sec', 0.15)
+        self.declare_parameter('lidar_fixed_frame', 'sirius3/odom')
         self.declare_parameter('lidar_margin_m', 0.25)
+        self.declare_parameter('lidar_obstacle_padding_m', 0.0)
         self.declare_parameter('lidar_keep_outside_fov', True)
         self.declare_parameter('lidar_offset', [0.0, 0.0])
         # 自機ボディ等の近距離ビームは障害物とみなさない（誤除外防止）
@@ -64,6 +73,8 @@ class ThetaGroundCloudNode(Node):
         # w = (h / sqrt(ρ² + h²)) ** quality_power  （ρ=機体からの水平距離, h=カメラ高）
         self.declare_parameter('quality_weight_enable', True)
         self.declare_parameter('quality_power', 2.0)
+        self.declare_parameter('rear_observation_weight', 1.0)
+        self.declare_parameter('direction_transition_degrees', 30.0)
         # 0より大きいと weight < floor の点を配信から除外する（既定0=全点保持）
         self.declare_parameter('quality_weight_floor', 0.0)
 
@@ -80,7 +91,14 @@ class ThetaGroundCloudNode(Node):
         self.semantic_wait = max(0.0, float(self.get_parameter('semantic_wait_sec').value))
         self.max_pending = max(1, int(self.get_parameter('max_pending').value))
         self.lidar_gate = bool(self.get_parameter('lidar_gate').value)
+        self.lidar_strict = bool(self.get_parameter('lidar_strict_visibility').value)
+        self.lidar_max_age = max(0.0, float(self.get_parameter('lidar_max_age_sec').value))
+        self.strict_scans = OrderedDict()
+        if self.lidar_strict:
+            self.visibility_tf = Buffer(cache_time=Duration(seconds=120.0))
+            self.visibility_listener = TransformListener(self.visibility_tf, self)
         self.lidar_margin = max(0.0, float(self.get_parameter('lidar_margin_m').value))
+        self.lidar_padding = max(0.0, float(self.get_parameter('lidar_obstacle_padding_m').value))
         self.lidar_keep_outside_fov = bool(self.get_parameter('lidar_keep_outside_fov').value)
         self.lidar_offset = [float(v) for v in self.get_parameter('lidar_offset').value]
         self.lidar_min_obstacle = max(0.0, float(self.get_parameter('lidar_min_obstacle_m').value))
@@ -88,6 +106,10 @@ class ThetaGroundCloudNode(Node):
         self.lidar_min_keep = max(0.0, float(self.get_parameter('lidar_gate_min_keep_ratio').value))
         self.quality_weight_enable = bool(self.get_parameter('quality_weight_enable').value)
         self.quality_power = max(0.0, float(self.get_parameter('quality_power').value))
+        self.rear_weight = float(self.get_parameter('rear_observation_weight').value)
+        self.direction_transition = float(self.get_parameter('direction_transition_degrees').value)
+        if not 0 <= self.rear_weight <= 1 or not 0 <= self.direction_transition <= 180:
+            raise ValueError('rear_observation_weight must be 0..1; direction transition must be 0..180 degrees')
         self.quality_weight_floor = max(0.0, float(self.get_parameter('quality_weight_floor').value))
         self.latest_scan = None  # (angle_min, angle_increment, ranges, range_max)
         self.scans = {}          # stamp_key -> scan（ゲートの時刻合わせ用）
@@ -184,6 +206,11 @@ class ThetaGroundCloudNode(Node):
                            publish_main=False, publish_semantic=True)
 
     def _on_scan(self, msg):
+        if self.lidar_strict:
+            ns = msg.header.stamp.sec * 1000000000 + msg.header.stamp.nanosec
+            self.strict_scans[ns] = msg
+            while self.strict_scans and next(iter(self.strict_scans)) < ns - 120000000000:
+                self.strict_scans.popitem(last=False)
         data = (msg.angle_min, msg.angle_increment,
                 np.asarray(msg.ranges, dtype=np.float32), float(msg.range_max))
         self.latest_scan = data
@@ -241,6 +268,32 @@ class ThetaGroundCloudNode(Node):
             throttle_duration_sec=3.0)
         return keep
 
+    def _strict_visibility(self, x, y, stamp, frame_id):
+        """Use the actual scan extrinsics and odometry between observation times."""
+        empty = np.zeros_like(x, dtype=bool)
+        if not self.strict_scans:
+            return empty
+        target = stamp.sec * 1000000000 + stamp.nanosec
+        nearest = min(self.strict_scans, key=lambda ns: abs(ns - target))
+        if abs(nearest - target) > self.lidar_max_age * 1e9:
+            return empty
+        scan = self.strict_scans[nearest]
+        try:
+            tf = self.visibility_tf.lookup_transform_full(
+                scan.header.frame_id, Time.from_msg(scan.header.stamp),
+                frame_id, Time.from_msg(stamp), self.get_parameter('lidar_fixed_frame').value)
+        except TransformException:
+            self.get_logger().warning('Road visibility: matching TF unavailable; observation skipped',
+                                      throttle_duration_sec=5.0)
+            return empty
+        q, t = tf.transform.rotation, tf.transform.translation
+        # Project each candidate into the scan plane, including its mounting yaw.
+        px = (1 - 2*(q.y*q.y + q.z*q.z))*x + 2*(q.x*q.y - q.z*q.w)*y + t.x
+        py = 2*(q.x*q.y + q.z*q.w)*x + (1 - 2*(q.x*q.x + q.z*q.z))*y + t.y
+        return visible_ground(px, py, scan.angle_min, scan.angle_increment,
+                              scan.ranges, scan.range_min, scan.range_max, self.lidar_margin,
+                              obstacle_padding=self.lidar_padding)
+
     def _emit(self, stamp, frame_id, image, semantic, publish_main=True, publish_semantic=True):
         height, width = image.shape[:2]
         step = self.stride
@@ -266,9 +319,17 @@ class ThetaGroundCloudNode(Node):
             weight = (self.camera_height / np.sqrt(radius_sq + self.camera_height ** 2)).astype(np.float32)
             if self.quality_power != 1.0:
                 weight = np.power(weight, self.quality_power).astype(np.float32)
-            if self.quality_weight_floor > 0.0:
-                valid &= weight >= self.quality_weight_floor
-        if self.lidar_gate and self.latest_scan is not None:
+        if self.rear_weight != 1.0:
+            weight *= directional_weights(x, y, self.rear_weight, self.direction_transition)
+            valid &= weight > 0
+        if self.quality_weight_floor > 0.0:
+            valid &= weight >= self.quality_weight_floor
+        if self.lidar_gate and self.lidar_strict:
+            before = int(np.count_nonzero(valid))
+            valid &= self._strict_visibility(x, y, stamp, frame_id)
+            self.get_logger().info(f'Road visibility: kept {int(valid.sum())}/{before} samples',
+                                   throttle_duration_sec=5.0)
+        elif self.lidar_gate and self.latest_scan is not None:
             before = int(np.count_nonzero(valid))
             valid &= self._lidar_free_mask(x, y, stamp)
             self.get_logger().info(

@@ -34,6 +34,7 @@ from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from sirius_navigation.semantic_costs import load_semantic_costs, costs_for
+from sirius_navigation.theta_road_weights import reliable_observations
 
 # 0=unknown, 1=wall, 2=floor, 3+=semantic class + 代表色（ZEDと同一）
 SEMANTIC_CLASSES = {
@@ -122,6 +123,7 @@ class ThetaIndexedMapNode(Node):
         self.declare_parameter('class_weight_switch', 1.0)
         # セマンティック採用に必要な重み合計の下限
         self.declare_parameter('semantic_min_weight', 0.3)
+        self.declare_parameter('min_relative_observation_weight', 0.0)
 
         self.res = self.get_parameter('grid_resolution').value
         self.map_frame = self.get_parameter('map_frame').value
@@ -132,6 +134,9 @@ class ThetaIndexedMapNode(Node):
         self.texture_decay = min(0.999, max(0.0, float(self.get_parameter('texture_decay').value)))
         self.class_weight_switch = max(0.0, float(self.get_parameter('class_weight_switch').value))
         self.semantic_min_weight = max(0.0, float(self.get_parameter('semantic_min_weight').value))
+        self.min_relative_weight = float(self.get_parameter('min_relative_observation_weight').value)
+        if not 0 <= self.min_relative_weight <= 1:
+            raise ValueError('min_relative_observation_weight must be 0..1')
 
         self.grid = None
         self.struct_grid = None
@@ -200,10 +205,12 @@ class ThetaIndexedMapNode(Node):
         self.texture_weight = np.zeros((self.height, self.width), dtype=np.float32)
         self.texture_count = np.zeros((self.height, self.width), dtype=np.int32)
         self.class_weight = np.zeros((self.height, self.width), dtype=np.float32)
+        self.best_observation_weight = np.zeros((self.height, self.width), dtype=np.float32)
         self.semantic_votes = np.zeros((self.height, self.width, MAX_CLASS_ID + 1), dtype=np.float32)
 
     def _expand_canvas(self, ox, oy, width, height):
         """キャンバスを拡大（既存の描画データを保持）。縮小はしない。"""
+        old_best = self.best_observation_weight
         old = (self.grid, self.texture_sum, self.texture_weight, self.texture_count,
                self.semantic_votes, self.class_weight,
                self.origin[0], self.origin[1], self.width, self.height)
@@ -222,6 +229,7 @@ class ThetaIndexedMapNode(Node):
             self.texture_count[dst] = old[3][src]
             self.semantic_votes[dst] = old[4][src]
             self.class_weight[dst] = old[5][src]
+            self.best_observation_weight[dst] = old_best[src]
 
     def _grid_callback(self, msg):
         # 構造（壁/フリー）は別配列に保持するだけにし、描画キャンバスには触れない。
@@ -320,6 +328,13 @@ class ThetaIndexedMapNode(Node):
         else:
             weight = np.ones(gx.size, dtype=np.float32)
         weight = np.maximum(weight.astype(np.float32), 0.0)
+        if self.min_relative_weight > 0:
+            accept = reliable_observations(gx, gy, weight, self.best_observation_weight,
+                                           self.min_relative_weight)
+            if not np.any(accept):
+                return
+            gx, gy, data = gx[accept], gy[accept], data[accept]
+            r, g, b, weight = r[accept], g[accept], b[accept], weight[accept]
         ri = np.clip(np.round(r / 63.75).astype(np.int32), 0, 4)
         gi = np.clip(np.round(g / 63.75).astype(np.int32), 0, 4)
         bi = np.clip(np.round(b / 63.75).astype(np.int32), 0, 4)

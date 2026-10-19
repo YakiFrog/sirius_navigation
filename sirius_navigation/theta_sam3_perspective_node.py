@@ -277,7 +277,10 @@ class ThetaSam3PerspectiveNode(Node):
 
     def _fetch_view_maps(self, frame):
         """frame をアップロードし、その結果の class/score マップ(out_size)を返す。"""
-        _, before = self._debug_versions()
+        before, _ = self._debug_versions()
+        if before < 0:
+            return None, None
+        target = before + 1
         kernel = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
         ok, encoded = cv2.imencode('.jpg', frame, kernel)
         if not ok:
@@ -287,15 +290,22 @@ class ThetaSam3PerspectiveNode(Node):
         deadline = time.time() + self.infer_timeout
         while time.time() < deadline:
             net, inf = self._debug_versions()
-            if inf > before and inf >= net:
+            if net == target and inf == target:
                 break
+            if net > target:
+                return None, None
             time.sleep(0.03)
+        else:
+            return None, None
         try:
             class_resp = requests.get(self.server + '/semantic_map.png', timeout=2.0)
             score_resp = requests.get(self.server + '/semantic_score.png', timeout=2.0)
         except Exception:
             return None, None
         if class_resp.status_code != 200 or score_resp.status_code != 200:
+            return None, None
+        if any(int(response.headers.get('X-Frame-Version', -1)) != target
+               for response in (class_resp, score_resp)):
             return None, None
         class_map = cv2.imdecode(np.frombuffer(class_resp.content, np.uint8), cv2.IMREAD_GRAYSCALE)
         score_map = cv2.imdecode(np.frombuffer(score_resp.content, np.uint8), cv2.IMREAD_GRAYSCALE)
@@ -309,6 +319,7 @@ class ThetaSam3PerspectiveNode(Node):
 
     def _infer_loop(self):
         self._configure_server()
+        processed = None
         while rclpy.ok():
             with self.lock:
                 item = self.latest
@@ -316,6 +327,11 @@ class ThetaSam3PerspectiveNode(Node):
                 time.sleep(0.1)
                 continue
             stamp, fisheye = item
+            key = (stamp.sec, stamp.nanosec)
+            if key == processed:
+                time.sleep(0.05)
+                continue
+            processed = key
             self._ensure_remaps(fisheye.shape[:2])
             votes = np.zeros((self.bev_size, self.bev_size, MAX_CLASS_ID + 1), dtype=np.float32)
             any_ok = False
@@ -335,7 +351,7 @@ class ThetaSam3PerspectiveNode(Node):
                 vv = np.clip(np.round(v_map[rows, cols]).astype(np.int32), 0, self.out_size[1] - 1)
                 cls = class_map[vv, uu].astype(np.int32)
                 score = score_map[vv, uu].astype(np.float32) / 255.0
-                keep = (cls >= 3) & (score >= self.score_min)
+                keep = (cls >= 3) & (cls <= MAX_CLASS_ID) & (score >= self.score_min)
                 np.add.at(votes, (rows[keep], cols[keep], cls[keep]), score[keep])
             if not any_ok:
                 time.sleep(self.min_interval)
