@@ -100,3 +100,74 @@ class CausalRoadConsistency:
         # Preserve independent raw observations, never feed a corrected result back.
         self.history.append(Observation(image.copy(),labels.copy(),scores.copy(),stamp))
         return result
+
+
+def stabilize_tactile(labels,scores,aligned,*,bidirectional=True,score_min=.5,
+                       max_age=.85,min_support=2,appearance_mask=None,min_fill_area=16):
+    """Fill short tactile-mask gaps from repeated, aligned ORIGINAL detections.
+
+    aligned entries: (warped labels, mask score [0,1], reliability [0,1],
+    neighbor_time - current_time). Offline requires observations on both sides.
+    Existing visible tactile pixels are never removed. IDs1/2/3 are protected.
+    """
+    result=labels.copy();result_scores=scores.copy();shape=labels.shape
+    count=np.zeros(shape,np.uint8);past=np.zeros(shape,bool);future=past.copy()
+    weight=np.zeros(shape,np.float32);confidence=np.zeros(shape,np.float32)
+    for ids,conf,reliable,dt in aligned:
+        if dt==0 or abs(dt)>max_age or (not bidirectional and dt>0):continue
+        take=(ids==4)&(conf>=score_min)&(reliable>=.4)
+        # Intersect interiors of observations rather than dilating narrow masks.
+        take=cv2.erode(take.astype(np.uint8),np.ones((3,3),np.uint8)).astype(bool)
+        ww=take*reliable*np.exp(-abs(dt))
+        count+=take.astype(np.uint8);weight+=ww;confidence+=ww*conf
+        if dt<0:past|=take
+        else:future|=take
+    mean=confidence/np.maximum(weight,1e-8)
+    visible=(labels==4)&(scores.astype(np.float32)/255.>=score_min)
+    eligible=np.isin(labels,(0,4,5,6))&~visible
+    accepted=eligible&(count>=min_support)&(mean>=.55)&past
+    if bidirectional:accepted&=future
+    if appearance_mask is not None:
+        if appearance_mask.shape!=shape:raise ValueError('Appearance-mask shape differs')
+        accepted&=appearance_mask.astype(bool)
+    if min_fill_area>1:
+        n,components,stats,_=cv2.connectedComponentsWithStats(accepted.astype(np.uint8),8)
+        large=np.zeros(n,bool);large[1:]=stats[1:,cv2.CC_STAT_AREA]>=min_fill_area
+        accepted=large[components]
+    result[accepted]=4
+    result_scores[accepted]=np.clip(np.rint(mean[accepted]*255),0,255).astype(np.uint8)
+    return result,result_scores,{'filled_pixels':int(accepted.sum()),
+        'original_tactile_pixels':int(visible.sum()),'removed_tactile_pixels':0}
+
+
+def yellow_tactile_appearance(image,min_saturation=100,hue_max=32,close_holes=False):
+    """Optional gap-fill gate for yellow tactile surfaces; not a detector.
+
+    Other colors keep raw SAM3 labels. The thresholds are a configurable study
+    assumption, not a claim that tactile paving is always yellow.
+    """
+    hsv=cv2.cvtColor(image,cv2.COLOR_BGR2HSV)
+    keep=(hsv[...,0]>=15)&(hsv[...,0]<=hue_max)&(hsv[...,1]>=min_saturation)&(hsv[...,2]>=35)
+    if close_holes:
+        keep=cv2.morphologyEx(keep.astype(np.uint8),cv2.MORPH_CLOSE,np.ones((3,3),np.uint8))
+    return keep.astype(bool)
+
+
+class CausalTactileConsistency(CausalRoadConsistency):
+    """Yellow tactile gap restoration; expire from RAW history within0.85s."""
+    def __init__(self,history_size=4,max_gap=.85,score_min=.5):
+        super().__init__(history_size,max_gap,score_min)
+
+    def apply(self,image,labels,scores,stamp):
+        if self.history and (stamp<=self.history[-1].stamp or stamp-self.history[-1].stamp>self.max_gap
+                             or image.shape!=self.history[-1].image.shape):self.clear()
+        aligned=[]
+        for old in self.history:
+            dt=old.stamp-stamp
+            if abs(dt)<=self.max_gap:
+                ids,conf,reliability=align_observation(image,old)
+                aligned.append((ids,conf,reliability,dt))
+        result=stabilize_tactile(labels,scores,aligned,bidirectional=False,
+            score_min=self.score_min,max_age=self.max_gap,appearance_mask=yellow_tactile_appearance(image))
+        self.history.append(Observation(image.copy(),labels.copy(),scores.copy(),stamp))
+        return result

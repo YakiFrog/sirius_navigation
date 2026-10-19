@@ -27,7 +27,7 @@ import yaml
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from sirius_navigation.theta_perspective import build_perspective_remap, build_bev_to_view_maps
 from sirius_navigation.sam3_classes import load_sam3_classes
-from sirius_navigation.theta_semantic_temporal import CausalRoadConsistency
+from sirius_navigation.theta_semantic_temporal import CausalRoadConsistency, CausalTactileConsistency
 
 
 def quaternion_to_rpy(x, y, z, w):
@@ -67,6 +67,7 @@ class ThetaSam3PerspectiveNode(Node):
         self.declare_parameter('min_interval_sec', 0.3)
         self.declare_parameter('publish_debug', False)
         self.declare_parameter('temporal_consistency', False)
+        self.declare_parameter('tactile_temporal_consistency', True)
         self.declare_parameter('temporal_max_gap_sec', 1.5)
         # カメラ取り付け姿勢をTFから取得（theta_bev_nodeと同じ経路）。未取得時は校正YAML。
         self.declare_parameter('use_tf', True)
@@ -132,6 +133,10 @@ class ThetaSam3PerspectiveNode(Node):
         if bool(self.get_parameter('temporal_consistency').value):
             self.temporal = {yaw: CausalRoadConsistency(
                 max_gap=float(self.get_parameter('temporal_max_gap_sec').value),
+                score_min=self.score_min) for yaw in self.view_yaws}
+        self.tactile_temporal = {}
+        if bool(self.get_parameter('tactile_temporal_consistency').value):
+            self.tactile_temporal = {yaw: CausalTactileConsistency(
                 score_min=self.score_min) for yaw in self.view_yaws}
         self.bev_to_view = None
         self.remaps = None
@@ -255,7 +260,7 @@ class ThetaSam3PerspectiveNode(Node):
                                                    self.min_radius, self.max_radius)
                             for yaw in self.view_yaws]
         self.remap_size = image_size
-        for tracker in self.temporal.values():
+        for tracker in list(self.temporal.values()) + list(self.tactile_temporal.values()):
             tracker.clear()
         self.get_logger().info(
             f'Built perspective remaps for input {image_size[1]}x{image_size[0]} '
@@ -351,6 +356,7 @@ class ThetaSam3PerspectiveNode(Node):
                 if class_map is None:
                     continue
                 any_ok = True
+                raw_classes, raw_scores = class_map, score_map
                 tracker = self.temporal.get(self.view_yaws[view_index])
                 if tracker is not None:
                     class_map, score_map, stats = tracker.apply(
@@ -359,6 +365,16 @@ class ThetaSam3PerspectiveNode(Node):
                         self.get_logger().info(
                             f"Temporal road/sidewalk correction: {stats['changed_pixels']} pixels",
                             throttle_duration_sec=5.0)
+                tactile_tracker = self.tactile_temporal.get(self.view_yaws[view_index])
+                if tactile_tracker is not None:
+                    tactile_ids, tactile_scores, stats = tactile_tracker.apply(
+                        view_image, raw_classes, raw_scores, stamp.sec + stamp.nanosec * 1e-9)
+                    # Keep road and tactile histories based on their independent raw inputs.
+                    keep = tactile_ids == 4
+                    class_map = class_map.copy()
+                    score_map = score_map.copy()
+                    class_map[keep] = 4
+                    score_map[keep] = tactile_scores[keep]
                 if self.publish_debug:
                     self._publish_view_debug(self.view_yaws[view_index], view_image, class_map, stamp)
                 u_map, v_map, valid = self.bev_to_view[view_index]

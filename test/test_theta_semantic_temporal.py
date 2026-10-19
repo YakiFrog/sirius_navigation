@@ -59,3 +59,69 @@ def test_majority_cannot_overwrite_more_confident_current_observation():
     labels=np.full((8,8),6,np.uint8);scores=np.full((8,8),184,np.uint8)
     fixed,_,stats=fuse_road_labels(labels,scores,evidence(5,8,score=.70))
     np.testing.assert_array_equal(fixed,labels);assert stats['changed_pixels']==0
+
+
+def test_tactile_gap_requires_matching_past_and_future_observations():
+    from sirius_navigation.theta_semantic_temporal import stabilize_tactile
+    labels=np.full((8,8),6,np.uint8);scores=np.full((8,8),230,np.uint8)
+    tactile=(np.full((8,8),4,np.uint8),np.full((8,8),.7,np.float32),np.ones((8,8),np.float32))
+    fixed,_,stats=stabilize_tactile(labels,scores,[(*tactile,-.26),(*tactile,.26)])
+    assert np.all(fixed==4) and stats['filled_pixels']==64
+    fixed,_,_=stabilize_tactile(labels,scores,[(*tactile,-.26),(*tactile,-.52)])
+    np.testing.assert_array_equal(fixed,labels)
+
+
+def test_tactile_does_not_reappear_after_occlusion_or_stale_history():
+    from sirius_navigation.theta_semantic_temporal import stabilize_tactile
+    labels=np.full((8,8),6,np.uint8);scores=np.full((8,8),230,np.uint8)
+    tactile=(np.full((8,8),4,np.uint8),np.full((8,8),.7,np.float32),np.ones((8,8),np.float32))
+    for rows in [[(*tactile,-1.),(*tactile,.26)],[(tactile[0],tactile[1],np.zeros((8,8),np.float32),-.26),(*tactile,.26)]]:
+        fixed,_,stats=stabilize_tactile(labels,scores,rows);np.testing.assert_array_equal(fixed,labels);assert not stats['filled_pixels']
+
+
+def test_tactile_preserves_existing_detections_and_grass_even_without_support():
+    from sirius_navigation.theta_semantic_temporal import stabilize_tactile
+    labels=np.full((8,8),3,np.uint8);labels[2:4]=4;scores=np.full((8,8),230,np.uint8)
+    fixed,sc,_=stabilize_tactile(labels,scores,[]);np.testing.assert_array_equal(fixed,labels);np.testing.assert_array_equal(sc,scores)
+    tactile=(np.full((8,8),4,np.uint8),np.full((8,8),.7,np.float32),np.ones((8,8),np.float32))
+    fixed,_,_=stabilize_tactile(labels,scores,[(*tactile,-.26),(*tactile,.26)]);np.testing.assert_array_equal(fixed,labels)
+
+
+def test_causal_tactile_requires_two_original_observations_and_expires():
+    from sirius_navigation.theta_semantic_temporal import stabilize_tactile
+    labels=np.zeros((8,8),np.uint8);scores=np.zeros((8,8),np.uint8)
+    tactile=(np.full((8,8),4,np.uint8),np.full((8,8),.7,np.float32),np.ones((8,8),np.float32))
+    fixed,_,_=stabilize_tactile(labels,scores,[(*tactile,-.26)],bidirectional=False);assert not fixed.any()
+    fixed,_,_=stabilize_tactile(labels,scores,[(*tactile,-.26),(*tactile,-.52)],bidirectional=False);assert np.all(fixed==4)
+    fixed,_,_=stabilize_tactile(labels,scores,[(*tactile,-1.),(*tactile,-1.26)],bidirectional=False);assert not fixed.any()
+
+
+def test_yellow_gap_fill_does_not_expand_gray_pavement_false_detections():
+    from sirius_navigation.theta_semantic_temporal import stabilize_tactile,yellow_tactile_appearance
+    gray=np.full((8,8,3),128,np.uint8);yellow=gray.copy();yellow[:4]=(20,180,210)
+    labels=np.full((8,8),6,np.uint8);scores=np.full((8,8),230,np.uint8)
+    tactile=(np.full((8,8),4,np.uint8),np.full((8,8),.8,np.float32),np.ones((8,8),np.float32))
+    for image,expected in [(gray,0),(yellow,32)]:
+        fixed,_,stats=stabilize_tactile(labels,scores,[(*tactile,-.26),(*tactile,.26)],appearance_mask=yellow_tactile_appearance(image))
+        assert stats['filled_pixels']==expected and (fixed==4).sum()==expected
+
+
+def test_causal_tactile_fills_brief_gap_without_extending_itself_forever():
+    from sirius_navigation.theta_semantic_temporal import CausalTactileConsistency
+    rng=np.random.default_rng(37);image=np.full((32,32,3),(20,180,210),np.uint8)
+    image=np.clip(image.astype(int)+rng.integers(-15,16,(32,32,1)),0,255).astype(np.uint8)
+    tracker=CausalTactileConsistency();positive=np.full((32,32),4,np.uint8);unknown=np.zeros_like(positive);score=np.full_like(positive,230)
+    tracker.apply(image,positive,score,0.);tracker.apply(image,positive,score,.2)
+    filled,_,_=tracker.apply(image,unknown,unknown,.4);assert (filled==4).any()
+    tracker.apply(image,unknown,unknown,.6);tracker.apply(image,unknown,unknown,.8)
+    expired,_,_=tracker.apply(image,unknown,unknown,1.);assert not expired.any()
+    assert all(not (x.labels==4).any() for x in tracker.history)
+
+
+def test_only_new_fills_drop_tiny_appearance_fragments():
+    from sirius_navigation.theta_semantic_temporal import stabilize_tactile
+    labels=np.full((8,8),6,np.uint8);labels[0,0]=4;scores=np.full((8,8),230,np.uint8)
+    tactile=(np.full((8,8),4,np.uint8),np.full((8,8),.8,np.float32),np.ones((8,8),np.float32))
+    appearance=np.zeros((8,8),bool);appearance[3:6,3:6]=True
+    fixed,_,stats=stabilize_tactile(labels,scores,[(*tactile,-.26),(*tactile,.26)],appearance_mask=appearance)
+    np.testing.assert_array_equal(fixed,labels);assert stats['filled_pixels']==0

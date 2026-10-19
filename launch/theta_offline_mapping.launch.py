@@ -30,6 +30,7 @@ def generate_launch_description():
     rviz_config = LaunchConfiguration('rviz_config')
     sam3 = LaunchConfiguration('sam3')
     sam3_temporal = LaunchConfiguration('sam3_temporal')
+    sam3_tactile_temporal = LaunchConfiguration('sam3_tactile_temporal')
     publish_raw = LaunchConfiguration('publish_raw')
     publish_debug = LaunchConfiguration('publish_debug')
     calibration = LaunchConfiguration('calibration')
@@ -109,6 +110,9 @@ def generate_launch_description():
     declare_semantic_min_weight = DeclareLaunchArgument(
         'semantic_min_weight', default_value='0.3',
         description='セマンティック採用に必要な重み合計の下限')
+    declare_sam3_tactile_temporal = DeclareLaunchArgument(
+        'sam3_tactile_temporal', default_value='true',
+        description='Short yellow tactile-mask gap restoration from matched prior detections')
     declare_sam3_temporal = DeclareLaunchArgument(
         'sam3_temporal', default_value='false',
         description='Trial causal flow-aligned road/sidewalk correction; dense observations required')
@@ -166,6 +170,7 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time,
                      'publish_debug': ParameterValue(publish_debug, value_type=bool),
                      'temporal_consistency': ParameterValue(sam3_temporal, value_type=bool),
+                     'tactile_temporal_consistency': ParameterValue(sam3_tactile_temporal, value_type=bool),
                      'min_radius': ParameterValue(min_radius, value_type=float),
                      'max_radius': ParameterValue(max_radius, value_type=float),
                      'calibration': calibration}],
@@ -236,7 +241,7 @@ def generate_launch_description():
         declare_texture_decay,
         declare_class_weight_switch,
         declare_semantic_min_weight,
-        declare_sam3, declare_sam3_temporal,
+        declare_sam3, declare_sam3_temporal, declare_sam3_tactile_temporal,
         declare_publish_raw,
         declare_publish_debug,
         theta_bev,
