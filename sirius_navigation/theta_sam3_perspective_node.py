@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""THETA dual-fisheye -> 透視投影4ビュー -> SAM3 -> 地面逆投影 -> BEVラベル。
+"""THETA dual-fisheye -> 透視投影（既定は前後2ビュー） -> SAM3 -> 地面逆投影 -> BEVラベル。
 
 既存Dockerサーバ（単一画像経路 + /semantic_map.png + /semantic_score.png）を使い、
-4方向(前/左/後/右)の透視画像をSAM3でクラス分類し、各BEV画素の地面点を各ビューへ
+指定方向の透視画像をSAM3でクラス分類し、各BEV画素の地面点を各ビューへ
 投影してサンプル、スコア重み付き投票で予約IDのBEVラベル(/theta/bev_semantic)を作る。
 
 予約ID: 0=unknown,1=wall,2=floor,3=grass,4=tactile(line-type含む),5=roadway,6=sidewalk
@@ -27,6 +27,7 @@ import yaml
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from sirius_navigation.theta_perspective import build_perspective_remap, build_bev_to_view_maps
 from sirius_navigation.sam3_classes import load_sam3_classes
+from sirius_navigation.theta_semantic_temporal import CausalRoadConsistency
 
 
 def quaternion_to_rpy(x, y, z, w):
@@ -65,6 +66,8 @@ class ThetaSam3PerspectiveNode(Node):
         self.declare_parameter('infer_timeout_sec', 2.0)
         self.declare_parameter('min_interval_sec', 0.3)
         self.declare_parameter('publish_debug', False)
+        self.declare_parameter('temporal_consistency', False)
+        self.declare_parameter('temporal_max_gap_sec', 1.5)
         # カメラ取り付け姿勢をTFから取得（theta_bev_nodeと同じ経路）。未取得時は校正YAML。
         self.declare_parameter('use_tf', True)
         self.declare_parameter('robot_frame', 'sirius3/base_footprint')
@@ -125,6 +128,11 @@ class ThetaSam3PerspectiveNode(Node):
             except Exception as error:
                 self.get_logger().warning(f'SAM3設定の読み込みに失敗（既定を使用）: {error}')
 
+        self.temporal = {}
+        if bool(self.get_parameter('temporal_consistency').value):
+            self.temporal = {yaw: CausalRoadConsistency(
+                max_gap=float(self.get_parameter('temporal_max_gap_sec').value),
+                score_min=self.score_min) for yaw in self.view_yaws}
         self.bev_to_view = None
         self.remaps = None
         self.remap_size = None
@@ -247,6 +255,8 @@ class ThetaSam3PerspectiveNode(Node):
                                                    self.min_radius, self.max_radius)
                             for yaw in self.view_yaws]
         self.remap_size = image_size
+        for tracker in self.temporal.values():
+            tracker.clear()
         self.get_logger().info(
             f'Built perspective remaps for input {image_size[1]}x{image_size[0]} '
             f'(mount_from_tf={self.mount_from_tf}, camera_position={self.calibration.get("camera_position")})')
@@ -341,6 +351,14 @@ class ThetaSam3PerspectiveNode(Node):
                 if class_map is None:
                     continue
                 any_ok = True
+                tracker = self.temporal.get(self.view_yaws[view_index])
+                if tracker is not None:
+                    class_map, score_map, stats = tracker.apply(
+                        view_image, class_map, score_map, stamp.sec + stamp.nanosec * 1e-9)
+                    if stats['changed_pixels']:
+                        self.get_logger().info(
+                            f"Temporal road/sidewalk correction: {stats['changed_pixels']} pixels",
+                            throttle_duration_sec=5.0)
                 if self.publish_debug:
                     self._publish_view_debug(self.view_yaws[view_index], view_image, class_map, stamp)
                 u_map, v_map, valid = self.bev_to_view[view_index]

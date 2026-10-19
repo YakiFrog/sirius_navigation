@@ -3,4 +3,5 @@
 # config/sam3_classes.yaml に集約した。このファイルにはTHETA固有の
 # しきい値だけを置く（ランチャーの SAM3設定ダイアログが保存する）。
 threshold: 1.0
-score_min: 0.8
+# 比較画面で確認した現行モデルの採用閾値。時系列補正は別途opt-in。
+score_min: 0.5
