@@ -163,3 +163,12 @@ def test_only_new_fills_drop_tiny_appearance_fragments():
     appearance=np.zeros((8,8),bool);appearance[3:6,3:6]=True
     fixed,_,stats=stabilize_tactile(labels,scores,[(*tactile,-.26),(*tactile,.26)],appearance_mask=appearance)
     np.testing.assert_array_equal(fixed,labels);assert stats['filled_pixels']==0
+
+
+def test_reverse_tactile_cannot_inherit_a_high_road_score_and_protects_grass():
+    from sirius_navigation.theta_semantic_temporal import merge_tactile_tracks
+    raw=np.array([[6,6,3,0]],np.uint8);forward=np.array([[6,4,3,0]],np.uint8)
+    fs=np.array([[250,190,250,0]],np.uint8);reverse=np.array([[4,4,4,0]],np.uint8);rs=np.array([[150,140,180,0]],np.uint8)
+    ids,score=merge_tactile_tracks(raw,forward,fs,reverse,rs)
+    np.testing.assert_array_equal(ids,[[4,4,3,0]])
+    np.testing.assert_array_equal(score,[[150,190,250,0]])

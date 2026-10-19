@@ -167,6 +167,15 @@ def yellow_tactile_seeds(image,labels,scores,score_min=.5,min_area=16):
     return valid[components]
 
 
+def merge_tactile_tracks(raw,forward,forward_scores,reverse,reverse_scores):
+    """Union independent tactile tracks using scores belonging to class4 only."""
+    result=forward.copy();scores=forward_scores.copy()
+    take=(reverse==4)&~np.isin(raw,(1,2,3))
+    result[take]=4
+    scores[take]=np.maximum(np.where(forward[take]==4,forward_scores[take],0),reverse_scores[take])
+    return result,scores
+
+
 class CausalTactileConsistency(CausalRoadConsistency):
     """Track visible yellow tactile surfaces across detector misses.
 
