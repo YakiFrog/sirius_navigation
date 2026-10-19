@@ -24,13 +24,14 @@ MAX_CLASS_ID = 255
 # ファイルが無いときの後方互換フォールバック。
 DEFAULT_CLASSES = {
     "grass": {"id": 3, "color": [0, 255, 0]},
+    "yellow tactile paving": {"id": 4, "color": [255, 255, 0]},
     "tactile paving": {"id": 4, "color": [255, 255, 0]},
     "line-type tactile paving": {"id": 4, "color": [255, 255, 0]},
     "line type tactile paving": {"id": 4, "color": [255, 255, 0]},
     "roadway": {"id": 5, "color": [0, 0, 255]},
     "sidewalk": {"id": 6, "color": [128, 128, 128]},
 }
-DEFAULT_PROMPT = ", ".join(DEFAULT_CLASSES.keys())
+DEFAULT_PROMPT = "grass, yellow tactile paving, roadway, sidewalk"
 
 
 def _candidate_paths():

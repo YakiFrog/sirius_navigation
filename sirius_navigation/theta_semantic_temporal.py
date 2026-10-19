@@ -1,7 +1,7 @@
-"""Conservative road/sidewalk correction from flow-aligned raw SAM3 observations.
+"""Road consistency and visible yellow-tactile tracking from aligned imagery.
 
 Inspired by occlusion-aware temporal segmentation; not a BOFP or SAM3-video
-reproduction. Only IDs5/6 may change. No recursive pseudo-label feedback.
+reproduction. Road votes use raw observations; tactile has explicit visual state.
 """
 from collections import deque
 from dataclasses import dataclass
@@ -153,21 +153,54 @@ def yellow_tactile_appearance(image,min_saturation=100,hue_max=32,close_holes=Fa
     return keep.astype(bool)
 
 
+def yellow_tactile_seeds(image,labels,scores,score_min=.5,min_area=16):
+    """Require SAM3's yellow-tactile class plus component-level yellow evidence.
+
+    Preserve dark ridges within a yellow block instead of clipping each yellow
+    pixel. Gray components are unknown, never automatically relabeled sidewalk.
+    """
+    candidate=(labels==4)&(scores.astype(np.float32)/255.>=score_min)
+    yellow=yellow_tactile_appearance(image,45,40)
+    n,components,stats,_=cv2.connectedComponentsWithStats(candidate.astype(np.uint8),8)
+    area=stats[:,cv2.CC_STAT_AREA];hits=np.bincount(components[yellow],minlength=n)
+    valid=(area>=min_area)&(hits/np.maximum(area,1)>=.35);valid[0]=False
+    return valid[components]
+
+
 class CausalTactileConsistency(CausalRoadConsistency):
-    """Yellow tactile gap restoration; expire from RAW history within0.85s."""
-    def __init__(self,history_size=4,max_gap=.85,score_min=.5):
+    """Track visible yellow tactile surfaces across detector misses.
+
+    Each propagation requires fresh bidirectional-flow, photometric and yellow
+    appearance evidence. There is no detector-miss timeout. A track is never
+    counted as a fresh detector observation: it retains its detector score.
+    Unmatched, occluded and out-of-view pixels are discarded every frame.
+    """
+    def __init__(self,history_size=4,max_gap=1.5,score_min=.5):
         super().__init__(history_size,max_gap,score_min)
+        self.track=None
+
+    def clear(self):
+        super().clear();self.track=None
 
     def apply(self,image,labels,scores,stamp):
         if self.history and (stamp<=self.history[-1].stamp or stamp-self.history[-1].stamp>self.max_gap
                              or image.shape!=self.history[-1].image.shape):self.clear()
-        aligned=[]
-        for old in self.history:
-            dt=old.stamp-stamp
-            if abs(dt)<=self.max_gap:
-                ids,conf,reliability=align_observation(image,old)
-                aligned.append((ids,conf,reliability,dt))
-        result=stabilize_tactile(labels,scores,aligned,bidirectional=False,
-            score_min=self.score_min,max_age=self.max_gap,appearance_mask=yellow_tactile_appearance(image))
+        result=labels.copy();result_scores=scores.copy()
+        seed=yellow_tactile_seeds(image,labels,scores,self.score_min)
+        rejected=(labels==4)&~seed
+        result[rejected]=0;result_scores[rejected]=0
+        tracked=np.zeros(labels.shape,bool);conf=np.zeros(labels.shape,np.float32)
+        if self.track is not None:
+            ids,conf,reliability=align_observation(image,self.track)
+            tracked=(ids==4)&(reliability>=.4)&np.isin(labels,(0,4,5,6))
+            # Component appearance prevents tracks migrating to gray tile. Local
+            # mismatches remain holes; no dilation bridges an occluder or border.
+            tracked=yellow_tactile_seeds(image,np.where(tracked,4,0).astype(np.uint8),
+                np.rint(conf*255).astype(np.uint8),self.score_min)
+        fill=tracked&~seed
+        result[fill]=4;result_scores[fill]=np.rint(conf[fill]*255).astype(np.uint8)
+        state=np.where(seed|tracked,4,0).astype(np.uint8)
+        self.track=Observation(image.copy(),state,np.where(state==4,result_scores,0).astype(np.uint8),stamp)
         self.history.append(Observation(image.copy(),labels.copy(),scores.copy(),stamp))
-        return result
+        return result,result_scores,{'filled_pixels':int(fill.sum()),'original_tactile_pixels':int(seed.sum()),
+                                    'removed_tactile_pixels':int(rejected.sum()),'tracked_pixels':int(tracked.sum())}

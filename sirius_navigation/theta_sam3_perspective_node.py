@@ -26,7 +26,7 @@ from pathlib import Path
 import yaml
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from sirius_navigation.theta_perspective import build_perspective_remap, build_bev_to_view_maps
-from sirius_navigation.sam3_classes import load_sam3_classes
+from sirius_navigation.sam3_classes import load_sam3_classes, DEFAULT_CLASSES, DEFAULT_PROMPT
 from sirius_navigation.theta_semantic_temporal import CausalRoadConsistency, CausalTactileConsistency
 
 
@@ -36,12 +36,8 @@ def quaternion_to_rpy(x, y, z, w):
     yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     return roll, pitch, yaw
 
-CLASS_REGISTRY = {
-    'grass': {'id': 3, 'color': [0, 255, 0]},
-    'tactile paving': {'id': 4, 'color': [255, 255, 0]},
-    'line-type tactile paving': {'id': 4, 'color': [255, 255, 0]},
-}
-PROMPTS = 'grass, tactile paving, line-type tactile paving'
+CLASS_REGISTRY = DEFAULT_CLASSES
+PROMPTS = DEFAULT_PROMPT
 MAX_CLASS_ID = 6
 
 
@@ -370,10 +366,10 @@ class ThetaSam3PerspectiveNode(Node):
                     tactile_ids, tactile_scores, stats = tactile_tracker.apply(
                         view_image, raw_classes, raw_scores, stamp.sec + stamp.nanosec * 1e-9)
                     # Keep road and tactile histories based on their independent raw inputs.
-                    keep = tactile_ids == 4
+                    keep = (tactile_ids == 4) | (raw_classes == 4)
                     class_map = class_map.copy()
                     score_map = score_map.copy()
-                    class_map[keep] = 4
+                    class_map[keep] = tactile_ids[keep]
                     score_map[keep] = tactile_scores[keep]
                 if self.publish_debug:
                     self._publish_view_debug(self.view_yaws[view_index], view_image, class_map, stamp)

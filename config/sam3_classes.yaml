@@ -14,10 +14,13 @@
 #
 # UI（Web :8080 / Launcher の SAM3設定ダイアログ）から id と色を編集できる。
 
-prompt: grass, tactile paving, line-type tactile paving, line type tactile paving, roadway, sidewalk
+# 灰色のタイル舗装を点字と誤認しないよう、検出対象は黄色に限定。
+# 旧名は既存設定・地図とのID互換用に登録だけ残す（検出には使わない）。
+prompt: grass, yellow tactile paving, roadway, sidewalk
 
 classes:
   grass:                    {id: 3, color: [0, 255, 0]}
+  yellow tactile paving:    {id: 4, color: [255, 255, 0]}
   tactile paving:           {id: 4, color: [255, 255, 0]}
   line-type tactile paving: {id: 4, color: [255, 255, 0]}
   line type tactile paving: {id: 4, color: [255, 255, 0]}
@@ -26,6 +29,7 @@ classes:
 
 class_thresholds:
   grass: 0.5
+  yellow tactile paving: 0.5
   tactile paving: 0.5
   line-type tactile paving: 0.5
   line type tactile paving: 0.5

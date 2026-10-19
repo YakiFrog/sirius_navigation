@@ -85,3 +85,12 @@ def test_shared_config_merges_line_type_tactile_paving():
 
 def test_config_file_exists_in_source_tree():
     assert CONFIG_PATH.exists()
+
+
+def test_only_yellow_tactile_prompt_is_active_with_compatible_id():
+    import yaml
+    from sirius_navigation.sam3_classes import DEFAULT_PROMPT, DEFAULT_CLASSES
+    data=yaml.safe_load(CONFIG_PATH.read_text())
+    for prompt,classes in [(data['prompt'],data['classes']),(DEFAULT_PROMPT,DEFAULT_CLASSES)]:
+        assert prompt.split(', ')==['grass','yellow tactile paving','roadway','sidewalk']
+        assert classes['yellow tactile paving']['id']==classes['tactile paving']['id']==4

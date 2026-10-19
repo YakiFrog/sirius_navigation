@@ -106,16 +106,54 @@ def test_yellow_gap_fill_does_not_expand_gray_pavement_false_detections():
         assert stats['filled_pixels']==expected and (fixed==4).sum()==expected
 
 
-def test_causal_tactile_fills_brief_gap_without_extending_itself_forever():
+def test_visible_yellow_track_survives_many_detector_misses_then_occlusion():
     from sirius_navigation.theta_semantic_temporal import CausalTactileConsistency
     rng=np.random.default_rng(37);image=np.full((32,32,3),(20,180,210),np.uint8)
     image=np.clip(image.astype(int)+rng.integers(-15,16,(32,32,1)),0,255).astype(np.uint8)
     tracker=CausalTactileConsistency();positive=np.full((32,32),4,np.uint8);unknown=np.zeros_like(positive);score=np.full_like(positive,230)
     tracker.apply(image,positive,score,0.);tracker.apply(image,positive,score,.2)
     filled,_,_=tracker.apply(image,unknown,unknown,.4);assert (filled==4).any()
-    tracker.apply(image,unknown,unknown,.6);tracker.apply(image,unknown,unknown,.8)
-    expired,_,_=tracker.apply(image,unknown,unknown,1.);assert not expired.any()
+    for i in range(3,16):
+        retained,_,_=tracker.apply(image,unknown,unknown,i*.2)
+        assert (retained==4).sum()>500
     assert all(not (x.labels==4).any() for x in tracker.history)
+    occluder=np.full_like(image,128)
+    cleared,_,_=tracker.apply(occluder,unknown,unknown,3.2);assert not cleared.any()
+    # Re-exposing the surface cannot resurrect an occluded track without SAM3.
+    cleared,_,_=tracker.apply(image,unknown,unknown,3.4);assert not cleared.any()
+
+
+def test_gray_tiles_cannot_start_yellow_tactile_tracks_and_grass_is_protected():
+    from sirius_navigation.theta_semantic_temporal import CausalTactileConsistency
+    image=np.full((32,32,3),128,np.uint8);labels=np.full((32,32),4,np.uint8);scores=np.full_like(labels,250)
+    tracker=CausalTactileConsistency();fixed,_,stats=tracker.apply(image,labels,scores,0.)
+    assert not fixed.any() and stats['removed_tactile_pixels']==1024
+    yellow=np.full_like(image,(20,180,210));labels[:]=3
+    fixed,_,_=tracker.apply(yellow,labels,scores,.2);assert np.all(fixed==3)
+
+
+def test_tactile_track_moves_and_leaves_field_of_view(monkeypatch):
+    import sirius_navigation.theta_semantic_temporal as module
+    rng=np.random.default_rng(30);image=np.full((32,64,3),(20,180,210),np.uint8)
+    image=np.clip(image.astype(int)+rng.integers(-15,16,(32,64,1)),0,255).astype(np.uint8)
+    labels=np.zeros((32,64),np.uint8);labels[5:25,40:54]=4;scores=np.full_like(labels,230)
+    tracker=module.CausalTactileConsistency();tracker.apply(image,labels,scores,0)
+    backward=np.zeros((32,64,2),np.float32);backward[...,0]=-4
+    monkeypatch.setattr(module,'align_observation',lambda current,old:module.warp_with_flow(current,old,backward,-backward))
+    blank=np.zeros_like(labels)
+    for i in range(1,8):
+        image=np.roll(image,4,axis=1);fixed,_,_=tracker.apply(image,blank,blank,i*.2)
+        if i==1:assert fixed[12,55]==4 and fixed[12,40]==0
+    assert not fixed.any()
+
+
+def test_yellow_track_resets_on_timestamp_reversal_gap_or_shape_change():
+    from sirius_navigation.theta_semantic_temporal import CausalTactileConsistency
+    image=np.full((32,32,3),(20,180,210),np.uint8);positive=np.full((32,32),4,np.uint8);score=np.full_like(positive,230)
+    for stamp,shape in [(0.,(32,32)),(4.,(32,32)),(1.2,(16,16))]:
+        tracker=CausalTactileConsistency();tracker.apply(image,positive,score,1.)
+        fixed,_,_=tracker.apply(cv2.resize(image,shape),np.zeros(shape,np.uint8),np.zeros(shape,np.uint8),stamp)
+        assert not fixed.any()
 
 
 def test_only_new_fills_drop_tiny_appearance_fragments():
