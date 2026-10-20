@@ -38,7 +38,7 @@ def generate_launch_description():
         DeclareLaunchArgument('config_file', default_value='fast_lio_sirius.yaml'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('mount_config', default_value='',
-                              description='Shared real rig calibration; blank preserves the selected YAML'),
+                              description='Shared real rig calibration; blank or none preserves the selected YAML'),
         DeclareLaunchArgument('imu_height', default_value='0.65',
                               description='base_footprintからIMUまでの高さ[m]'),
     ]
@@ -59,7 +59,7 @@ def generate_launch_description():
         path, filename = config_path.perform(context), config_file.perform(context)
         mount_path = LaunchConfiguration('mount_config').perform(context)
         actions = []
-        if mount_path:
+        if mount_path and mount_path.lower() != 'none':
             config = yaml.safe_load((Path(path)/filename).read_text())
             params = config['/**']['ros__parameters']
             if params['common']['lid_topic'] == '/velodyne_points_leveled':
