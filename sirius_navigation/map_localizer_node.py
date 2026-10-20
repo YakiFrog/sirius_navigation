@@ -20,6 +20,7 @@ from rclpy.duration import Duration
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener
@@ -234,6 +235,7 @@ class MapLocalizer(Node):
         self.declare_parameter("initial_pose_z", 0.0)
         self.declare_parameter("initial_pose_yaw", 0.0)
         self.declare_parameter("initial_pose_file", "")
+        self.declare_parameter("max_cloud_age", 0.5)
         self.declare_parameter("publish_tf", True)
         self.declare_parameter("publish_diagnostics", True)
 
@@ -243,6 +245,7 @@ class MapLocalizer(Node):
 
         self._lock = threading.Lock()
         self._cloud = None
+        self._last_cloud_stamp = None
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._tf_broadcaster = TransformBroadcaster(self)
@@ -262,6 +265,10 @@ class MapLocalizer(Node):
                                  self._on_cloud, 1)
         self.create_subscription(PoseWithCovarianceStamped, "/initialpose",
                                  self._on_initial_pose, 1, callback_group=self._registration_group)
+        correction_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                                    reliability=ReliabilityPolicy.RELIABLE)
+        self._correction_pub = self.create_publisher(
+            TransformStamped, "/map_localizer/correction", correction_qos)
         self._pose_pub = self.create_publisher(PoseStamped, "/map_localizer/pose", 1)
         self._status_pub = self.create_publisher(String, "/map_localizer/status", 1)
         self.create_timer(float(self.get_parameter("update_period").value), self._update,
@@ -392,6 +399,14 @@ class MapLocalizer(Node):
             cloud = self._cloud
         if cloud is None:
             return
+        stamp = cloud.header.stamp.sec*10**9+cloud.header.stamp.nanosec
+        age = (self.get_clock().now().nanoseconds-stamp)/1e9
+        if age > float(self.get_parameter("max_cloud_age").value) or age < -0.1:
+            self._publish_status(f"skip stale_cloud age={age:.3f}s")
+            return
+        if stamp == self._last_cloud_stamp:
+            return
+        self._last_cloud_stamp = stamp
         if not self._ensure_init():
             return
 
@@ -463,6 +478,14 @@ class MapLocalizer(Node):
         T_map_odom_new = T_map_lidar_new @ np.linalg.inv(T_odom_lidar)
         with self._lock:
             self.T_map_odom = T_map_odom_new
+        correction = TransformStamped()
+        correction.header.stamp = cloud.header.stamp
+        correction.header.frame_id = self.map_frame
+        correction.child_frame_id = self.odom_frame
+        t, q = correction.transform.translation, correction.transform.rotation
+        t.x, t.y, t.z = map(float, T_map_odom_new[:3, 3])
+        q.x, q.y, q.z, q.w = map(float, _quat_from_matrix(T_map_odom_new[:3, :3]))
+        self._correction_pub.publish(correction)
         self._publish_pose(T_map_lidar_new, cloud)
         self._publish_status("ok " + status)
 

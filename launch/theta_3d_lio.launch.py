@@ -75,6 +75,7 @@ def generate_launch_description():
                 actions.append(LogInfo(msg=f'FAST-LIO real rig calibration: {mount_path}; rpy={mount["rig_rpy_degrees"]} deg'))
             if localization:
                 params.setdefault('publish', {}).update(map_en=False, path_en=False)
+                params['performance_diagnostics_enabled'] = True
                 actions.append(LogInfo(msg='FAST-LIO localization mode: accumulated map/path publication disabled'))
             with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', prefix='sirius_mount_', delete=False) as f:
                 yaml.safe_dump(config, f, sort_keys=False)

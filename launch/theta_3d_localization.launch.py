@@ -13,7 +13,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -46,6 +46,8 @@ def generate_launch_description():
         DeclareLaunchArgument('odom_frame', default_value='sirius3/odom'),
         DeclareLaunchArgument('base_frame', default_value='sirius3/base_footprint'),
         DeclareLaunchArgument('use_3dof', default_value='true'),
+        DeclareLaunchArgument('external_tf', default_value='true',
+                              description='Publish TF in an independent process with freshness checks'),
         DeclareLaunchArgument('publish_map', default_value='false',
                               description='PLY参照地図を /localization/map に配信'),
         DeclareLaunchArgument('initial_pose_x', default_value='0.0'),
@@ -65,6 +67,7 @@ def generate_launch_description():
             params_file,
             {
                 'map_path': map_path,
+                'publish_tf': ParameterValue(PythonExpression(["'", LaunchConfiguration('external_tf'), "'.lower() in ('false', '0')"]), value_type=bool),
                 'cloud_topic': LaunchConfiguration('cloud_topic'),
                 'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
                 'map_frame': map_frame,
@@ -80,6 +83,13 @@ def generate_launch_description():
         ],
     )
 
+    tf_relay = Node(
+        package='sirius_navigation', executable='localization_tf_node',
+        name='localization_tf', output='screen',
+        condition=IfCondition(LaunchConfiguration('external_tf')),
+        parameters=[{'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
+                     'map_frame': map_frame, 'odom_frame': odom_frame}],
+    )
     reference_map = Node(
         package='sirius_navigation', executable='theta_ply_publisher',
         name='localization_map_publisher', output='screen',
@@ -88,4 +98,4 @@ def generate_launch_description():
                      'topic': '/localization/map',
                      'use_sim_time': ParameterValue(use_sim_time, value_type=bool)}],
     )
-    return LaunchDescription(args + [localizer, reference_map])
+    return LaunchDescription(args + [localizer, tf_relay, reference_map])

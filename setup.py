@@ -56,6 +56,7 @@ setup(
             'theta_sam3_bev_node = sirius_navigation.theta_sam3_bev_node:main',
             'theta_sam3_perspective_node = sirius_navigation.theta_sam3_perspective_node:main',
             'theta_capture_node = sirius_navigation.theta_capture_node:main',
+            'localization_tf_node = sirius_navigation.localization_tf_node:main',
             'map_localizer_node = sirius_navigation.map_localizer_node:main',
             'save_cloud_node = sirius_navigation.save_cloud_node:main',
             'twist_mux_monitor = sirius_navigation.twist_mux_monitor:main',
