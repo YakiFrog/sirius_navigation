@@ -12,6 +12,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -43,6 +44,8 @@ def generate_launch_description():
         DeclareLaunchArgument('odom_frame', default_value='sirius3/odom'),
         DeclareLaunchArgument('base_frame', default_value='sirius3/base_footprint'),
         DeclareLaunchArgument('use_3dof', default_value='true'),
+        DeclareLaunchArgument('publish_map', default_value='false',
+                              description='PLY参照地図を /localization/map に配信'),
         DeclareLaunchArgument('initial_pose_x', default_value='0.0'),
         DeclareLaunchArgument('initial_pose_y', default_value='0.0'),
         DeclareLaunchArgument('initial_pose_z', default_value='0.0'),
@@ -74,4 +77,12 @@ def generate_launch_description():
         ],
     )
 
-    return LaunchDescription(args + [localizer])
+    reference_map = Node(
+        package='sirius_navigation', executable='theta_ply_publisher',
+        name='localization_map_publisher', output='screen',
+        condition=IfCondition(LaunchConfiguration('publish_map')),
+        parameters=[{'ply_file': map_path, 'frame_id': map_frame,
+                     'topic': '/localization/map',
+                     'use_sim_time': ParameterValue(use_sim_time, value_type=bool)}],
+    )
+    return LaunchDescription(args + [localizer, reference_map])
