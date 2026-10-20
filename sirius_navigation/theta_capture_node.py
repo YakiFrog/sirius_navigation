@@ -156,11 +156,12 @@ class ThetaCaptureNode(Node):
             if now - self.last_publish < 1.0 / self.fps:
                 continue
             self.last_publish = now
+            captured_stamp = self.get_clock().now().to_msg()
             ok, encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
             if not ok:
                 continue
             message = CompressedImage()
-            message.header.stamp = self.get_clock().now().to_msg()
+            message.header.stamp = captured_stamp
             message.header.frame_id = self.frame_id
             message.format = 'jpeg'
             message.data = encoded.tobytes()

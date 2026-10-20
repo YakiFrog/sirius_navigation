@@ -1,0 +1,27 @@
+# Shared robot color projection policy, never a per-bag image/Z adjustment.
+# Pose is camera optical origin in the LiDAR ROS frame (x forward/y left/z up).
+# null: use the fixed TF recorded/published by the robot. Fill ONLY measured or
+# calibrated values as {xyz_m: [x,y,z], rpy_degrees: [roll,pitch,yaw]} to override.
+camera_in_lidar: null
+lidar_frame: sirius3/lidar_link
+camera_frame: sirius3/theta_link
+image_time_offset_s: 0.0  # acquisition time = message stamp + measured offset
+max_image_age_s: 0.12
+max_uncompensated_age_s: 0.04
+occlusion_cell_px: 4
+occlusion_neighbors: 1
+depth_margin_m: 0.15
+depth_relative_margin: 0.01
+coplanar_margin_m: 0.08
+edge_margin_px: 1
+fusion_views: 5
+# Relative observation confidence: lens-axis cosine squared / max(range, 1m)^power.
+# Larger powers prefer nearer images more strongly; 0 disables distance decay.
+color_distance_power: 2.0
+# Apply confidence to fusion too, rather than only selecting the best five views.
+fusion_weighted_median: true
+# Offline image confidence *= 1/(1+(angular_speed/scale)^2). 0 disables.
+# No exposure-time/extrinsic correction is inferred from this setting.
+color_rotation_scale_deg_s: 5.0
+offline_image_interval_s: 0.5
+max_color_range_m: 30.0

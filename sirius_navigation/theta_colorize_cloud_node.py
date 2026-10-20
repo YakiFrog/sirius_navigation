@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """3D LiDAR点群(VLP-16)を RICOH THETA(デュアルフィッシュアイ)で色付ける。
 
-OmniColor (arXiv:2404.04693) の考え方を参考にした「まず動かす」最小構成。
-カメラ姿勢の大域最適化は行わず、LiDAR点をカメラフレームへ変換して魚眼へ投影し、
-その画素色を点に付与する（point-centricな投影＋色サンプリング）。
+固定外部校正・カメラ視点の遮蔽・画像時刻への運動補償を使う。
+ロボット共通方針は theta_colorization.yaml。元のXYZ/ring/timeを保持する。
 
 入力:
   - /velodyne_points                         (sensor_msgs/PointCloud2)
@@ -12,8 +11,9 @@ OmniColor (arXiv:2404.04693) の考え方を参考にした「まず動かす」
   - /velodyne_points_colored                 (sensor_msgs/PointCloud2, x,y,z,intensity,rgb)
 
 外部パラメータ（LiDAR->THETA）は優先順で解決する:
-  1. TF  camera_frame <- cloud.frame_id      (use_tf=true, 既定)
-  2. パラメータ theta_xyz (+ theta_rpy_degrees): THETAのLiDARフレームでの姿勢
+  1. 共通方針の camera_in_lidar（測定・校正値を明示した場合）
+  2. TF  camera_frame <- cloud.frame_id      (use_tf=true, 既定)
+  3. パラメータ theta_xyz (+ theta_rpy_degrees): THETAのLiDARフレームでの姿勢
 実機は静的TFが未配信のことが多いため 2 のフォールバックを持つ。
 """
 from collections import deque
@@ -37,6 +37,7 @@ from ament_index_python.packages import get_package_share_directory
 
 from sirius_navigation.theta_perspective import (project_camera_frame_points,
                                                  rpy_to_matrix)
+from sirius_navigation.theta_color_projection import load_color_policy, camera_in_lidar, visible_colors
 
 
 def quaternion_to_matrix(x, y, z, w):
@@ -83,6 +84,10 @@ class ThetaColorizeCloudNode(Node):
         super().__init__('theta_colorize_cloud')
         share = Path(get_package_share_directory('sirius_navigation'))
         self.declare_parameter('calibration', str(share / 'config' / 'theta_calibration_real.yaml'))
+        self.declare_parameter('colorization_config', str(share / 'config' / 'theta_colorization.yaml'))
+        self.color_policy = load_color_policy(self.get_parameter('colorization_config').value)
+        self.mount_override = camera_in_lidar(self.color_policy)
+        self.declare_parameter('fixed_frame', 'sirius3/odom')
         self.declare_parameter('lidar_topic', '/velodyne_points')
         self.declare_parameter('output_topic', '/velodyne_points_colored')
         # 'compressed' は /theta/dual_fisheye/image_raw/compressed、'raw' は生Image。
@@ -95,9 +100,9 @@ class ThetaColorizeCloudNode(Node):
         # フォールバック: THETAのLiDARフレームにおける位置[m]と姿勢[deg]（ZYX）
         self.declare_parameter('theta_xyz', [0.0, 0.0, 0.285])
         self.declare_parameter('theta_rpy_degrees', [0.0, 0.0, 0.0])
-        # 対応させる画像の最大時間差[s]。これを超えたら色を付けない（既定は最新画像にフォールバック）
-        self.declare_parameter('max_image_age', 0.35)
-        self.declare_parameter('fallback_to_latest_image', True)
+        # 最大時間差[s]。古い最新画像へのフォールバックは既定で無効。
+        self.declare_parameter('max_image_age', float(self.color_policy['max_image_age_s']))
+        self.declare_parameter('fallback_to_latest_image', False)
         # 近傍/遠方の除外[m]
         self.declare_parameter('min_range', 0.5)
         self.declare_parameter('max_range', 80.0)
@@ -185,24 +190,33 @@ class ThetaColorizeCloudNode(Node):
     def _select_image(self, stamp_float):
         if not self.images:
             return None
-        if stamp_float is None or stamp_float <= 0.0:
-            return self.images[-1][1]
+        if stamp_float is None:
+            return None
         best, best_dt = None, self.max_image_age
         for img_stamp, bgr in self.images:
+            img_stamp += self.color_policy['image_time_offset_s']
             dt = abs(img_stamp - stamp_float)
             if dt <= best_dt:
-                best, best_dt = bgr, dt
+                best, best_dt = (img_stamp, bgr), dt
         if best is not None:
             return best
-        return self.images[-1][1] if self.fallback_latest else None
+        if self.fallback_latest:
+            t, bgr = self.images[-1]
+            return t+self.color_policy['image_time_offset_s'], bgr
+        return None
 
     # --------------------------------------------------------------- transform
     def _extrinsic(self, cloud):
         """cloudのframe -> カメラフレームへの (R, t)。p_cam = R @ p + t。"""
         frame = cloud.header.frame_id or self.camera_frame
+        if self.mount_override is not None:
+            if frame.lstrip('/') != self.color_policy['lidar_frame'].lstrip('/') or self.camera_frame != self.color_policy['camera_frame']:
+                raise ValueError('固定色付け校正と点群/カメラのframeが一致しません')
+            rot = self.mount_override[:3, :3].T
+            return rot, -rot @ self.mount_override[:3, 3]
         if self.tf_buffer is not None:
             stamp = cloud.header.stamp
-            lookup_time = stamp if (stamp.sec or stamp.nanosec) else Time()
+            lookup_time = Time.from_msg(stamp) if (stamp.sec or stamp.nanosec) else Time()
             try:
                 tf_msg = self.tf_buffer.lookup_transform(
                     self.camera_frame, frame, lookup_time, Duration(seconds=0.05))
@@ -219,17 +233,33 @@ class ThetaColorizeCloudNode(Node):
                 return quaternion_to_matrix(q.x, q.y, q.z, q.w), np.array([t.x, t.y, t.z])
         # フォールバック: THETAはLiDARフレームで theta_xyz にある。
         # p_cam = R_lidar_cam^T @ (p_lidar - t)
-        r_lidar_cam = rpy_to_matrix(self.theta_rpy[0], self.theta_rpy[1], self.theta_rpy[2])
+        r_lidar_cam = rpy_to_matrix(self.theta_rpy[0], self.theta_rpy[1], self.theta_rpy[2], pitch_sign=1.)
         return r_lidar_cam.T, -r_lidar_cam.T @ self.theta_xyz
+
+    def _image_transform(self, cloud, image_stamp):
+        rotation, translation = self._extrinsic(cloud)
+        cloud_stamp = cloud.header.stamp.sec + cloud.header.stamp.nanosec*1e-9
+        if abs(image_stamp-cloud_stamp) < 1.e-6:
+            return rotation, translation
+        if self.tf_buffer is not None:
+            try:
+                motion = self.tf_buffer.lookup_transform_full(
+                    cloud.header.frame_id, Time(nanoseconds=int(image_stamp*1.e9)),
+                    cloud.header.frame_id, Time.from_msg(cloud.header.stamp),
+                    self.get_parameter('fixed_frame').value, Duration(seconds=0.))
+                q, t = motion.transform.rotation, motion.transform.translation
+                delta = quaternion_to_matrix(q.x, q.y, q.z, q.w)
+                return rotation @ delta, rotation @ np.array([t.x, t.y, t.z])+translation
+            except (LookupException, ConnectivityException, ExtrapolationException):
+                pass
+        if abs(image_stamp-cloud_stamp) > self.color_policy['max_uncompensated_age_s']:
+            return None
+        return rotation, translation
 
     # ------------------------------------------------------------------ cloud
     def receive_cloud(self, msg):
         stamp_float = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        image = self._select_image(stamp_float)
-        if image is None:
-            self.get_logger().warning('THETA画像が未受信のため色付けできません',
-                                      throttle_duration_sec=5)
-            return
+        selected = self._select_image(stamp_float)
         points = pc2.read_points(msg, field_names=None, skip_nans=False).reshape(-1)
         xyz = np.stack([points['x'], points['y'], points['z']], axis=-1).astype(np.float64)
         intensity = (points['intensity'].astype(np.float32)
@@ -238,27 +268,24 @@ class ThetaColorizeCloudNode(Node):
         if count == 0:
             return
 
-        rotation, translation = self._extrinsic(msg)
-        points_cam = xyz @ rotation.T + translation
-
-        rgb = np.zeros(count, dtype=np.uint32)
-        valid = np.ones(count, dtype=bool)
-        if self.min_range > 0.0 or self.max_range > 0.0:
-            dist = np.linalg.norm(xyz, axis=-1)
-            if self.min_range > 0.0:
-                valid &= dist >= self.min_range
-            if self.max_range > 0.0:
-                valid &= dist <= self.max_range
-        uv, proj_ok = project_camera_frame_points(points_cam, self.calibration, image.shape[:2])
-        valid &= proj_ok
-        valid_idx = np.flatnonzero(valid)
-        if valid_idx.size:
-            bgr, keep = self._sample_rgb(image, uv[valid_idx])
-            sel = valid_idx[keep]
-            b = bgr[keep, 0].astype(np.uint32)
-            g = bgr[keep, 1].astype(np.uint32)
-            r = bgr[keep, 2].astype(np.uint32)
-            rgb[sel] = (r << 16) | (g << 8) | b
+        rgb = np.full(count, 0x808080, dtype=np.uint32)
+        if selected is not None:
+            image_stamp, image = selected
+            resolved = self._image_transform(msg, image_stamp)
+            if resolved is not None:
+                rotation, translation = resolved
+                points_cam = xyz @ rotation.T + translation
+                sampled, confidence, _ = visible_colors(points_cam, image, self.calibration, self.color_policy)
+                distance = np.linalg.norm(xyz, axis=1)
+                valid = (confidence > 0) & (distance >= self.min_range)
+                if self.max_range:
+                    valid &= distance <= self.max_range
+                if self.min_brightness:
+                    brightness = np.maximum.reduce([(sampled>>16)&255, (sampled>>8)&255, sampled&255])
+                    valid &= brightness >= self.min_brightness
+                rgb[valid] = sampled[valid]
+        else:
+            self.get_logger().warning('同期できるTHETA画像なし。形状を保持して灰色で配信します', throttle_duration_sec=5)
 
         cloud = color_cloud_preserving_fields(msg, rgb)
         self.pub.publish(cloud)
