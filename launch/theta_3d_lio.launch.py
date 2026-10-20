@@ -8,13 +8,18 @@ FAST-LIO2は camera_init->body のTFと /Odometry を配信する。
 ※ LiDAR-IMU 外部校正(extrinsic_T/R)と robot TF の整合は Phase 0 で調整する。
 """
 import os
+from pathlib import Path
+import tempfile
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, LogInfo
+from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from sirius_description.sensor_mounts import load_mount, fastlio_rotation
 
 
 def generate_launch_description():
@@ -32,6 +37,8 @@ def generate_launch_description():
             default_value=os.path.join(sirius, 'config')),
         DeclareLaunchArgument('config_file', default_value='fast_lio_sirius.yaml'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('mount_config', default_value='',
+                              description='Shared real rig calibration; blank preserves the selected YAML'),
         DeclareLaunchArgument('imu_height', default_value='0.65',
                               description='base_footprintからIMUまでの高さ[m]'),
     ]
@@ -48,15 +55,31 @@ def generate_launch_description():
                    '--z', PythonExpression(['-', imu_height])],
     )
 
-    lio = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(fast_lio_share, 'launch', 'mapping.launch.py')),
-        launch_arguments={
-            'config_path': config_path,
-            'config_file': config_file,
-            'use_sim_time': use_sim_time,
-            'rviz': 'false',
-        }.items(),
-    )
+    def calibrated_lio(context):
+        path, filename = config_path.perform(context), config_file.perform(context)
+        mount_path = LaunchConfiguration('mount_config').perform(context)
+        actions = []
+        if mount_path:
+            config = yaml.safe_load((Path(path)/filename).read_text())
+            params = config['/**']['ros__parameters']
+            if params['common']['lid_topic'] == '/velodyne_points_leveled':
+                raise ValueError('Calibrated FAST-LIO requires raw LiDAR points, not leveled points')
+            mount = load_mount(mount_path)
+            params['mapping']['extrinsic_R'] = fastlio_rotation(params, mount)
+            params['mapping']['extrinsic_est_en'] = False
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', prefix='sirius_mount_', delete=False) as f:
+                yaml.safe_dump(config, f, sort_keys=False)
+                resolved = Path(f.name)
+            actions += [LogInfo(msg=f'FAST-LIO real rig calibration: {mount_path}; rpy={mount["rig_rpy_degrees"]} deg'),
+                        RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(
+                            function=lambda _: resolved.unlink(missing_ok=True))]))]
+            path, filename = str(resolved.parent), resolved.name
+        actions.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(fast_lio_share, 'launch', 'mapping.launch.py')),
+            launch_arguments={'config_path': path, 'config_file': filename,
+                              'use_sim_time': use_sim_time, 'rviz': 'false'}.items()))
+        return actions
+
+    lio = OpaqueFunction(function=calibrated_lio)
 
     return LaunchDescription(args + [bridge_odom, bridge_base, lio])

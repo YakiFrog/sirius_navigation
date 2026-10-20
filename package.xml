@@ -9,6 +9,7 @@
 
   <!-- 依存関係にあるパッケージはここに記述 -->
   <depend>rclpy</depend>
+  <exec_depend>sirius_description</exec_depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
