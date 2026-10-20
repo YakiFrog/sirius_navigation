@@ -37,6 +37,8 @@ def generate_launch_description():
             default_value=os.path.join(sirius, 'config')),
         DeclareLaunchArgument('config_file', default_value='fast_lio_sirius.yaml'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('localization_mode', default_value='false',
+                              description='Disable accumulated map/path publication for localization'),
         DeclareLaunchArgument('mount_config', default_value='',
                               description='Shared real rig calibration; blank or none preserves the selected YAML'),
         DeclareLaunchArgument('imu_height', default_value='0.65',
@@ -58,20 +60,26 @@ def generate_launch_description():
     def calibrated_lio(context):
         path, filename = config_path.perform(context), config_file.perform(context)
         mount_path = LaunchConfiguration('mount_config').perform(context)
+        localization = LaunchConfiguration('localization_mode').perform(context).lower() in ('true', '1')
+        calibrated = bool(mount_path and mount_path.lower() != 'none')
         actions = []
-        if mount_path and mount_path.lower() != 'none':
+        if calibrated or localization:
             config = yaml.safe_load((Path(path)/filename).read_text())
             params = config['/**']['ros__parameters']
-            if params['common']['lid_topic'] == '/velodyne_points_leveled':
-                raise ValueError('Calibrated FAST-LIO requires raw LiDAR points, not leveled points')
-            mount = load_mount(mount_path)
-            params['mapping']['extrinsic_R'] = fastlio_rotation(params, mount)
-            params['mapping']['extrinsic_est_en'] = False
+            if calibrated:
+                if params['common']['lid_topic'] == '/velodyne_points_leveled':
+                    raise ValueError('Calibrated FAST-LIO requires raw LiDAR points, not leveled points')
+                mount = load_mount(mount_path)
+                params['mapping']['extrinsic_R'] = fastlio_rotation(params, mount)
+                params['mapping']['extrinsic_est_en'] = False
+                actions.append(LogInfo(msg=f'FAST-LIO real rig calibration: {mount_path}; rpy={mount["rig_rpy_degrees"]} deg'))
+            if localization:
+                params.setdefault('publish', {}).update(map_en=False, path_en=False)
+                actions.append(LogInfo(msg='FAST-LIO localization mode: accumulated map/path publication disabled'))
             with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', prefix='sirius_mount_', delete=False) as f:
                 yaml.safe_dump(config, f, sort_keys=False)
                 resolved = Path(f.name)
-            actions += [LogInfo(msg=f'FAST-LIO real rig calibration: {mount_path}; rpy={mount["rig_rpy_degrees"]} deg'),
-                        RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(
+            actions += [RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(
                             function=lambda _: resolved.unlink(missing_ok=True))]))]
             path, filename = str(resolved.parent), resolved.name
         actions.append(IncludeLaunchDescription(

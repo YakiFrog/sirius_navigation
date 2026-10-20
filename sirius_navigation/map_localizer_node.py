@@ -17,6 +17,8 @@ import rclpy
 import small_gicp
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped
 from rclpy.duration import Duration
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
@@ -254,16 +256,19 @@ class MapLocalizer(Node):
         self._voxel_map = None
         self._load_map()
 
+        self._registration_group = MutuallyExclusiveCallbackGroup()
+        self._heartbeat_group = MutuallyExclusiveCallbackGroup()
         self.create_subscription(PointCloud2, self.get_parameter("cloud_topic").value,
                                  self._on_cloud, 1)
         self.create_subscription(PoseWithCovarianceStamped, "/initialpose",
-                                 self._on_initial_pose, 1)
+                                 self._on_initial_pose, 1, callback_group=self._registration_group)
         self._pose_pub = self.create_publisher(PoseStamped, "/map_localizer/pose", 1)
         self._status_pub = self.create_publisher(String, "/map_localizer/status", 1)
-        self.create_timer(float(self.get_parameter("update_period").value), self._update)
+        self.create_timer(float(self.get_parameter("update_period").value), self._update,
+                          callback_group=self._registration_group)
         # Keep the last accepted map correction available between registrations,
         # including when a scan is rejected or temporarily unavailable.
-        self.create_timer(0.1, self._publish_tf)
+        self.create_timer(0.1, self._publish_tf, callback_group=self._heartbeat_group)
         self.get_logger().info(
             f"map_localizer started: map={self.get_parameter('map_path').value} "
             f"({0 if self._map_pc is None else int(self._map_pc.size())} pts), "
@@ -341,7 +346,6 @@ class MapLocalizer(Node):
             self.T_map_odom = T_map_base @ np.linalg.inv(T_odom_base)
         self.get_logger().info(
             f"/initialpose 適用: x={p.x:.2f} y={p.y:.2f} z={p.z:.2f} yaw={math.degrees(yaw):.1f}deg")
-        self._publish_tf()
 
     def _ensure_init(self):
         if self.T_map_odom is not None:
@@ -355,7 +359,6 @@ class MapLocalizer(Node):
             self.T_map_odom = T_map_base @ np.linalg.inv(T_odom_base)
         self.get_logger().info(
             f"初期姿勢を適用: x={x:.2f} y={y:.2f} z={z:.2f} yaw={math.degrees(yaw):.1f}deg")
-        self._publish_tf()
         return True
 
     def _publish_tf(self):
@@ -460,7 +463,6 @@ class MapLocalizer(Node):
         T_map_odom_new = T_map_lidar_new @ np.linalg.inv(T_odom_lidar)
         with self._lock:
             self.T_map_odom = T_map_odom_new
-        self._publish_tf()
         self._publish_pose(T_map_lidar_new, cloud)
         self._publish_status("ok " + status)
 
@@ -491,14 +493,22 @@ class MapLocalizer(Node):
         self._status_pub.publish(msg)
 
 
+def make_executor():
+    # Registration / TF heartbeat / TF reception must progress independently.
+    return MultiThreadedExecutor(num_threads=3)
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = MapLocalizer()
+    executor = make_executor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()
 

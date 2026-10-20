@@ -40,6 +40,8 @@ def generate_launch_description():
                               description='事前3D地図 (.npy/.ply/.pcd, mapフレーム)'),
         DeclareLaunchArgument('params_file', default_value=default_params),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('cloud_topic', default_value='/cloud_registered_body',
+                              description='Deskewed FAST-LIO body-frame scan matched to its odometry TF'),
         DeclareLaunchArgument('map_frame', default_value='map'),
         DeclareLaunchArgument('odom_frame', default_value='sirius3/odom'),
         DeclareLaunchArgument('base_frame', default_value='sirius3/base_footprint'),
@@ -63,6 +65,7 @@ def generate_launch_description():
             params_file,
             {
                 'map_path': map_path,
+                'cloud_topic': LaunchConfiguration('cloud_topic'),
                 'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
                 'map_frame': map_frame,
                 'odom_frame': odom_frame,
