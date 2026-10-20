@@ -95,14 +95,13 @@ def _pc2_to_xyz(msg: PointCloud2):
         return None
     dtype = np.dtype({
         "names": ["x", "y", "z"],
-        "formats": ["<f4", "<f4", "<f4"],
+        "formats": [(">" if msg.is_bigendian else "<") + "f4"] * 3,
         "offsets": [offsets["x"], offsets["y"], offsets["z"]],
         "itemsize": msg.point_step,
     })
-    arr = np.frombuffer(msg.data, dtype=dtype)
-    if msg.height > 1:
-        arr = arr.reshape(msg.height, msg.width)
-    return np.c_[arr["x"], arr["y"], arr["z"]].astype(np.float64)
+    arr = np.ndarray((msg.height, msg.width), dtype=dtype, buffer=msg.data,
+                     strides=(msg.row_step, msg.point_step))
+    return np.stack([arr["x"], arr["y"], arr["z"]], axis=-1).reshape(-1, 3).astype(np.float64)
 
 
 def _read_pcd_ascii(path):
@@ -262,6 +261,9 @@ class MapLocalizer(Node):
         self._pose_pub = self.create_publisher(PoseStamped, "/map_localizer/pose", 1)
         self._status_pub = self.create_publisher(String, "/map_localizer/status", 1)
         self.create_timer(float(self.get_parameter("update_period").value), self._update)
+        # Keep the last accepted map correction available between registrations,
+        # including when a scan is rejected or temporarily unavailable.
+        self.create_timer(0.1, self._publish_tf)
         self.get_logger().info(
             f"map_localizer started: map={self.get_parameter('map_path').value} "
             f"({0 if self._map_pc is None else int(self._map_pc.size())} pts), "
@@ -316,10 +318,11 @@ class MapLocalizer(Node):
         with self._lock:
             self._cloud = msg
 
-    def _lookup(self, target, source):
+    def _lookup(self, target, source, stamp=None):
         try:
+            when = rclpy.time.Time() if stamp is None else rclpy.time.Time.from_msg(stamp)
             tf = self._tf_buffer.lookup_transform(
-                target, source, rclpy.time.Time(), Duration(seconds=0.1))
+                target, source, when, Duration(seconds=0.1))
             return _matrix_from_transform(tf)
         except Exception:  # noqa: BLE001
             return None
@@ -389,7 +392,8 @@ class MapLocalizer(Node):
         if not self._ensure_init():
             return
 
-        T_odom_lidar = self._lookup(self.odom_frame, cloud.header.frame_id)
+        T_odom_lidar = self._lookup(self.odom_frame, cloud.header.frame_id,
+                                  cloud.header.stamp)
         if T_odom_lidar is None:
             return
         with self._lock:
