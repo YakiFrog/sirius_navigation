@@ -42,6 +42,7 @@ class SiriusBleGateway(Node):
         self.declare_parameter("enable_battery_client", False)
         self.declare_parameter("enable_ear_led_client", True)
         self.declare_parameter("battery_mac", "")
+        self.declare_parameter("battery_plaintext", True)
         self.declare_parameter("ear_led_left_mac", "7C:2C:67:64:BD:3A")
         self.declare_parameter("ear_led_right_mac", "7C:2C:67:64:A6:46")
         self.declare_parameter("ear_led_char_uuid", "beb5483e-36e1-4688-b7f5-ea07361b26a8")
@@ -66,6 +67,7 @@ class SiriusBleGateway(Node):
         self.enable_battery_client = self._bool_param("enable_battery_client")
         self.enable_ear_led_client = self._bool_param("enable_ear_led_client")
         self.battery_mac = self._str_param("battery_mac")
+        self.battery_plaintext = self._bool_param("battery_plaintext")
         self.ear_led_left_mac = self._str_param("ear_led_left_mac")
         self.ear_led_right_mac = self._str_param("ear_led_right_mac")
         self.ear_led_char_uuid = self._str_param("ear_led_char_uuid")
@@ -1045,7 +1047,8 @@ class SiriusBleGateway(Node):
 
         SolixBLE.const.RECONNECT_ATTEMPTS_MAX = 0
         self._patch_bleak_bluez_manager()
-        self._patch_solix_c300(SolixBLE, SolixBLEDevice, OriginalC300)
+        if self.battery_plaintext:
+            self._patch_solix_c300(SolixBLE, SolixBLEDevice, OriginalC300)
         return C300, ChargingStatus, BleakScanner, BLEDevice
 
     def _patch_bleak_bluez_manager(self):
@@ -1185,6 +1188,11 @@ class SiriusBleGateway(Node):
 
     async def _resolve_and_create_station(self, C300, BleakScanner, BLEDevice):
         self.get_logger().info(f"Resolving battery BLE device {self.battery_mac}")
+        if self.battery_scan_before_connect:
+            device = await BleakScanner.find_device_by_address(self.battery_mac, timeout=10.0)
+            if device is None:
+                raise RuntimeError(f"Battery not found during BLE scan: {self.battery_mac}")
+            return C300(device)
         details = {
             "path": f"/org/bluez/hci0/dev_{self.battery_mac.replace(':', '_')}",
             "props": {

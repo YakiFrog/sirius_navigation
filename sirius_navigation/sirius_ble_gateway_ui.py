@@ -49,6 +49,7 @@ BATTERY_OPTIONS = [
     ("バッテリーなし", ""),
     ("1台目  F4:9D:8A:7E:97:24", "F4:9D:8A:7E:97:24"),
     ("2台目  F4:9D:8A:57:90:E8", "F4:9D:8A:57:90:E8"),
+    ("3台目・実機用  7C:E9:13:76:E9:58", "7C:E9:13:76:E9:58"),
 ]
 
 
@@ -332,11 +333,13 @@ class SiriusBleGatewayWindow(QMainWindow):
             "enable_remote_server:=true",
             f"enable_battery_client:={enable_battery}",
             "enable_ear_led_client:=true",
-            "battery_scan_before_connect:=false",
+            "battery_scan_before_connect:=true",
             "publish_face_battery_params:=true",
         ]
         if battery_mac:
             args.append(f"battery_mac:={battery_mac}")
+            plaintext = "true" if battery_mac in {"F4:9D:8A:7E:97:24", "F4:9D:8A:57:90:E8"} else "false"
+            args.append(f"battery_plaintext:={plaintext}")
 
         self._append_log("起動コマンド: ros2 " + " ".join(args), "info")
         self.process.start("ros2", args)
