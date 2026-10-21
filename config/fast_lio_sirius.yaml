@@ -7,6 +7,17 @@
         filter_size_map: 0.5
         cube_side_length: 1000.0
         runtime_pos_log_enable: false
+        performance_diagnostics_enabled: true
+        lidar_quality:
+          enabled: true
+          min_points: 30
+          min_ratio: 0.10
+          max_residual: 0.15
+          weak_geometry_ratio: 0.003
+          degraded_weight: 0.20
+          recovery_scans: 10
+          max_position_correction: 0.50
+          max_rotation_correction: 0.15
         wheel:
           enabled: true
           topic: /odom
