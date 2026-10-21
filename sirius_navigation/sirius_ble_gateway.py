@@ -1236,6 +1236,27 @@ class SiriusBleGateway(Node):
             is_charging = getattr(charging_status, "name", "") == "BOTH"
 
         time_rem = float(getattr(power_station, "time_remaining", 0.0) or 0.0)
+        def power(name):
+            try:
+                value = float(getattr(power_station, name))
+            except (AttributeError, TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) and value >= 0 else None
+
+        def output_state(name):
+            try:
+                state = getattr(getattr(power_station, name), "name", None)
+            except (AttributeError, ValueError):
+                return None
+            return {"OUTPUT": "on", "NOT_CONNECTED": "off"}.get(state)
+
+        input_power, output_power = power("power_in"), power("power_out")
+        flow = "charging" if is_charging else "unknown"
+        if input_power is not None and output_power is not None:
+            flow = "charging" if input_power > output_power else "discharging" if output_power > input_power else "idle"
+        # 0xffff / 10 is the C300's unavailable-time value, not 6553.5 hours.
+        valid_time = math.isfinite(time_rem) and 0 < time_rem < 6553.5
+        stamp = time.time()
         return {
             "status": "connected" if percentage >= 0 else "connecting",
             "battery_level": float(percentage),
@@ -1246,14 +1267,27 @@ class SiriusBleGateway(Node):
             "temperature": float(getattr(power_station, "temperature", 0.0) or 0.0),
             "time_remaining": time_rem,
             "time_remaining_str": self._format_remaining_time(time_rem),
-            "stamp": time.time(),
+            "time_remaining_kind": flow,
+            "runtime_hours": time_rem if valid_time and flow == "discharging" else None,
+            "charge_remaining_hours": time_rem if valid_time and flow == "charging" else None,
+            "charge_complete_at": stamp + time_rem * 3600 if valid_time and flow == "charging" else None,
+            "device_mac": self.battery_mac,
+            "ports": {key: power(attr) for key, attr in {
+                "ac_input": "ac_power_in", "solar_input": "solar_power_in",
+                "ac_output": "ac_power_out", "dc_output": "dc_power_out",
+                "usb_c1": "usb_c1_power", "usb_c2": "usb_c2_power",
+                "usb_c3": "usb_c3_power", "usb_a1": "usb_a1_power",
+            }.items()},
+            "output_states": {"ac": output_state("ac_output"), "dc": output_state("dc_output")},
+            "stamp": stamp,
         }
 
     def _format_remaining_time(self, hours_float: float) -> str:
-        if hours_float <= 0 or hours_float >= 200:
+        if not math.isfinite(hours_float) or hours_float <= 0 or hours_float >= 6553.5:
             return ""
-        hours = int(hours_float)
-        minutes = int(round((hours_float - hours) * 60))
+        hours, minutes = divmod(int(round(hours_float * 60)), 60)
+        if not hours and not minutes:
+            return "1分未満"
         if hours > 0 and minutes > 0:
             return f"{hours}時間{minutes}分"
         if hours > 0:
