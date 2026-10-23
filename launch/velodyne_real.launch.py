@@ -15,4 +15,6 @@ def generate_launch_description():
             launch_arguments={'scan_input_topic': '/velodyne_points_leveled'}.items()),
         Node(package='sirius_navigation', executable='leveled_lidar_cloud_node',
              name='leveled_lidar_cloud', output='screen'),
+        Node(package='sirius_navigation', executable='velodyne_points_viz_node',
+             name='velodyne_points_viz', output='screen'),
     ])

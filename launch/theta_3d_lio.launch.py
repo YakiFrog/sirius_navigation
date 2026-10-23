@@ -39,6 +39,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('localization_mode', default_value='false',
                               description='Disable accumulated map/path publication for localization'),
+        DeclareLaunchArgument('odometry_only', default_value='false',
+                              description='Publish only odometry and TF for offline mapping bags'),
         DeclareLaunchArgument('mount_config', default_value='',
                               description='Shared real rig calibration; blank or none preserves the selected YAML'),
         DeclareLaunchArgument('imu_height', default_value='0.65',
@@ -61,9 +63,10 @@ def generate_launch_description():
         path, filename = config_path.perform(context), config_file.perform(context)
         mount_path = LaunchConfiguration('mount_config').perform(context)
         localization = LaunchConfiguration('localization_mode').perform(context).lower() in ('true', '1')
+        odometry_only = LaunchConfiguration('odometry_only').perform(context).lower() in ('true', '1')
         calibrated = bool(mount_path and mount_path.lower() != 'none')
         actions = []
-        if calibrated or localization:
+        if calibrated or localization or odometry_only:
             config = yaml.safe_load((Path(path)/filename).read_text())
             params = config['/**']['ros__parameters']
             if calibrated:
@@ -77,6 +80,14 @@ def generate_launch_description():
                 params.setdefault('publish', {}).update(map_en=False, path_en=False)
                 params['performance_diagnostics_enabled'] = True
                 actions.append(LogInfo(msg='FAST-LIO localization mode: accumulated map/path publication disabled'))
+            if odometry_only:
+                params.setdefault('publish', {}).update(
+                    map_en=False, path_en=False, scan_publish_en=False,
+                    dense_publish_en=False, scan_bodyframe_pub_en=False)
+                params.setdefault('pcd_save', {})['pcd_save_en'] = False
+                actions.append(LogInfo(
+                    msg='FAST-LIO odometry-only mode: only /Odometry and TF are published '
+                        '(map, path, and point clouds disabled)'))
             with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', prefix='sirius_mount_', delete=False) as f:
                 yaml.safe_dump(config, f, sort_keys=False)
                 resolved = Path(f.name)

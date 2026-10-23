@@ -9,6 +9,7 @@ class TwistMuxMonitor(Node):
         super().__init__('twist_mux_monitor')
         
         # 最後にメッセージを受信した時刻を保持
+        self.last_web_time = 0.0
         self.last_teleop_time = 0.0
         self.last_direct_time = 0.0
         self.last_nav_time = 0.0
@@ -20,6 +21,7 @@ class TwistMuxMonitor(Node):
         self.current_priority = 0
         
         # 購読設定
+        self.create_subscription(Twist, 'cmd_vel_web', self.web_callback, 10)
         self.create_subscription(Twist, 'cmd_vel_teleop', self.teleop_callback, 10)
         self.create_subscription(Twist, 'cmd_vel_direct', self.direct_callback, 10)
         self.create_subscription(Twist, 'cmd_vel_nav', self.nav_callback, 10)
@@ -33,6 +35,9 @@ class TwistMuxMonitor(Node):
         self.create_timer(0.1, self.check_status)
         
         self.get_logger().info('✅ TwistMux Monitor started')
+
+    def web_callback(self, msg):
+        self.last_web_time = self.get_clock().now().nanoseconds / 1e9
 
     def teleop_callback(self, msg):
         self.last_teleop_time = self.get_clock().now().nanoseconds / 1e9
@@ -68,6 +73,9 @@ class TwistMuxMonitor(Node):
         elif (now - self.last_direct_time < timeout):
             winner = "DIRECT (Manual)"
             priority = 110
+        elif (now - self.last_web_time < timeout):
+            winner = "WEB (Manual)"
+            priority = 105
         # 3. TELEOP (100)
         elif (now - self.last_teleop_time < timeout):
             winner = "TELEOP (Manual)"
@@ -84,7 +92,7 @@ class TwistMuxMonitor(Node):
             
             icon = "⚪"
             if priority == 255: icon = "🛑"
-            elif priority == 100: icon = "🎮"
+            elif priority in (100, 105, 110): icon = "🎮"
             elif priority == 10: icon = "🤖"
             
             self.get_logger().info(f'[TwistMux] {icon} Active Source: {winner} (Priority: {priority})')

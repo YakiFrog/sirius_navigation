@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'leveled_lidar_cloud_node = sirius_navigation.leveled_lidar_cloud_node:main',
+            'velodyne_points_viz_node = sirius_navigation.velodyne_points_viz_node:main',
             'cancel_navigation = sirius_navigation.cancel_navigation:main',
             'assisted_teleop = sirius_navigation.assisted_teleop:main',
             'keyboard_teleop_ja = sirius_navigation.keyboard_teleop_ja:main',

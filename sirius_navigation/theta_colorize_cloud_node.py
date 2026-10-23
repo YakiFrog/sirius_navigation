@@ -110,6 +110,9 @@ class ThetaColorizeCloudNode(Node):
         self.declare_parameter('min_brightness', 0)
         # 画像キャッシュ枚数
         self.declare_parameter('image_cache_size', 20)
+        # Wait for the next camera image and delayed odometry TF before choosing
+        # the closest image. Sensor timestamps and point geometry stay unchanged.
+        self.declare_parameter('image_wait_timeout', 0.3)
 
         with open(self.get_parameter('calibration').value) as f:
             self.calibration = yaml.safe_load(f)
@@ -127,6 +130,8 @@ class ThetaColorizeCloudNode(Node):
         cache_size = max(1, int(self.get_parameter('image_cache_size').value))
 
         self.images = deque(maxlen=cache_size)  # (stamp_float, bgr)
+        self.image_wait_timeout = max(0.0, float(self.get_parameter('image_wait_timeout').value))
+        self.pending_clouds = deque()
         self.last_warn = 0.0
         self.tf_buffer = None
         self.tf_listener = None
@@ -149,6 +154,7 @@ class ThetaColorizeCloudNode(Node):
         self.lidar_sub = self.create_subscription(
             PointCloud2, self.get_parameter('lidar_topic').value, self.receive_cloud,
             qos_profile_sensor_data)
+        self.pending_timer = self.create_timer(0.02, self._flush_pending_clouds)
         transport = str(self.get_parameter('image_transport').value).lower()
         if transport == 'raw':
             self.image_sub = self.create_subscription(
@@ -258,6 +264,20 @@ class ThetaColorizeCloudNode(Node):
 
     # ------------------------------------------------------------------ cloud
     def receive_cloud(self, msg):
+        if self.image_wait_timeout <= 0:
+            self._colorize_cloud(msg)
+            return
+        # Bound memory even if image decoding/color projection falls behind.
+        if len(self.pending_clouds) >= 20:
+            self._colorize_cloud(self.pending_clouds.popleft()[1])
+        self.pending_clouds.append((time.monotonic(), msg))
+
+    def _flush_pending_clouds(self):
+        now = time.monotonic()
+        while self.pending_clouds and now - self.pending_clouds[0][0] >= self.image_wait_timeout:
+            self._colorize_cloud(self.pending_clouds.popleft()[1])
+
+    def _colorize_cloud(self, msg):
         stamp_float = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         selected = self._select_image(stamp_float)
         points = pc2.read_points(msg, field_names=None, skip_nans=False).reshape(-1)

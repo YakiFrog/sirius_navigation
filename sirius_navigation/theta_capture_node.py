@@ -67,7 +67,7 @@ class ThetaCaptureNode(Node):
 
         self.cap = None
         self.active_device = None
-        self.last_publish = 0.0
+        self.next_publish = 0.0
         self.pub = self.create_publisher(CompressedImage, self.out_topic, qos_profile_sensor_data)
         # RVizのImage表示(Reliable)に合わせて生ImageはReliableで配信する。
         self.pub_raw = self.create_publisher(Image, self.get_parameter('raw_topic').value, 1) if self.publish_raw else None
@@ -129,6 +129,17 @@ class ThetaCaptureNode(Node):
         self._rotate_lens(frame, self.back_center, self.rotate_back)
         return frame
 
+    def _should_publish(self, now):
+        """Keep the requested cadence despite jitter in the capture timestamps."""
+        if now < self.next_publish:
+            return False
+        period = 1.0 / self.fps
+        if not self.next_publish or now - self.next_publish >= period:
+            self.next_publish = now + period
+        else:
+            self.next_publish += period
+        return True
+
     def _loop(self):
         warned = False
         while rclpy.ok():
@@ -152,10 +163,8 @@ class ThetaCaptureNode(Node):
                 time.sleep(0.5)
                 continue
             frame = self._apply_rotations(frame)
-            now = time.time()
-            if now - self.last_publish < 1.0 / self.fps:
+            if not self._should_publish(time.monotonic()):
                 continue
-            self.last_publish = now
             captured_stamp = self.get_clock().now().to_msg()
             ok, encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
             if not ok:

@@ -126,13 +126,13 @@ def test_live_uses_synchronized_images_preserves_scan_and_does_not_guess_stale_r
         original = read_points(msg)
         messages = []
         monkeypatch.setattr(node,'pub',SimpleNamespace(publish=messages.append))
-        node.receive_cloud(msg)
+        node._colorize_cloud(msg)
         colored = read_points(messages[-1])
         np.testing.assert_array_equal(colored['rgb'].view(np.uint32), [0xff0000,0x808080])
         for name in ('x','y','z','time','ring'):
             np.testing.assert_array_equal(colored[name],original[name])
         msg.header.stamp.nanosec = 300_000_000
-        node.receive_cloud(msg)
+        node._colorize_cloud(msg)
         np.testing.assert_array_equal(read_points(messages[-1])['rgb'].view(np.uint32), [0x808080]*2)
         assert messages[-1].header == msg.header
     finally:
