@@ -25,9 +25,11 @@ def test_only_legacy_devices_receive_plaintext_protocol_patch(monkeypatch, plain
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     gateway = SimpleNamespace(battery_plaintext=plaintext, get_logger=lambda: Mock(),
-                              _patch_bleak_bluez_manager=Mock(), _patch_solix_c300=Mock())
+                              _patch_bleak_bluez_manager=Mock(), _patch_solix_c300=Mock(),
+                              _patch_solix_notification_futures=Mock())
     assert SiriusBleGateway._load_solix_support(gateway) == (station, charging, scanner, device)
     gateway._patch_bleak_bluez_manager.assert_called_once_with()
+    gateway._patch_solix_notification_futures.assert_called_once_with(base)
     if plaintext:
         gateway._patch_solix_c300.assert_called_once_with(modules['SolixBLE'], base, station)
     else:
