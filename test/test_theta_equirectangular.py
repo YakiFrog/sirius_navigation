@@ -8,6 +8,37 @@ from sirius_navigation.sam3_experiment_client import mono_transport
 from sirius_navigation.theta_sam3_evaluation import reference_rays,sample_view_maps
 
 
+def test_experiment_client_retries_transient_read_timeout(monkeypatch):
+    from types import SimpleNamespace
+    import requests
+    from sirius_navigation.sam3_experiment_client import Sam3ExperimentClient
+    client=Sam3ExperimentClient();calls=[]
+    def get(*args,**kwargs):
+        calls.append(kwargs['timeout'])
+        if len(calls)==1:raise requests.ReadTimeout('temporary server stall')
+        return SimpleNamespace(raise_for_status=lambda:None,json=lambda:{'ready':True})
+    monkeypatch.setattr(client.http,'get',get)
+    assert client.get('/debug_state')=={'ready':True}
+    assert len(calls)==2 and calls[0][1]==30
+    client.http.close()
+
+
+def test_experiment_client_limits_retries_and_preserves_deadline(monkeypatch):
+    import time
+    import requests
+    from sirius_navigation.sam3_experiment_client import Sam3ExperimentClient
+    client=Sam3ExperimentClient();calls=[]
+    def get(*args,**kwargs):
+        calls.append(kwargs['timeout']);raise requests.ReadTimeout('unavailable')
+    monkeypatch.setattr(client.http,'get',get)
+    with pytest.raises(requests.ReadTimeout):client.get('/debug_state')
+    assert len(calls)==3
+    calls.clear()
+    with pytest.raises(TimeoutError):client.get('/debug_state',deadline=time.monotonic()-1)
+    assert calls==[]
+    client.http.close()
+
+
 def test_cardinal_directions_and_floor_depression():
     rays=np.array([[1,0,0],[0,-1,0],[0,1,0],[1,0,-1]],float)
     u,v=rays_to_equirectangular(rays,1024,512)
@@ -55,7 +86,7 @@ def test_experiment_client_does_not_read_stale_results_after_timeout():
     from types import SimpleNamespace
     from sirius_navigation.sam3_experiment_client import Sam3ExperimentClient
     client=Sam3ExperimentClient(timeout=0)
-    client.get=lambda path:{'network_frame_version':4}
+    client.get=lambda path,**kwargs:{'network_frame_version':4}
     client.http.post=lambda *a,**k:SimpleNamespace(raise_for_status=lambda:None)
     client.http.get=lambda *a,**k:pytest.fail('stale PNG was requested')
     with pytest.raises(TimeoutError):client.infer(np.zeros((4,4,3),np.uint8))
@@ -67,7 +98,7 @@ def test_experiment_client_rejects_mismatched_frame_png():
     from sirius_navigation.sam3_experiment_client import Sam3ExperimentClient
     client=Sam3ExperimentClient()
     states=iter([{'network_frame_version':4},{'network_frame_version':5,'sam3_inference_frame_version':5}])
-    client.get=lambda path:next(states)
+    client.get=lambda path,**kwargs:next(states)
     client.http.post=lambda *a,**k:SimpleNamespace(raise_for_status=lambda:None)
     client.http.get=lambda *a,**k:SimpleNamespace(raise_for_status=lambda:None,headers={'X-Frame-Version':'3'})
     with pytest.raises(RuntimeError,match='stale'):client.infer(np.zeros((4,4,3),np.uint8))

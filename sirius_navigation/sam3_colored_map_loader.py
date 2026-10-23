@@ -8,6 +8,7 @@ import cv2
 from std_msgs.msg import Header
 import json
 import os
+from sirius_navigation.indexed_road_map import indexed_rgb
 
 
 def labels_to_cost_grids(grid, labels):
@@ -61,9 +62,8 @@ class SAM3ColoredMapLoader(Node):
         self.declare_parameter('publish_once', True)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('z_offset', -0.2)
-        # semantic: .colored.pgm のクラス色
-        # texture:  .texture.png の実写路面テクスチャ（有効な画素だけ）
-        self.declare_parameter('visualization_mode', 'semantic')
+        # Both modes use PGM + JSON only. RGB appearance is encoded in PGM.
+        self.declare_parameter('visualization_mode', 'indexed')
         self.declare_parameter('cloud_topic', '')
         self.declare_parameter('semantic_include_structure', False)
         # コストは .colored.json の labels[].global_cost / local_cost を使用する。
@@ -87,12 +87,10 @@ class SAM3ColoredMapLoader(Node):
             self.get_parameter('cloud_topic').get_parameter_value().string_value
         )
         default_cloud_topics = {
-            'texture': '/sam3/static_texture_map_cloud',
+            'indexed': '/sam3/static_colored_map_cloud',
             'semantic': '/sam3/static_colored_map_cloud',
         }
-        if self.visualization_mode == 'both':
-            self.cloud_topics = default_cloud_topics
-        elif self.visualization_mode in default_cloud_topics:
+        if self.visualization_mode in default_cloud_topics:
             self.cloud_topics = {
                 self.visualization_mode: (
                     requested_cloud_topic
@@ -198,75 +196,24 @@ class SAM3ColoredMapLoader(Node):
 
         self.get_logger().info(f'Map Loaded: {grid.shape[1]}x{grid.shape[0]} at {res}m/pix')
 
-        if self.visualization_mode not in ('semantic', 'texture', 'both'):
-            self.get_logger().error(
-                f'Unknown visualization_mode={self.visualization_mode!r}; '
-                "use 'semantic', 'texture', or 'both'."
+        try:
+            colors, mask = indexed_rgb(
+                grid, meta, self.visualization_mode, self.semantic_include_structure
             )
+        except ValueError as error:
+            self.get_logger().error(str(error))
             return
-
-        # Select RViz visualizations independently from the semantic grids used
-        # by Nav2. In both mode, each representation gets its own cloud topic.
-        if self.visualization_mode in ('texture', 'both'):
-            texture_file = base_path + '.texture.png'
-            texture = cv2.imread(texture_file, cv2.IMREAD_UNCHANGED)
-            if texture is None:
-                self.get_logger().error(
-                    f'Texture file not found or unreadable: {texture_file}'
-                )
-            elif texture.ndim != 3 or texture.shape[2] != 4 or texture.shape[:2] != grid.shape:
-                self.get_logger().error(
-                    f'Incompatible texture image: {texture_file} '
-                    f'(texture={texture.shape}, map={grid.shape})'
-                )
-            else:
-                # Texture is saved in image/PGM orientation, while ROS map rows
-                # grow in +Y. Flip it into ROS orientation.
-                texture = texture[::-1, :]
-                rows, cols = np.where(texture[:, :, 3] > 0)
-                if len(rows) == 0:
-                    self.get_logger().warn(
-                        'Texture image has no valid (alpha > 0) cells.'
-                    )
-                else:
-                    # OpenCV loads BGRA; PointCloud2 expects packed RGB.
-                    rgb_list = texture[rows, cols, :3][:, ::-1]
-                    self.cloud_msgs['texture'] = self._create_cloud(
-                        rows, cols, rgb_list, res, origin, self.z_offset
-                    )
-                    self.get_logger().info(
-                        f'RViz visualization: real road texture '
-                        f'({len(rows)} colored cells from {texture_file}); '
-                        f'topic={self.cloud_topics["texture"]}'
-                    )
-
-        if self.visualization_mode in ('semantic', 'both'):
-            if self.semantic_include_structure:
-                semantic_mask = grid > 0
-            else:
-                semantic_ids = [
-                    int(idx_str)
-                    for idx_str, info in meta.get('labels', {}).items()
-                    if str(info.get('name', '')).lower()
-                    not in ('unknown', 'wall', 'floor')
-                ]
-                semantic_mask = np.isin(grid, semantic_ids)
-            rows, cols = np.where(semantic_mask)
-            if len(rows) == 0:
-                self.get_logger().warn('No semantic class cells found in map.')
-            else:
-                indices = grid[rows, cols]
-                rgb_list = palette[indices]
-                semantic_z = self.z_offset + (0.01 if self.visualization_mode == 'both' else 0.0)
-                self.cloud_msgs['semantic'] = self._create_cloud(
-                    rows, cols, rgb_list, res, origin, semantic_z
-                )
-                self.get_logger().info(
-                    f'RViz visualization: semantic class colors '
-                    f'({len(rows)} cells, '
-                    f'include_structure={self.semantic_include_structure}); '
-                    f'topic={self.cloud_topics["semantic"]}'
-                )
+        rows, cols = np.where(mask)
+        if len(rows) == 0:
+            self.get_logger().warn('No displayable PGM cells found in map.')
+        else:
+            self.cloud_msgs[self.visualization_mode] = self._create_cloud(
+                rows, cols, colors[rows, cols], res, origin, self.z_offset
+            )
+            self.get_logger().info(
+                f'RViz visualization: PGM + JSON ({self.visualization_mode}, '
+                f'{len(rows)} cells); topic={self.cloud_topics[self.visualization_mode]}'
+            )
 
         self.cloud_msg = next(iter(self.cloud_msgs.values()), None)
 

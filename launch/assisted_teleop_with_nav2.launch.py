@@ -13,6 +13,9 @@ def generate_launch_description():
     
     # Paths to default files
     default_map = os.path.expanduser('~/sirius_jazzy_ws/maps_waypoints/maps/0422map.yaml')
+    grouped_map = os.path.join(os.path.dirname(default_map), '0422map', '0422map.yaml')
+    if not os.path.isfile(default_map) and os.path.isfile(grouped_map):
+        default_map = grouped_map
     default_params_file = os.path.expanduser('~/sirius_jazzy_ws/params/nav2_params_sim.yaml')
     
     # Declare arguments

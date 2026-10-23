@@ -21,8 +21,24 @@ class Sam3ExperimentClient:
         self.server=server.rstrip('/');self.timeout=timeout;self.before=None
         self.http=requests.Session()
 
-    def get(self,path):
-        r=self.http.get(self.server+path,timeout=5);r.raise_for_status();return r.json()
+    def _get_response(self,path,deadline=None):
+        # GET is safe to retry. Never retry an upload: it increments the server's
+        # frame version and could make an inference result refer to another input.
+        deadline=time.monotonic()+90 if deadline is None else deadline
+        for attempt in range(3):
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise TimeoutError(f'SAM3 response deadline expired: {path}')
+            try:
+                response=self.http.get(self.server+path,timeout=(min(5.,remaining),min(30.,remaining)))
+                response.raise_for_status()
+                return response
+            except (requests.Timeout,requests.ConnectionError):
+                remaining=deadline-time.monotonic()
+                if attempt==2 or remaining<=0:raise
+                time.sleep(min(.2*(attempt+1),remaining))
+
+    def get(self,path,deadline=None):
+        return self._get_response(path,deadline).json()
 
     def post(self,path,payload):
         r=self.http.post(self.server+path,json=payload,timeout=10);r.raise_for_status()
@@ -51,14 +67,14 @@ class Sam3ExperimentClient:
         response=self.http.post(self.server+'/upload_frame',data=self.last_upload,timeout=10)
         response.raise_for_status()
         while time.monotonic()-started<self.timeout:
-            state=self.get('/debug_state');net=state['network_frame_version']
+            state=self.get('/debug_state',deadline=started+self.timeout);net=state['network_frame_version']
             if net>target:raise RuntimeError('Another publisher changed the SAM3 input')
             if net==target and state['sam3_inference_frame_version']==target:break
             time.sleep(.03)
         else:raise TimeoutError(f'SAM3 did not finish frame {target}')
         maps=[]
         for path in ('/semantic_map.png','/semantic_score.png'):
-            r=self.http.get(self.server+path,timeout=10);r.raise_for_status()
+            r=self._get_response(path)
             if int(r.headers.get('X-Frame-Version',-1))!=target:
                 raise RuntimeError('SAM3 returned a stale or mismatched PNG')
             decoded=cv2.imdecode(np.frombuffer(r.content,np.uint8),cv2.IMREAD_GRAYSCALE)

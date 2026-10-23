@@ -5,7 +5,7 @@
   - RTAB-Map  : /velodyne_points を外部オドメトリ(/Odometry)で取り込み、
                 ループ閉じ込めしつつ /cloud_map と /rtabmap/grid_map を配信
 
-保存は save3d（/cloud_map を指定）で行う。map->odom は配信しない（自己位置推定は loc3d が担当）。
+保存は save3d（/cloud_map を指定）で行う。地図生成中は map->odom を配信するため、loc3dとは併用しない。
 """
 import os
 
@@ -45,11 +45,14 @@ def generate_launch_description():
             'Mem/IncrementalMemory': 'true',
             'Mem/InitWMWithAllNodes': 'false',
             'RGBD/ProximityBySpace': 'true',
+            'RGBD/ProximityPathMaxNeighbors': '1',
+            'RGBD/ProximityOdomGuess': 'true',
             'RGBD/AngularUpdate': '0.05',
             'RGBD/LinearUpdate': '0.05',
             'RGBD/OptimizeFromGraphEnd': 'false',
             'Grid/FromDepth': 'false',
-            'Reg/Strategy': '0',
+            # LiDAR-only registration: 0 is visual and requires camera features.
+            'Reg/Strategy': '1',
             'Reg/Force3DoF': 'true',
             'Mem/MaxSize': '2000',
             'Rtabmap/DetectionRate': '2.0',

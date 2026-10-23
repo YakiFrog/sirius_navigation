@@ -8,6 +8,10 @@ import subprocess
 import sys
 import threading
 import time
+try:
+    from .ear_led_patterns import make_test as make_ear_test, output as ear_test_output
+except ImportError:  # direct script execution
+    from ear_led_patterns import make_test as make_ear_test, output as ear_test_output
 import urllib.request
 
 import rclpy
@@ -100,6 +104,7 @@ class SiriusBleGateway(Node):
             self._on_blinker_command,
             10,
         )
+        self._ear_test_sub = self.create_subscription(String, '/sirius/ear_led_test', self._on_ear_led_test, 10)
         self._remote_command_sub = self.create_subscription(
             String,
             "/sirius/remote_command",
@@ -174,6 +179,10 @@ class SiriusBleGateway(Node):
         self._ear_led_last_right_command = "M:1"
         self._ear_led_last_mode = "normal"
         self._last_ear_led_status = None
+        self._ear_led_test = None
+        self._ear_led_test_request_id = ''
+        self._ear_led_error = ''
+        self._ear_status_timer = self.create_timer(1.0, self._ear_led_heartbeat)
 
         # Battery speech trigger state machine variables
         self._has_spoken_40 = False
@@ -298,6 +307,26 @@ class SiriusBleGateway(Node):
             mode=self._ear_led_mode_text(),
             force=True,
         )
+
+
+    def _on_ear_led_test(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            test = make_ear_test(data, time.monotonic())
+            request_id = data.get('request_id','')
+            if not isinstance(request_id,str) or len(request_id)>80:
+                raise ValueError('request_id is invalid')
+        except (ValueError,TypeError) as error:
+            self.get_logger().warning('Ear LED test rejected: '+str(error))
+            return
+        self._ear_led_test = test
+        self._ear_led_test_request_id = request_id
+        self._ear_led_heartbeat()
+
+    def _ear_led_heartbeat(self):
+        status = ('disabled' if not self.enable_ear_led_client else
+                  'connected' if self._ear_leds_connected() else 'connecting')
+        self._publish_ear_led_status(status, error=self._ear_led_error, force=True)
 
     def _on_stop_command(self, msg: Bool):
         self._ear_led_stop = bool(msg.data)
@@ -821,9 +850,14 @@ class SiriusBleGateway(Node):
                     await asyncio.sleep(3.0)
                     continue
 
+                manual = ear_test_output(self._ear_led_test, time.monotonic())
+                if self._ear_led_test and manual is None:
+                    self._ear_led_test = None
                 if self._ear_led_stop:
                     left_command = right_command = "C:255,0,0"
                     mode = "stop"
+                elif manual is not None:
+                    left_command, right_command, mode = manual
                 elif not self._ear_led_blinking or self._ear_led_blink_on:
                     left_command = self._ear_led_left_command
                     right_command = self._ear_led_right_command
@@ -836,7 +870,7 @@ class SiriusBleGateway(Node):
                 self._ear_led_last_left_command = left_command
                 self._ear_led_last_right_command = right_command
                 self._ear_led_last_mode = mode
-                if self._ear_led_blinking and not self._ear_led_stop:
+                if self._ear_led_blinking and not self._ear_led_stop and manual is None:
                     self._ear_led_blink_on = not self._ear_led_blink_on
 
                 self._publish_ear_led_status(
@@ -853,7 +887,7 @@ class SiriusBleGateway(Node):
                 self._publish_ear_led_status("reconnecting", error=str(exc))
                 await asyncio.sleep(3.0)
 
-            await asyncio.sleep(max(0.1, self.ear_led_period))
+            await asyncio.sleep(0.1 if self._ear_led_test else max(0.1, self.ear_led_period))
 
         await self._disconnect_ear_leds()
         self._publish_ear_led_status("disconnected")
@@ -921,10 +955,21 @@ class SiriusBleGateway(Node):
         mode: str = "",
         force: bool = False,
     ):
+        if error:
+            self._ear_led_error = error[:160]
+        elif status == 'connected':
+            self._ear_led_error = ''
+        test = getattr(self, '_ear_led_test', None)
+        remaining = max(0, test['until']-time.monotonic()) if test else 0
         left_command = left_command or self._ear_led_last_left_command or self._ear_led_left_command
         right_command = right_command or self._ear_led_last_right_command or self._ear_led_right_command
         mode = mode or self._ear_led_last_mode or self._ear_led_mode_text()
         data = {
+            "enabled": self.enable_ear_led_client,
+            "web_test_supported": True,
+            "test_pattern": test['pattern'] if remaining else None,
+            "test_remaining": remaining,
+            "test_request_id": getattr(self, '_ear_led_test_request_id', ''),
             "status": status,
             "left_mac": self.ear_led_left_mac,
             "right_mac": self.ear_led_right_mac,
@@ -1047,9 +1092,38 @@ class SiriusBleGateway(Node):
 
         SolixBLE.const.RECONNECT_ATTEMPTS_MAX = 0
         self._patch_bleak_bluez_manager()
+        self._patch_solix_notification_futures(SolixBLEDevice)
         if self.battery_plaintext:
             self._patch_solix_c300(SolixBLE, SolixBLEDevice, OriginalC300)
         return C300, ChargingStatus, BleakScanner, BLEDevice
+
+    def _patch_solix_notification_futures(self, device_class):
+        """Ignore duplicate/late replies to completed SolixBLE request futures."""
+        if getattr(device_class, "_sirius_future_patch_applied", False):
+            return
+        original = device_class._process_notification
+
+        async def process_notification(device, client, handle, data):
+            if device._client is not client:
+                return
+            pattern, cmd, payload = device._split_packet(data)
+            futures = device._packet_futures.get(pattern + cmd)
+            if futures is not None:
+                device._last_packet_timestamp = time.time()
+                for future in tuple(futures):
+                    if not future.done():
+                        future.set_result(payload)
+                return
+            # On a reused connection the battery can still stream packets from
+            # the previous encrypted session before the new handshake finishes.
+            if (pattern in (bytes.fromhex("03010f"), bytes.fromhex("030111"))
+                    and cmd in (bytes.fromhex("c402"), bytes.fromhex("4300"), bytes.fromhex("c405"))
+                    and getattr(device, "_shared_secret", None) is None):
+                return
+            return await original(device, client, handle, data)
+
+        device_class._process_notification = process_notification
+        device_class._sirius_future_patch_applied = True
 
     def _patch_bleak_bluez_manager(self):
         try:
@@ -1189,6 +1263,16 @@ class SiriusBleGateway(Node):
     async def _resolve_and_create_station(self, C300, BleakScanner, BLEDevice):
         self.get_logger().info(f"Resolving battery BLE device {self.battery_mac}")
         if self.battery_scan_before_connect:
+            # A connection can survive a previous gateway process. Connected
+            # batteries may stop advertising, so discovery alone cannot find them.
+            try:
+                device = await self._find_connected_battery(BLEDevice)
+            except Exception as exc:
+                self.get_logger().debug(f"Connected battery lookup unavailable: {exc!r}")
+                device = None
+            if device is not None:
+                self.get_logger().info(f"Reusing existing BlueZ battery connection: {self.battery_mac}")
+                return C300(device)
             device = await BleakScanner.find_device_by_address(self.battery_mac, timeout=10.0)
             if device is None:
                 raise RuntimeError(f"Battery not found during BLE scan: {self.battery_mac}")
@@ -1219,6 +1303,34 @@ class SiriusBleGateway(Node):
             rssi=-99,
         )
         return C300(ble_device)
+
+    async def _find_connected_battery(self, BLEDevice):
+        """Resolve a real, connected BlueZ device without requiring advertising."""
+        if sys.platform != "linux":
+            return None
+        from dbus_fast import BusType, Message, MessageType
+        from dbus_fast.aio import MessageBus
+
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        try:
+            reply = await asyncio.wait_for(bus.call(Message(
+                destination="org.bluez", path="/",
+                interface="org.freedesktop.DBus.ObjectManager", member="GetManagedObjects",
+            )), timeout=3.0)
+            if reply.message_type == MessageType.ERROR:
+                raise RuntimeError(f"BlueZ device lookup failed: {reply.error_name}")
+            for path, interfaces in reply.body[0].items():
+                props = {key: value.value for key, value in
+                         interfaces.get("org.bluez.Device1", {}).items()}
+                if (props.get("Address", "").upper() == self.battery_mac.upper()
+                        and props.get("Connected") is True):
+                    return BLEDevice(
+                        address=props["Address"], name=props.get("Name"),
+                        details={"path": path, "props": props},
+                    )
+            return None
+        finally:
+            bus.disconnect()
 
     def _build_battery_status(self, power_station, ChargingStatus) -> dict:
         percentage = getattr(power_station, "battery_percentage", -1)
